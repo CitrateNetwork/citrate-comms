@@ -78,6 +78,10 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Design
+The UI/UX is designed by the Claude design team from a single self-contained brief and handed back as an
+HTML/CSS package, which engineering translates 1:1 into Slint. See [`design/DESIGN_BRIEF.md`](design/DESIGN_BRIEF.md).
+
 ## Agentile
 This repo follows the [Agentile methodology](../AGENTILE.md). Entry point: [`.agentile/AGENT_ENTRY.md`](.agentile/AGENT_ENTRY.md).
 Active sprint: `COMMS-S0` (Foundations) — see `citrate-federation/repos/citrate-comms/sprints/`.
