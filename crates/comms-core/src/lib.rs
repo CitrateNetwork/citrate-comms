@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod domain;
 pub mod identity;
 pub mod rbac;
 

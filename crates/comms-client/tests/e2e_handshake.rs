@@ -9,6 +9,8 @@
 //! attestation, and OpenMLS group encryption. The relay is the in-process
 //! `DeliveryService`; the WebSocket transport wrapper lands in COMMS-S1.
 
+use comms_core::domain::event::fields as f;
+use comms_core::domain::{DealStage, DomainEvent, DomainStore, EntityId, EntityType, FieldValue, Lamport};
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::MlsMember;
 use comms_proto::{Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID};
@@ -236,4 +238,88 @@ fn offboard_atomically_revokes_role_and_future_access() {
     let saw_revoked = relay.audit().records().iter().any(|r| matches!(
         r.event, comms_proto::AuditEvent::RoleRevoked { .. }));
     assert!(saw_removed && saw_revoked, "offboard recorded both member removal and role revocation");
+}
+
+/// COMMS-S1 (WP-1.8) — a CRM record (a Deal) replicates end-to-end over MLS through
+/// the server-blind relay: encoded as a domain event, MLS-encrypted, fanned out, then
+/// decoded + folded by the recipient. Both members converge; the relay sees only ciphertext.
+#[test]
+fn domain_record_replicates_e2e_over_relay() {
+    let alice_wallet = EthWallet::generate(); // owner
+    let bob_wallet = EthWallet::generate();
+    let mut relay = DeliveryService::new("relay.citrate.ai", alice_wallet.address(), 0).unwrap();
+    login(&mut relay, &alice_wallet, 10);
+    login(&mut relay, &bob_wallet, 11);
+
+    // Onboard Bob into a 2-member group.
+    let bob_member = MlsMember::new(&bob_wallet.address().0).unwrap();
+    let bob_sig_pub = bob_member.sig_pubkey();
+    let pub_nonce = relay.issue_challenge(12);
+    relay
+        .publish_key_package(
+            KeyPackagePublication {
+                wallet: bob_wallet.address(),
+                key_package: bob_member.fresh_key_package().unwrap(),
+                mls_sig_pubkey: bob_sig_pub.clone(),
+                binding_attestation: bob_wallet.sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce).to_vec(),
+                nonce: pub_nonce,
+                relay_domain: relay.domain().to_string(),
+            },
+            12,
+        )
+        .unwrap();
+    let alice_member = MlsMember::new(&alice_wallet.address().0).unwrap();
+    let mut alice_group = alice_member.create_group().unwrap();
+    let gid = group_id_of(&alice_group);
+    relay.register_group(gid, alice_wallet.address(), 13).unwrap();
+    let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
+    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
+    relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, 14).unwrap();
+    let welcome = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
+    relay.onboard(gid, alice_wallet.address(), bob_wallet.address(), welcome, add.ratchet_tree.clone(), 15).unwrap();
+    let inbox = relay.fetch(&bob_wallet.address());
+    let w = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
+    let mut bob_group = bob_member.join(&w.ciphertext, relay.ratchet_tree(&gid).unwrap()).unwrap();
+
+    // ── Alice creates a Deal (a domain event), MLS-encrypts it, and submits. ──
+    let deal_id = EntityId([42; 16]);
+    let ev = DomainEvent::upsert(
+        gid,
+        EntityType::Deal,
+        deal_id,
+        vec![
+            (f::NAME.into(), FieldValue::Text("Acme Corp - Q3".into())),
+            (f::STAGE.into(), FieldValue::Tag("Proposal".into())),
+            (f::VALUE.into(), FieldValue::Money(2_500_000)),
+        ],
+        Lamport { counter: 1, actor: alice_wallet.address() },
+    );
+    let payload = ev.encode().unwrap();
+    let ciphertext = alice_group.send(&alice_member, &payload).unwrap();
+    relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext, group_seq: None }, 16).unwrap();
+
+    let mut alice_store = DomainStore::new();
+    alice_store.apply(&ev);
+
+    // ── Bob receives, decrypts, decodes, and folds — converging on the same Deal. ──
+    let inbox = relay.fetch(&bob_wallet.address());
+    let app = inbox.iter().find(|e| e.kind == EnvelopeKind::Application).unwrap();
+    let plain = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
+    let bob_ev = DomainEvent::decode(&plain).unwrap();
+    let mut bob_store = DomainStore::new();
+    bob_store.apply(&bob_ev);
+
+    assert_eq!(alice_store.deal(deal_id), bob_store.deal(deal_id), "both members converge on the Deal");
+    let d = bob_store.deal(deal_id).unwrap();
+    assert_eq!(d.name, "Acme Corp - Q3");
+    assert_eq!(d.stage, DealStage::Proposal);
+    assert_eq!(d.value, 2_500_000);
+
+    // ── The relay never saw the deal content — its store holds only ciphertext. ──
+    for e in relay.group_log(&gid).unwrap() {
+        assert!(
+            !e.ciphertext.windows(4).any(|w| w == b"Acme"),
+            "the relay must not see CRM record content"
+        );
+    }
 }

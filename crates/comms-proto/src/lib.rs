@@ -42,7 +42,7 @@ impl fmt::Debug for WalletAddress {
 }
 
 /// 32-byte content-addressed identifier of an MLS group (channel / DM / forum).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct GroupId(pub [u8; 32]);
 
 impl fmt::Debug for GroupId {
