@@ -1,0 +1,15 @@
+[package]
+name = "comms-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms native desktop client — Slint app on @citrate-ui-kit; MLS client + local encrypted store."
+
+[dependencies]
+comms-proto = { path = "../comms-proto" }
+comms-core = { path = "../comms-core" }
+# slint (1.16) + @citrate-ui-kit are wired in COMMS-S2 when the design team's HTML/CSS
+# package is translated to Slint. build.rs will register the kit via library path
+# (DEP_CITRATE_STUDIO_UI_KIT_UI_KIT), exactly as citrate-native does. See PLANSET/02 §UI.

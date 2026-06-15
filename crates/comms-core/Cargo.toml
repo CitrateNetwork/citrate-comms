@@ -1,0 +1,15 @@
+[package]
+name = "comms-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms domain library — MLS engine, SIWE→MLS identity binding, RBAC, CRM/PM domain, encrypted store, BLAKE3 audit chain."
+
+[dependencies]
+comms-proto = { path = "../comms-proto" }
+# Crypto + MLS + storage deps land per-module in COMMS-S0/S1 (openmls, rocksdb,
+# aes-gcm, ed25519-dalek, x25519-dalek, blake3, keyring). Declared in the
+# workspace dep table; opted in as each module (mls/ identity/ rbac/ domain/
+# store/ audit/) is built. See PLANSET/02 + PLANSET/05.

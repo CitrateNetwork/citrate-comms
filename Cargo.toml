@@ -1,0 +1,53 @@
+# citrate-comms — E2E-encrypted agentic team workspace (Comms + CRM + PM).
+# v1 first-pass workspace. See PLANSET/ for the full design.
+#
+# Crate boundaries are real; bodies are built sprint-by-sprint per PLANSET/05.
+# The relay links comms-proto + comms-core::{store,audit} ONLY — never MLS secret
+# state — so the server-blind invariant is enforced at the dependency graph (PLANSET/02).
+[workspace]
+resolver = "2"
+members = [
+    "crates/comms-proto",
+    "crates/comms-core",
+    "crates/comms-relay",
+    "crates/comms-agent-bridge",
+    "crates/comms-client",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Citrate Network / Citrate Inc."]
+repository = "https://github.com/CitrateNetwork/citrate-comms"
+
+# Shared versions. A crate opts in with `dep.workspace = true`; unused entries are
+# not fetched. Versions are pinned to match the chain's crypto grade (PLANSET/02 §crypto).
+[workspace.dependencies]
+# wire / serialization
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"              # CBOR for canonical envelope + record encoding
+thiserror = "1"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+# crypto grade (matches citrate-chain)
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+aes-gcm = "0.10"
+sha2 = "0.10"
+sha3 = "0.10"
+blake3 = "1.5"
+getrandom = "0.2"
+# E2E group messaging
+openmls = "0.6"
+openmls_rust_crypto = "0.3"
+openmls_traits = "0.3"
+# storage
+rocksdb = "0.22"
+# async / transport
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+axum = "0.7"
+# identity / keyring
+keyring = "3"
+# UI
+slint = { version = "1.16", default-features = false, features = ["compat-1-2", "backend-winit", "renderer-software", "accessibility", "std"] }

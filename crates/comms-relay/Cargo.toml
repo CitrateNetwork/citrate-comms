@@ -1,0 +1,14 @@
+[package]
+name = "comms-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms server-blind relay — WebSocket delivery service, KeyPackage directory, ciphertext store, per-group total order, BLAKE3 audit log."
+
+[dependencies]
+comms-proto = { path = "../comms-proto" }
+# Links comms-core::{store, audit} only (NOT mls secret state) once those modules
+# land. Transport deps (tokio, tokio-tungstenite, axum, rocksdb) opt in during
+# COMMS-S1. The binary target lands in COMMS-S0/S1 — see PLANSET/05.

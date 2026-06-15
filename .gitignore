@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+.DS_Store
+# Local secrets / runtime state — NEVER commit
+.keys/
+*.sock
+/data/
+/run/
+# Slint build artifacts
+*.slint.rs
+# Vendored deps for airgap builds are committed deliberately; do not ignore vendor/
