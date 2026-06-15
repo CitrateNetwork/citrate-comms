@@ -1030,8 +1030,14 @@ dependencies = [
 name = "comms-agent-bridge"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "comms-core",
  "comms-proto",
+ "comms-relay",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -10,5 +10,13 @@ description = "citrate-comms agent bridge — Unix-socket JSON-per-line IPC to n
 [dependencies]
 comms-proto = { path = "../comms-proto" }
 comms-core = { path = "../comms-core" }
+# The bridge runs the agent's MLS client and talks to the server-blind relay.
+comms-relay = { path = "../comms-relay" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+hex = "0.4"
 # Unix-socket IPC framing mirrors nist-agent-daemon/src/ipc.rs (JSON-per-line).
-# Control surface: loopback + bearer, fail-closed. See PLANSET/06.
+serde_json = "1"
+
+[dev-dependencies]
+blake3 = { workspace = true }
