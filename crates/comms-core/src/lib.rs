@@ -15,5 +15,8 @@ pub mod audit;
 pub mod identity;
 pub mod rbac;
 
+#[cfg(feature = "store")]
+pub mod store;
+
 #[cfg(feature = "mls")]
 pub mod mls;

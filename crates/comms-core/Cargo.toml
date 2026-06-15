@@ -9,10 +9,12 @@ description = "citrate-comms domain library — MLS engine, SIWE→MLS identity 
 
 [features]
 # `mls` gates the OpenMLS-dependent client engine. The relay depends on this crate
-# with `default-features = false`, so the relay CANNOT link the MLS module — the
-# server-blind invariant is enforced at the dependency graph (PLANSET/02 §1).
-default = ["mls"]
+# with `default-features = false, features = ["store"]`, so the relay CANNOT link the
+# MLS module — the server-blind invariant is enforced at the dependency graph (PLANSET/02 §1).
+default = ["mls", "store"]
 mls = ["dep:openmls", "dep:openmls_rust_crypto", "dep:openmls_traits", "dep:openmls_basic_credential", "dep:tls_codec"]
+# `store` gates the RocksDB + AES-256-GCM persistence layer (used by the relay).
+store = ["dep:rocksdb", "dep:aes-gcm", "dep:getrandom"]
 
 [dependencies]
 comms-proto = { path = "../comms-proto" }
@@ -35,4 +37,10 @@ openmls_traits = { workspace = true, optional = true }
 openmls_basic_credential = { version = "0.3", optional = true }
 tls_codec = { version = "0.4", optional = true }
 
+# Persistence (feature `store`).
+rocksdb = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+
 [dev-dependencies]
+tempfile = "3"

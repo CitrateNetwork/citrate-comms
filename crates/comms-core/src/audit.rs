@@ -51,6 +51,17 @@ impl AuditChain {
         Ok(Self { records: vec![genesis] })
     }
 
+    /// Rebuild a chain from persisted records (e.g. on relay restart) and verify it.
+    /// Fails if the records don't form a valid, contiguous chain.
+    pub fn from_records(records: Vec<AuditRecord>) -> Result<Self, AuditError> {
+        if records.is_empty() {
+            return Err(AuditError::Empty);
+        }
+        let chain = Self { records };
+        chain.verify_integrity()?;
+        Ok(chain)
+    }
+
     /// Append an event, linking it to the current head. Returns the new record.
     pub fn append(&mut self, event: AuditEvent, timestamp_ms: u64) -> Result<&AuditRecord, AuditError> {
         let head = self.records.last().ok_or(AuditError::Empty)?;

@@ -112,7 +112,8 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
         ciphertext: ciphertext.clone(), group_seq: None,
     };
     let seq = relay.submit(app_env, 16).unwrap();
-    assert_eq!(seq, 1, "second accepted envelope in the group gets group_seq 1");
+    // Order so far: Commit(0), Welcome(1, via onboard), Application(2).
+    assert_eq!(seq, 2, "third accepted envelope in the group gets group_seq 2");
 
     // Bob fetches and decrypts.
     let inbox = relay.fetch(&bob_wallet.address());
@@ -122,7 +123,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
 
     // ── 7. The server-blind invariant: the relay's durable store is ciphertext-only. ──
     let log = relay.group_log(&gid).unwrap();
-    assert_eq!(log.len(), 2, "relay stored the Commit + the Application envelope");
+    assert_eq!(log.len(), 3, "relay stored the Commit + Welcome + Application envelopes");
     for e in log {
         assert_ne!(e.ciphertext.as_slice(), plaintext, "relay never stores plaintext");
         assert!(e.group_seq.is_some(), "every stored envelope has a total-order seq");

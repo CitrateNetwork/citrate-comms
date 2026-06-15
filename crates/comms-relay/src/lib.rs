@@ -19,14 +19,17 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::Path;
 
 use comms_core::audit::{AuditChain, AuditError};
 use comms_core::identity::{self, InMemoryNonceStore, NonceStore, SiweMessage};
 use comms_core::rbac::{self, Capability, RbacError};
+use comms_core::store::{self, EncryptedStore, StoreError};
 use comms_proto::{
-    AuditEvent, Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, KeyPackageRef,
-    RoleAssertion, WalletAddress,
+    canonical, AuditEvent, AuditRecord, Envelope, EnvelopeKind, EpochId, GroupId,
+    KeyPackagePublication, KeyPackageRef, RoleAssertion, WalletAddress,
 };
+use serde::{Deserialize, Serialize};
 
 /// Per-group routing + ordering state. Holds NO secrets — only ciphertext, the
 /// public ratchet tree, the member roster, and the order log.
@@ -41,6 +44,39 @@ struct GroupState {
     ratchet_tree: Vec<u8>,
     /// The ordered ciphertext log (the durable, replayable relay state).
     log: Vec<Envelope>,
+}
+
+/// The serializable, on-disk projection of a group's metadata (everything but the
+/// envelope log, which is persisted separately keyed by `group_id ‖ seq`).
+#[derive(Serialize, Deserialize)]
+struct GroupSnapshot {
+    members: Vec<WalletAddress>,
+    current_epoch: u64,
+    next_seq: u64,
+    accepted_commit: Vec<(u64, [u8; 32])>,
+    ratchet_tree: Vec<u8>,
+}
+
+impl GroupState {
+    fn snapshot(&self) -> GroupSnapshot {
+        GroupSnapshot {
+            members: self.members.iter().copied().collect(),
+            current_epoch: self.current_epoch,
+            next_seq: self.next_seq,
+            accepted_commit: self.accepted_commit.iter().map(|(k, v)| (*k, *v)).collect(),
+            ratchet_tree: self.ratchet_tree.clone(),
+        }
+    }
+    fn from_snapshot(s: GroupSnapshot) -> Self {
+        Self {
+            members: s.members.into_iter().collect(),
+            current_epoch: s.current_epoch,
+            next_seq: s.next_seq,
+            accepted_commit: s.accepted_commit.into_iter().collect(),
+            ratchet_tree: s.ratchet_tree,
+            log: Vec::new(), // rebuilt from the envelopes CF
+        }
+    }
 }
 
 /// Parameters for [`DeliveryService::offboard`]. Bundled so the call site reads as
@@ -72,9 +108,12 @@ pub struct DeliveryService {
     /// Authenticated sessions (wallet proved control via SIWE).
     sessions: BTreeSet<WalletAddress>,
     audit: AuditChain,
+    /// Durable, encrypted backing store. `None` = in-memory only (tests).
+    store: Option<EncryptedStore>,
 }
 
 impl DeliveryService {
+    /// In-memory relay (no persistence) — used by tests and ephemeral deployments.
     pub fn new(
         domain: impl Into<String>,
         owner: WalletAddress,
@@ -89,6 +128,75 @@ impl DeliveryService {
             mailboxes: HashMap::new(),
             sessions: BTreeSet::new(),
             audit: AuditChain::new(genesis_ts_ms)?,
+            store: None,
+        })
+    }
+
+    /// Durable relay backed by an encrypted RocksDB store at `path`. On a fresh store
+    /// it starts a new audit chain; on an existing one it **replays** the persisted
+    /// groups, envelope logs, KeyPackage directory, and audit chain (verifying chain
+    /// integrity) so the relay survives restart (R10). Sessions are not persisted —
+    /// clients re-authenticate on reconnect.
+    pub fn open(
+        path: impl AsRef<Path>,
+        domain: impl Into<String>,
+        owner: WalletAddress,
+        master_key: [u8; 32],
+        genesis_ts_ms: u64,
+    ) -> Result<Self, RelayError> {
+        let store = EncryptedStore::open(path, master_key)?;
+
+        // Audit chain: rebuild from disk, or start + persist a genesis.
+        let mut audit_records: Vec<AuditRecord> = Vec::new();
+        for (_k, v) in store.scan(store::CF_AUDIT)? {
+            audit_records.push(canonical::from_slice(&v).map_err(RelayError::Decode)?);
+        }
+        let audit = if audit_records.is_empty() {
+            let chain = AuditChain::new(genesis_ts_ms)?;
+            for r in chain.records() {
+                store.put(store::CF_AUDIT, &r.sequence.to_be_bytes(), &canonical::to_vec(r).map_err(RelayError::Decode)?)?;
+            }
+            chain
+        } else {
+            AuditChain::from_records(audit_records)?
+        };
+
+        // Groups: metadata snapshots, then the envelope logs.
+        let mut groups: HashMap<GroupId, GroupState> = HashMap::new();
+        for (k, v) in store.scan(store::CF_MEMBERSHIP)? {
+            let gid = GroupId(k.as_slice().try_into().map_err(|_| RelayError::CorruptKey)?);
+            let snap: GroupSnapshot = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            groups.insert(gid, GroupState::from_snapshot(snap));
+        }
+        for (k, v) in store.scan(store::CF_ENVELOPES)? {
+            if k.len() < 32 {
+                return Err(RelayError::CorruptKey);
+            }
+            let gid = GroupId(k[..32].try_into().map_err(|_| RelayError::CorruptKey)?);
+            let env: Envelope = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            if let Some(g) = groups.get_mut(&gid) {
+                g.log.push(env);
+            }
+        }
+
+        // KeyPackage directory (each value is the wallet's whole queue).
+        let mut key_packages: HashMap<WalletAddress, VecDeque<KeyPackagePublication>> = HashMap::new();
+        for (k, v) in store.scan(store::CF_KEYPACKAGES)? {
+            let wallet = WalletAddress(k.as_slice().try_into().map_err(|_| RelayError::CorruptKey)?);
+            let queue: Vec<KeyPackagePublication> = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            key_packages.insert(wallet, queue.into());
+        }
+
+        Ok(Self {
+            domain: domain.into(),
+            owner,
+            nonces: InMemoryNonceStore::new(),
+            key_packages,
+            groups,
+            mailboxes: HashMap::new(),
+            sessions: BTreeSet::new(),
+            audit,
+            store: Some(store),
         })
     }
 
@@ -98,6 +206,42 @@ impl DeliveryService {
 
     pub fn owner(&self) -> WalletAddress {
         self.owner
+    }
+
+    // ─────────────────── persistence helpers (no-op when in-memory) ───────────────────
+
+    /// Append an audit event AND persist the new record (kept atomic with the chain).
+    fn audit_append(&mut self, event: AuditEvent, now_ms: u64) -> Result<(), RelayError> {
+        let rec = self.audit.append(event, now_ms)?.clone();
+        if let Some(s) = &self.store {
+            s.put(store::CF_AUDIT, &rec.sequence.to_be_bytes(), &canonical::to_vec(&rec).map_err(RelayError::Decode)?)?;
+        }
+        Ok(())
+    }
+
+    fn persist_group(&self, gid: &GroupId) -> Result<(), RelayError> {
+        if let (Some(s), Some(g)) = (&self.store, self.groups.get(gid)) {
+            s.put(store::CF_MEMBERSHIP, &gid.0, &canonical::to_vec(&g.snapshot()).map_err(RelayError::Decode)?)?;
+        }
+        Ok(())
+    }
+
+    fn persist_envelope(&self, gid: &GroupId, seq: u64, env: &Envelope) -> Result<(), RelayError> {
+        if let Some(s) = &self.store {
+            s.put(store::CF_ENVELOPES, &store::seq_key(&gid.0, seq), &canonical::to_vec(env).map_err(RelayError::Decode)?)?;
+        }
+        Ok(())
+    }
+
+    /// Persist a wallet's whole KeyPackage queue (so one-time-use consumption is
+    /// reflected on disk — consumed packages do not reappear after restart).
+    fn persist_keypackages(&self, wallet: &WalletAddress) -> Result<(), RelayError> {
+        if let Some(s) = &self.store {
+            let queue: Vec<&KeyPackagePublication> =
+                self.key_packages.get(wallet).map(|q| q.iter().collect()).unwrap_or_default();
+            s.put(store::CF_KEYPACKAGES, &wallet.0, &canonical::to_vec(&queue).map_err(RelayError::Decode)?)?;
+        }
+        Ok(())
     }
 
     // ─────────────────────────── handshake ───────────────────────────
@@ -150,18 +294,25 @@ impl DeliveryService {
         identity::verify_binding_attestation(&publication).map_err(RelayError::Binding)?;
 
         let kp_ref = KeyPackageRef(blake3::hash(&publication.key_package).as_bytes().to_vec());
-        self.audit.append(
-            AuditEvent::KeyPackagePublished { wallet: publication.wallet, key_package_ref: kp_ref.clone() },
+        let wallet = publication.wallet;
+        self.key_packages.entry(wallet).or_default().push_back(publication);
+        self.persist_keypackages(&wallet)?;
+        self.audit_append(
+            AuditEvent::KeyPackagePublished { wallet, key_package_ref: kp_ref.clone() },
             now_ms,
         )?;
-        self.key_packages.entry(publication.wallet).or_default().push_back(publication);
         Ok(kp_ref)
     }
 
     /// Consume a KeyPackage for `wallet` (one-time-use) — called by an admin who is
-    /// about to add that wallet to a group.
+    /// about to add that wallet to a group. The on-disk queue is updated so a consumed
+    /// package does not reappear after restart.
     pub fn take_key_package(&mut self, wallet: &WalletAddress) -> Option<KeyPackagePublication> {
-        self.key_packages.get_mut(wallet).and_then(|q| q.pop_front())
+        let popped = self.key_packages.get_mut(wallet).and_then(|q| q.pop_front());
+        if popped.is_some() {
+            let _ = self.persist_keypackages(wallet);
+        }
+        popped
     }
 
     pub fn key_package_count(&self, wallet: &WalletAddress) -> usize {
@@ -184,7 +335,8 @@ impl DeliveryService {
         let mut state = GroupState::default();
         state.members.insert(creator);
         self.groups.insert(group_id, state);
-        self.audit.append(AuditEvent::GroupCreated { group_id, creator }, now_ms)?;
+        self.persist_group(&group_id)?;
+        self.audit_append(AuditEvent::GroupCreated { group_id, creator }, now_ms)?;
         Ok(())
     }
 
@@ -201,19 +353,26 @@ impl DeliveryService {
         now_ms: u64,
     ) -> Result<(), RelayError> {
         self.require_session(&admin)?;
-        let epoch = {
-            let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
+        {
+            let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) {
                 return Err(RelayError::NotAMember);
             }
+        }
+        debug_assert_eq!(welcome.kind, EnvelopeKind::Welcome);
+        // Deliver the Welcome on the durable ordered path (stored + audited + fanned
+        // to the joiner's mailbox).
+        self.submit(welcome, now_ms)?;
+        // Update the roster + public ratchet tree, persist, and audit the membership change.
+        let epoch = {
+            let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
             state.members.insert(joiner);
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
-        debug_assert_eq!(welcome.kind, EnvelopeKind::Welcome);
-        self.mailboxes.entry(joiner).or_default().push(welcome);
-        self.audit.append(
-            AuditEvent::MemberAdded { group_id, member: joiner, epoch: comms_proto::EpochId(epoch) },
+        self.persist_group(&group_id)?;
+        self.audit_append(
+            AuditEvent::MemberAdded { group_id, member: joiner, epoch: EpochId(epoch) },
             now_ms,
         )?;
         Ok(())
@@ -260,11 +419,12 @@ impl DeliveryService {
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
-        self.audit.append(
+        self.persist_group(&group_id)?;
+        self.audit_append(
             AuditEvent::MemberRemoved { group_id, member: removed, epoch: EpochId(epoch) },
             now_ms,
         )?;
-        self.audit.append(AuditEvent::RoleRevoked { subject: removed, scope: Some(group_id) }, now_ms)?;
+        self.audit_append(AuditEvent::RoleRevoked { subject: removed, scope: Some(group_id) }, now_ms)?;
         Ok(seq)
     }
 
@@ -306,12 +466,18 @@ impl DeliveryService {
         envelope.group_seq = Some(seq);
         state.log.push(envelope.clone());
 
+        // Persist the ciphertext envelope + the group's updated metadata (durable,
+        // replayable on restart — R10).
+        let gid = envelope.group_id;
+        self.persist_envelope(&gid, seq, &envelope)?;
+        self.persist_group(&gid)?;
+
         // Fan out to the named recipients (the relay's unavoidable metadata — R4).
         for r in &envelope.recipients {
             self.mailboxes.entry(*r).or_default().push(envelope.clone());
         }
 
-        self.audit.append(
+        self.audit_append(
             AuditEvent::EnvelopeReceipt {
                 group_id: envelope.group_id,
                 group_seq: seq,
@@ -375,6 +541,12 @@ pub enum RelayError {
     Rbac(RbacError),
     #[error(transparent)]
     Audit(#[from] AuditError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("decode error: {0}")]
+    Decode(comms_proto::ProtoError),
+    #[error("corrupt store key")]
+    CorruptKey,
 }
 
 #[cfg(test)]
@@ -431,13 +603,14 @@ mod tests {
         relay.submit(envelope(gid, alice.address(), EnvelopeKind::Application, 1, ct, &[bob.address()]), 14).unwrap();
 
         // The relay's durable store contains ciphertext only — never the plaintext.
+        // The log holds the Welcome (durable) + the application envelope.
         let log = relay.group_log(&gid).unwrap();
-        assert_eq!(log.len(), 1);
+        assert_eq!(log.len(), 2);
         for e in log {
             assert_ne!(e.ciphertext.as_slice(), secret_plaintext);
-            assert_eq!(e.ciphertext, ct);
             assert!(e.group_seq.is_some());
         }
+        assert!(log.iter().any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == ct));
         // Bob receives the fanned-out envelope.
         let inbox = relay.fetch(&bob.address());
         assert_eq!(inbox.iter().filter(|e| e.kind == EnvelopeKind::Application).count(), 1);
@@ -469,6 +642,53 @@ mod tests {
         let gid = GroupId([1; 32]);
         // No login → register fails fail-closed.
         assert!(matches!(relay.register_group(gid, alice.address(), 1), Err(RelayError::NotAuthenticated)));
+    }
+
+    #[test]
+    fn persists_and_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let gid = GroupId([5; 32]);
+        let master = [1u8; 32];
+
+        // First run: durable relay does a full onboard + message.
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 0).unwrap();
+            login(&mut relay, &alice, 10);
+            login(&mut relay, &bob, 11);
+            relay.register_group(gid, alice.address(), 12).unwrap();
+            relay
+                .onboard(
+                    gid, alice.address(), bob.address(),
+                    envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome-ct", &[bob.address()]),
+                    b"ratchet-tree".to_vec(), 13,
+                )
+                .unwrap();
+            relay
+                .submit(envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"CIPHERTEXT-BLOB", &[bob.address()]), 14)
+                .unwrap();
+            assert_eq!(relay.group_log(&gid).unwrap().len(), 2); // welcome + application
+        }
+
+        // Second run: reopen the SAME store — state replays from disk.
+        {
+            let relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 999).unwrap();
+            // Roster survived.
+            let members = relay.group_members(&gid).unwrap();
+            assert!(members.contains(&alice.address()) && members.contains(&bob.address()));
+            // Ciphertext envelope log survived, in order, with assigned seqs.
+            let log = relay.group_log(&gid).unwrap();
+            assert_eq!(log.len(), 2);
+            assert_eq!(log[0].group_seq, Some(0));
+            assert_eq!(log[1].group_seq, Some(1));
+            assert_eq!(log[1].ciphertext, b"CIPHERTEXT-BLOB");
+            // Audit chain survived AND verifies offline (tamper-evident across restart).
+            relay.audit().verify_integrity().unwrap();
+            assert!(relay.audit().len() >= 4);
+        }
     }
 
     #[test]

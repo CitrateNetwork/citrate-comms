@@ -16,6 +16,11 @@ pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtoError> {
     Ok(buf)
 }
 
+/// Deserialize a value from canonical CBOR bytes (the inverse of [`to_vec`]).
+pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtoError> {
+    ciborium::de::from_reader(bytes).map_err(|e| ProtoError::Encode(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

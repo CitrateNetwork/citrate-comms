@@ -9,11 +9,13 @@ description = "citrate-comms server-blind relay — WebSocket delivery service, 
 
 [dependencies]
 comms-proto = { path = "../comms-proto" }
-# default-features = false → the `mls` module is NOT compiled into the relay.
-# The relay therefore cannot name comms_core::mls or hold any group secret: the
-# server-blind invariant is enforced by the dependency graph (PLANSET/02 §1).
-comms-core = { path = "../comms-core", default-features = false }
+# default-features = false → the `mls` module is NOT compiled into the relay (the
+# server-blind invariant, enforced by the dependency graph — PLANSET/02 §1). We DO
+# enable `store` for the RocksDB AES-256-GCM persistence layer.
+comms-core = { path = "../comms-core", default-features = false, features = ["store"] }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
