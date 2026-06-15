@@ -21,7 +21,12 @@ hex = "0.4"
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
+# Loopback admin surface.
+axum = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
+# EthWallet for the admin/ws tests (identity only — no mls/store needed).
+comms-core = { path = "../comms-core", default-features = false }

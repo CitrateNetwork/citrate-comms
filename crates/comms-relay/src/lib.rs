@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admin;
 pub mod ws;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -508,6 +509,11 @@ impl DeliveryService {
 
     pub fn group_members(&self, group_id: &GroupId) -> Option<Vec<WalletAddress>> {
         self.groups.get(group_id).map(|g| g.members.iter().copied().collect())
+    }
+
+    /// Number of registered groups (for the admin health snapshot).
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
     }
 
     pub fn audit(&self) -> &AuditChain {

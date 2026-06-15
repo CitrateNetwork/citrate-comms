@@ -19,6 +19,7 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use comms_proto::WalletAddress;
+use comms_relay::admin::serve_admin;
 use comms_relay::ws::RelayServer;
 use comms_relay::DeliveryService;
 
@@ -43,12 +44,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let service = DeliveryService::open(&data, domain.clone(), owner, master, now_ms())?;
     let server = RelayServer::new(service);
-    let (addr, accept) = server.bind(&bind).await?;
+    let (addr, accept) = server.clone().bind(&bind).await?;
+
+    // Bearer-gated, loopback-only admin surface.
+    let admin_bind = env::var("CITRATE_COMMS_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:8788".into());
+    let mut tok = [0u8; 32];
+    getrandom::getrandom(&mut tok).map_err(|_| "failed to generate admin token")?;
+    let admin_token = hex::encode(tok);
+    let (admin_addr, _admin) = serve_admin(server.clone(), &admin_bind, admin_token.clone()).await?;
 
     eprintln!("citrate-comms relay — serving {domain} on ws://{addr}");
     eprintln!("  owner (RBAC anchor): {}", owner.to_hex());
     eprintln!("  store: {data} (RocksDB + AES-256-GCM at rest)");
     eprintln!("  server-blind: stores ciphertext + routing metadata only; never reads plaintext");
+    eprintln!("  admin: http://{admin_addr} (loopback-only)  GET /health|/status  POST /pause|/resume");
+    eprintln!("  admin bearer token: {admin_token}");
     if !addr.ip().is_loopback() {
         eprintln!("  WARNING: bound to a non-loopback address — ensure TLS termination + access control");
     }

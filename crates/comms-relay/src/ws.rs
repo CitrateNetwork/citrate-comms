@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,6 +71,9 @@ type Registry = Arc<Mutex<HashMap<WalletAddress, mpsc::UnboundedSender<ServerFra
 pub struct RelayServer {
     service: Arc<Mutex<DeliveryService>>,
     registry: Registry,
+    /// When set (via the admin surface), the relay rejects new mutating operations
+    /// (submit/onboard/offboard/register/publish) but keeps serving reads.
+    paused: Arc<AtomicBool>,
 }
 
 impl RelayServer {
@@ -77,7 +81,34 @@ impl RelayServer {
         Arc::new(Self {
             service: Arc::new(Mutex::new(service)),
             registry: Arc::new(Mutex::new(HashMap::new())),
+            paused: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Whether the relay is currently paused (rejecting mutations).
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Pause/resume new mutating operations (driven by the admin surface).
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Number of currently-connected, authenticated wallets.
+    pub async fn connected(&self) -> usize {
+        self.registry.lock().await.len()
+    }
+
+    /// The relay's logical domain (bound in the SIWE handshake).
+    pub async fn domain(&self) -> String {
+        self.service.lock().await.domain().to_string()
+    }
+
+    /// `(group_count, audit_record_count)` — for the admin health snapshot.
+    pub async fn snapshot(&self) -> (usize, usize) {
+        let svc = self.service.lock().await;
+        (svc.group_count(), svc.audit().len())
     }
 
     /// Bind and start accepting connections. Returns the bound address (use port 0 to
@@ -148,6 +179,18 @@ impl RelayServer {
         authed: &mut Option<WalletAddress>,
     ) {
         let now = now_ms();
+        // Pause gate: while paused, reject new mutating operations (reads still work).
+        let mutating = matches!(
+            frame,
+            ClientFrame::PublishKeyPackage(_)
+                | ClientFrame::RegisterGroup { .. }
+                | ClientFrame::Onboard { .. }
+                | ClientFrame::Submit(_)
+                | ClientFrame::Offboard { .. }
+        );
+        if mutating && self.is_paused() {
+            return send_err(out_tx, "relay is paused");
+        }
         match frame {
             ClientFrame::Challenge => {
                 let nonce = { self.service.lock().await.issue_challenge(now) };
