@@ -16,6 +16,12 @@ comms-core = { path = "../comms-core", default-features = false, features = ["st
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+hex = "0.4"
+# WebSocket transport.
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true }

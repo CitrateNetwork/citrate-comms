@@ -18,6 +18,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ws;
+
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 
