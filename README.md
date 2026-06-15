@@ -79,8 +79,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Design
-The UI/UX is designed by the Claude design team from a single self-contained brief and handed back as an
-HTML/CSS package, which engineering translates 1:1 into Slint. See [`design/DESIGN_BRIEF.md`](design/DESIGN_BRIEF.md).
+The UI/UX is designed by the Claude design team from a single self-contained brief
+([`design/DESIGN_BRIEF.md`](design/DESIGN_BRIEF.md)) and handed back as an HTML/CSS/JSX prototype
+([`design/handoff/`](design/handoff/) — 10 screens + the **Witness → channel Ledger** signature feature),
+which engineering translates into Slint. COMMS-S2 has translated the **shell + the primary channel screen**
+(`crates/comms-client/ui/app.slint`); the remaining screens follow from the preserved handoff.
 
 ## Agentile
 This repo follows the [Agentile methodology](../AGENTILE.md). Entry point: [`.agentile/AGENT_ENTRY.md`](.agentile/AGENT_ENTRY.md).
