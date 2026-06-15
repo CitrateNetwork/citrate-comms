@@ -17,15 +17,27 @@
 use comms_core::domain::{ChatMessage, Lamport};
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::{GroupHandle, MlsMember};
-use comms_core::rbac::{can, Capability};
+use comms_core::rbac::{can, verify_grant_chain, Capability};
 use comms_proto::{
-    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role, WalletAddress,
-    CITRATE_CHAIN_ID,
+    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role, RoleAssertion,
+    WalletAddress, CITRATE_CHAIN_ID,
 };
-use comms_relay::DeliveryService;
+use comms_relay::{keyvault, DeliveryService};
 use serde::{Deserialize, Serialize};
 
 pub mod ipc;
+pub mod socket;
+
+/// OS-keyring service the agent's durable identity is sealed under (shares the
+/// citrate-comms keychain namespace with the relay's at-rest master key).
+pub const KEYRING_SERVICE: &str = "citrate-comms";
+
+/// Keyring account for an agent's durable secp256k1 wallet secret, per workspace `did`.
+/// (The MLS signature key is OpenMLS-managed and re-minted per run; the *wallet* is the
+/// stable identity the sponsor [`RoleAssertion`] and SIWE handshake bind to.)
+pub fn wallet_keyring_account(did: &str) -> String {
+    format!("agent:{did}:wallet")
+}
 
 /// An event the bridge emits to the agent runtime (decrypted channel activity).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,15 +70,75 @@ pub struct AgentBridge {
     gid: Option<GroupId>,
     members: Vec<WalletAddress>,
     epoch: u64,
+    /// The owner/admin-signed grant that authorizes this agent (role=agent). Until set
+    /// (and verified against the workspace owner), the bridge will not post — fail-closed.
+    sponsor: Option<RoleAssertion>,
 }
 
 impl AgentBridge {
-    /// Provision an agent. Its MLS credential identity binds the `did` (in production the
-    /// signing key is sealed in the OS keyring; here it is in-memory for the bridge).
-    pub fn new(did: &str) -> Result<Self, BridgeError> {
-        let wallet = EthWallet::generate();
+    fn from_wallet(did: &str, wallet: EthWallet) -> Result<Self, BridgeError> {
         let mls = MlsMember::new(did.as_bytes()).map_err(|e| BridgeError::Mls(e.to_string()))?;
-        Ok(Self { did: did.into(), wallet, mls, group: None, gid: None, members: Vec::new(), epoch: 0 })
+        Ok(Self {
+            did: did.into(),
+            wallet,
+            mls,
+            group: None,
+            gid: None,
+            members: Vec::new(),
+            epoch: 0,
+            sponsor: None,
+        })
+    }
+
+    /// Provision an agent with an **ephemeral** wallet identity (tests / one-shot use).
+    /// Prefer [`AgentBridge::provision`] in production so the identity is keyring-backed
+    /// and stable across restarts.
+    pub fn new(did: &str) -> Result<Self, BridgeError> {
+        Self::from_wallet(did, EthWallet::generate())
+    }
+
+    /// Provision an agent with a **durable, keyring-backed** wallet identity. The agent's
+    /// 32-byte secp256k1 secret is loaded from (or, on first run, generated into and sealed
+    /// in) the host OS keyring under `service` / `agent:<did>:wallet`. Restarting the bridge
+    /// yields the same wallet address — the subject the sponsor [`RoleAssertion`] names.
+    ///
+    /// Set `CITRATE_COMMS_MASTER_KEY`-style overrides are not honored here; the keyring is
+    /// the source of truth. Pass [`KEYRING_SERVICE`] for the standard namespace.
+    pub fn provision(did: &str, service: &str) -> Result<Self, BridgeError> {
+        let account = wallet_keyring_account(did);
+        let secret = keyvault::load_or_create_master_key(service, &account)
+            .map_err(|e| BridgeError::Keyvault(e.to_string()))?;
+        let wallet = EthWallet::from_secret_key(&secret)
+            .map_err(|e| BridgeError::Keyvault(e.to_string()))?;
+        Self::from_wallet(did, wallet)
+    }
+
+    /// Record the owner/admin-signed grant that authorizes this agent. The assertion must
+    /// be validly signed by the `workspace_owner`, unexpired, name **this agent's wallet**
+    /// as the subject, and grant `role=agent`. Until this succeeds the bridge refuses to
+    /// post (fail-closed). Returns the agent's effective role on success.
+    pub fn accept_sponsor(
+        &mut self,
+        sponsor: RoleAssertion,
+        workspace_owner: WalletAddress,
+        now: u64,
+    ) -> Result<Role, BridgeError> {
+        if sponsor.role != Role::Agent {
+            return Err(BridgeError::BadSponsor(format!(
+                "grant is role={:?}, expected Agent",
+                sponsor.role
+            )));
+        }
+        verify_grant_chain(&sponsor, self.wallet.address(), workspace_owner, now)
+            .map_err(|e| BridgeError::BadSponsor(e.to_string()))?;
+        let role = sponsor.role;
+        self.sponsor = Some(sponsor);
+        Ok(role)
+    }
+
+    /// Whether the agent currently holds a verified sponsor grant.
+    pub fn is_sponsored(&self) -> bool {
+        self.sponsor.is_some()
     }
 
     pub fn did(&self) -> &str {
@@ -154,6 +226,10 @@ impl AgentBridge {
     pub fn handle(&mut self, relay: &mut DeliveryService, cmd: AgentOutbound, now: u64) -> Result<u64, BridgeError> {
         match cmd {
             AgentOutbound::Send { text, .. } => {
+                // Fail-closed: the agent may only act under a verified owner/admin sponsor.
+                if self.sponsor.is_none() {
+                    return Err(BridgeError::Unsponsored);
+                }
                 // The guardrail is the same rbac matrix the rest of the system uses.
                 if !can(Role::Agent, Capability::PostMessage) {
                     return Err(BridgeError::Forbidden("post"));
@@ -191,12 +267,58 @@ impl AgentBridge {
             AgentOutbound::RemoveMember { .. } => Err(BridgeError::Forbidden("remove-member")),
         }
     }
+
+    /// Run the bridge against a connected runtime (`sink`/`source` from
+    /// [`AgentConn::split`](socket::AgentConn::split)) and an in-process relay. On each
+    /// `poll_interval` tick it drains decrypted channel activity to the runtime; whenever
+    /// the runtime sends a command it is applied (a guardrail rejection is reported back as
+    /// a `System` event, not a hard error). Returns `Ok(())` when the runtime disconnects.
+    pub async fn serve(
+        &mut self,
+        sink: &mut socket::AgentSink,
+        source: &mut socket::AgentSource,
+        relay: &mut DeliveryService,
+        poll_interval: std::time::Duration,
+        mut now: impl FnMut() -> u64,
+    ) -> Result<(), socket::SocketError> {
+        let mut tick = tokio::time::interval(poll_interval);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    for ev in self.poll(relay) {
+                        sink.send_event(&ev).await?;
+                    }
+                }
+                cmd = source.recv_command() => {
+                    match cmd? {
+                        Some(c) => {
+                            if let Err(e) = self.handle(relay, c, now()) {
+                                // Surface guardrail rejections to the runtime; keep serving.
+                                sink.send_event(&AgentInbound::System {
+                                    group: String::new(),
+                                    text: format!("command rejected: {e}"),
+                                })
+                                .await?;
+                            }
+                        }
+                        None => return Ok(()), // clean EOF — runtime disconnected
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BridgeError {
     #[error("agent is not allowed to perform this action: {0} (role=agent is read+post only)")]
     Forbidden(&'static str),
+    #[error("agent has no verified sponsor grant — refusing to act (fail-closed)")]
+    Unsponsored,
+    #[error("invalid sponsor grant: {0}")]
+    BadSponsor(String),
+    #[error("keyring/provisioning error: {0}")]
+    Keyvault(String),
     #[error("agent has not joined a channel")]
     NotJoined,
     #[error("mls error: {0}")]
@@ -211,6 +333,7 @@ pub enum BridgeError {
 mod tests {
     use super::*;
     use comms_core::mls::MlsMember as Member;
+    use comms_core::rbac::sign_role_assertion;
 
     const DOMAIN: &str = "relay.citrate.internal";
 
@@ -251,6 +374,16 @@ mod tests {
         agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
         assert!(agent.is_member());
 
+        // The admin (workspace owner) sponsors the agent: a signed role=agent grant scoped
+        // to this channel. Until accepted, the bridge fails closed on any post.
+        assert_eq!(
+            agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "early".into() }, now),
+            Err(BridgeError::Unsponsored)
+        );
+        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
+        agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
+        assert!(agent.is_sponsored());
+
         // Admin posts a message; the agent decrypts it as an IPC `message` event.
         let payload = ChatMessage { thread_id: None, parent_id: None, body: "Can you summarize the Northwind thread?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
         let ct = admin_g.send(&admin_m, &payload).unwrap();
@@ -279,6 +412,130 @@ mod tests {
         assert_eq!(agent.handle(&mut relay, AgentOutbound::RemoveMember { group: "deals".into(), member: "0xabc".into() }, now), Err(BridgeError::Forbidden("remove-member")));
 
         // The audit chain recorded the agent's envelope + the visible Add.
+        relay.audit().verify_integrity().unwrap();
+    }
+
+    /// The keyring-backed identity is STABLE in its secret: the same sealed secret always
+    /// yields the same wallet address (the subject a sponsor grant names), so restarting
+    /// the bridge — which reloads the same secret from the keyring — keeps the same agent.
+    /// (`keyring::mock` is per-entry and can't model a restart, so we assert the
+    /// determinism the guarantee reduces to, then smoke-test `provision` end to end.)
+    #[test]
+    fn provisioned_identity_is_deterministic_in_its_secret() {
+        let secret = [7u8; 32];
+        let a = EthWallet::from_secret_key(&secret).unwrap();
+        let b = EthWallet::from_secret_key(&secret).unwrap();
+        assert_eq!(a.address(), b.address(), "a fixed secret yields a fixed wallet");
+        let c = EthWallet::from_secret_key(&[9u8; 32]).unwrap();
+        assert_ne!(a.address(), c.address(), "a different secret is a different agent");
+
+        // provision() wires the keyring through to a valid, usable wallet identity.
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        let agent = AgentBridge::provision("did:citrate:ops-agent", KEYRING_SERVICE).unwrap();
+        assert_ne!(agent.wallet().0, [0u8; 20]);
+        // Ephemeral provisioning (no keyring) is, by contrast, fresh each time.
+        assert_ne!(AgentBridge::new("did:x").unwrap().wallet(), AgentBridge::new("did:x").unwrap().wallet());
+    }
+
+    /// The sponsor gate rejects grants that are not a valid, owner-signed role=agent
+    /// assertion for THIS agent — wrong role, wrong issuer, wrong subject, or expired.
+    #[test]
+    fn sponsor_gate_rejects_bad_grants() {
+        let now = 2_000u64;
+        let owner = EthWallet::generate();
+        let imposter = EthWallet::generate();
+        let mut agent = AgentBridge::new("did:citrate:crm-agent").unwrap();
+
+        // Wrong role: owner grants Admin, not Agent.
+        let admin_grant = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Admin, None, None).unwrap();
+        assert!(matches!(agent.accept_sponsor(admin_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+
+        // Wrong issuer: a non-owner "sponsors" the agent.
+        let imposter_grant = sign_role_assertion(&imposter, Role::Owner, agent.wallet(), Role::Agent, None, None).unwrap();
+        assert!(matches!(agent.accept_sponsor(imposter_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+
+        // Wrong subject: owner grants role=agent to someone else.
+        let other = EthWallet::generate();
+        let other_grant = sign_role_assertion(&owner, Role::Owner, other.address(), Role::Agent, None, None).unwrap();
+        assert!(matches!(agent.accept_sponsor(other_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+
+        // Expired grant.
+        let expired = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Agent, None, Some(now - 1)).unwrap();
+        assert!(matches!(agent.accept_sponsor(expired, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+
+        // A valid grant is accepted.
+        let good = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Agent, None, Some(now + 1_000)).unwrap();
+        assert_eq!(agent.accept_sponsor(good, owner.address(), now).unwrap(), Role::Agent);
+        assert!(agent.is_sponsored());
+    }
+
+    /// WP-3.6 full integration through the Unix socket: an admin posts a message; the
+    /// bridge's `serve` loop decrypts it and pushes it to a connected runtime over the
+    /// (0600, bearer-gated) socket; the runtime replies with a `send` command; the bridge
+    /// encrypts + submits it; the admin decrypts the agent's reply. No plaintext ever
+    /// crosses the socket as ciphertext — only the agent's own decrypted view does.
+    #[tokio::test]
+    async fn serve_round_trips_a_message_over_the_socket() {
+        use std::time::Duration;
+        let now = 5_000u64;
+        let admin_w = EthWallet::generate();
+        let mut relay = DeliveryService::new(DOMAIN, admin_w.address(), 0).unwrap();
+        login(&mut relay, &admin_w, now);
+
+        let admin_m = Member::new(&admin_w.address().0).unwrap();
+        let mut agent = AgentBridge::new("did:citrate:crm-agent").unwrap();
+        agent.authenticate(&mut relay, DOMAIN, now).unwrap();
+        agent.publish_key_package(&mut relay, DOMAIN, now).unwrap();
+
+        // Admin creates the channel, adds the agent, sponsors it.
+        let mut admin_g = admin_m.create_group().unwrap();
+        let gid = GroupId(*blake3::hash(&admin_g.group_id()).as_bytes());
+        relay.register_group(gid, admin_w.address(), now).unwrap();
+        let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
+        let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
+        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
+        relay.onboard(gid, admin_w.address(), agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
+        agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
+        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
+        agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
+
+        // Admin posts a message into the channel.
+        let payload = ChatMessage { thread_id: None, parent_id: None, body: "What's the status of the Northwind deal?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
+        let ct = admin_g.send(&admin_m, &payload).unwrap();
+        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
+
+        // Bind the bearer-gated socket; accept + connect concurrently.
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("agent.sock");
+        let bearer = socket::random_bearer().unwrap();
+        let sock = socket::AgentSocket::bind(&sock_path, bearer.clone()).unwrap();
+        let (conn, client) = tokio::join!(
+            sock.accept(),
+            socket::RuntimeClient::connect(&sock_path, bearer.clone()),
+        );
+        let (mut sink, mut source) = conn.unwrap().split();
+        let mut client = client.unwrap();
+
+        // Drive the bridge's serve loop and the runtime script concurrently.
+        let serve = agent.serve(&mut sink, &mut source, &mut relay, Duration::from_millis(2), || now);
+        let runtime = async move {
+            // The runtime receives the admin's decrypted message…
+            let ev = client.recv_event().await.unwrap().unwrap();
+            assert!(matches!(ev, AgentInbound::Message { ref text, .. } if text.contains("Northwind")));
+            // …and replies. The bridge encrypts + submits it.
+            client.send_command(&AgentOutbound::Send { group: "deals".into(), text: "Northwind is in Proposal; pilot is air-gapped.".into() }).await.unwrap();
+            // Give the bridge a beat to submit before we EOF the loop.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drop(client); // clean EOF ends serve
+        };
+        let (serve_res, ()) = tokio::join!(serve, runtime);
+        serve_res.unwrap();
+
+        // The admin decrypts the agent's reply off the relay.
+        let admin_inbox = relay.fetch(&admin_w.address());
+        let app = admin_inbox.iter().find(|e| e.kind == EnvelopeKind::Application).expect("agent reply routed");
+        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap();
+        assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind is in Proposal"));
         relay.audit().verify_integrity().unwrap();
     }
 }

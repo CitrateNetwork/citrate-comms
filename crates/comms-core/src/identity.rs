@@ -235,6 +235,22 @@ impl EthWallet {
         Self { signing_key, address }
     }
 
+    /// Restore a wallet from its 32-byte secp256k1 secret (e.g. unsealed from the OS
+    /// keyring), giving a stable identity across restarts.
+    pub fn from_secret_key(secret: &[u8; 32]) -> Result<Self, IdentityError> {
+        let signing_key = SigningKey::from_slice(secret).map_err(|_| IdentityError::BadKey)?;
+        let address = address_from_verifying_key(signing_key.verifying_key());
+        Ok(Self { signing_key, address })
+    }
+
+    /// Export the 32-byte secret for sealing in the OS keyring. Handle with care.
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        let bytes = self.signing_key.to_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
     pub fn address(&self) -> WalletAddress {
         self.address
     }
@@ -303,6 +319,8 @@ pub enum IdentityError {
     HighS,
     #[error("malformed signature")]
     BadSignature,
+    #[error("invalid secret key")]
+    BadKey,
     #[error("signature must be 65 bytes (r||s||v)")]
     BadSignatureLength,
     #[error("bad recovery id")]

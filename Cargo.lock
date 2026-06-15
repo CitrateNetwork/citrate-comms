@@ -1034,10 +1034,14 @@ dependencies = [
  "comms-core",
  "comms-proto",
  "comms-relay",
+ "getrandom 0.2.17",
  "hex",
+ "keyring",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
