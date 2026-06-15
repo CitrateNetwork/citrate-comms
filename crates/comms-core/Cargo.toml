@@ -7,9 +7,32 @@ authors.workspace = true
 repository.workspace = true
 description = "citrate-comms domain library — MLS engine, SIWE→MLS identity binding, RBAC, CRM/PM domain, encrypted store, BLAKE3 audit chain."
 
+[features]
+# `mls` gates the OpenMLS-dependent client engine. The relay depends on this crate
+# with `default-features = false`, so the relay CANNOT link the MLS module — the
+# server-blind invariant is enforced at the dependency graph (PLANSET/02 §1).
+default = ["mls"]
+mls = ["dep:openmls", "dep:openmls_rust_crypto", "dep:openmls_traits", "dep:openmls_basic_credential", "dep:tls_codec"]
+
 [dependencies]
 comms-proto = { path = "../comms-proto" }
-# Crypto + MLS + storage deps land per-module in COMMS-S0/S1 (openmls, rocksdb,
-# aes-gcm, ed25519-dalek, x25519-dalek, blake3, keyring). Declared in the
-# workspace dep table; opted in as each module (mls/ identity/ rbac/ domain/
-# store/ audit/) is built. See PLANSET/02 + PLANSET/05.
+serde = { workspace = true }
+ciborium = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+blake3 = { workspace = true }
+sha3 = { workspace = true }
+hex = "0.4"
+# secp256k1 ECDSA + public-key recovery for the SIWE handshake and the wallet
+# binding attestation (the wallet identity is an Ethereum key).
+k256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# MLS engine (feature-gated).
+openmls = { workspace = true, optional = true }
+openmls_rust_crypto = { workspace = true, optional = true }
+openmls_traits = { workspace = true, optional = true }
+openmls_basic_credential = { version = "0.3", optional = true }
+tls_codec = { version = "0.4", optional = true }
+
+[dev-dependencies]

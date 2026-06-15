@@ -13,3 +13,12 @@ comms-core = { path = "../comms-core" }
 # slint (1.16) + @citrate-ui-kit are wired in COMMS-S2 when the design team's HTML/CSS
 # package is translated to Slint. build.rs will register the kit via library path
 # (DEP_CITRATE_STUDIO_UI_KIT_UI_KIT), exactly as citrate-native does. See PLANSET/02 §UI.
+
+[dev-dependencies]
+# The end-to-end COMMS-S0 test runs a real MLS client (comms-core, mls feature on by
+# default) through an in-process server-blind relay. This is the natural home for it:
+# the client legitimately uses both the MLS engine and the relay.
+comms-proto = { path = "../comms-proto" }
+comms-core = { path = "../comms-core" }
+comms-relay = { path = "../comms-relay" }
+blake3 = { workspace = true }

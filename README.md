@@ -6,8 +6,10 @@
 > that can never read them, and AI agents that participate as **cryptographic members** of a
 > conversation rather than server-side wiretaps. Runs on-prem and airgapped alongside `nist-agent`.
 
-**Status:** v1 planning — planset landed, pending acceptance into the federation. This is the
-first internal tool our own team will run; if it works for us it productizes for any team on the network.
+**Status:** accepted into the federation (2026-06-14). **COMMS-S0 (Foundations) prototype is complete** —
+the cryptographic + transport spine works end to end (22 tests green). This is the first internal tool our
+own team will run; if it works for us it productizes for any team on the network. Next: COMMS-S1
+(WebSocket transport + RocksDB persistence + full channels/forums/DMs).
 
 ## Read first
 The complete design lives in [`PLANSET/`](PLANSET/):
@@ -48,20 +50,26 @@ The complete design lives in [`PLANSET/`](PLANSET/):
 ```
 
 ## Crypto grade (matches the chain)
-MLS (RFC 9420) via OpenMLS, ciphersuite `MLS_256_DHKEMX25519_AES256GCM_SHA512_Ed25519`
-(X25519 KEM · AES-256-GCM · Ed25519 signatures). At-rest: RocksDB column families encrypted
+MLS (RFC 9420) via OpenMLS, ciphersuite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`
+(X25519 KEM · AES-128-GCM · Ed25519 signatures — the strongest standard MLS suite over the chain's
+X25519/Ed25519 curves; the AES-256-GCM "chain grade" is delivered at the at-rest layer, see below).
+At-rest: RocksDB column families encrypted
 with AES-256-GCM, keys wrapped by the chain's PQ-hybrid `HybridKEM` (Kyber-768 + X25519, SHA3-512 combine).
 Audit: BLAKE3 hash-chained append-only log, optionally anchored to chain 40204 for tamper-evidence.
 
-## Workspace (planned)
+## Workspace
+COMMS-S0 built the crypto + transport spine (✅ implemented & tested); the rest fills in per `PLANSET/05`.
 ```
 crates/
-├─ comms-proto         # wire types only (Envelope, GroupId, Commit/Welcome/AppMsg, RoleAssertion, AuditRecord)
-├─ comms-core          # MLS engine · identity binding · RBAC · CRM/PM domain · encrypted store · audit chain
-├─ comms-relay         # the server-blind daemon (WS delivery service, KeyPackage directory)
-├─ comms-agent-bridge  # Unix-socket IPC to nist-agent / citrate-agent-runtime; an agent's MLS client
-└─ comms-client        # native Slint app (consumes @citrate-ui-kit); UI translated from the design package
+├─ comms-proto         # ✅ wire types (Envelope, GroupId, Commit/Welcome/AppMsg, RoleAssertion, AuditRecord)
+├─ comms-core          # ✅ mls (OpenMLS) · identity (SIWE+attestation) · audit (BLAKE3 chain); rbac/domain/store next
+├─ comms-relay         # ✅ server-blind DeliveryService (total order, KeyPackage dir, audit); WS+RocksDB in S1
+├─ comms-agent-bridge  # ⏳ Unix-socket IPC to nist-agent / citrate-agent-runtime; an agent's MLS client (S3)
+└─ comms-client        # ⏳ native Slint app (@citrate-ui-kit); houses the S0 e2e test; UI from design package (S2)
 ```
+**Server-blind, enforced by the build graph:** `comms-relay` links `comms-core` with
+`default-features = false`, so the `mls` module (the only place group secrets live) is not compiled into
+the relay — referencing `comms_core::mls` from the relay fails to compile.
 
 ## Build
 ```bash

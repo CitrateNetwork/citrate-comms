@@ -1,20 +1,18 @@
 //! `comms-core` — the citrate-comms domain library (no network sockets bound here).
 //!
-//! Planned modules (built per `PLANSET/05_SPRINTS_AND_WPS.md`):
-//! - `mls`      — OpenMLS wrapper; group lifecycle, KeyPackage management, the
-//!                `MLS_256_DHKEMX25519_AES256GCM_SHA512_Ed25519` ciphersuite.
-//! - `identity` — SIWE-bound MLS credential; reuses the `citrate-studio/src/auth.rs`
-//!                OIDC/PKCE/keyring model. Identity == `wallet_address`.
-//! - `rbac`     — roles → capabilities; signed `RoleAssertion`; binding to MLS membership.
-//! - `domain`   — CRM + PM entities as E2E-encrypted, event-sourced records (CRDT only
-//!                for ordered/collaborative fields).
-//! - `store`    — client-side RocksDB with AES-256-GCM column families; CF keys wrapped
-//!                by the chain's PQ-hybrid `HybridKEM`. Persists OpenMLS group state.
-//! - `audit`    — BLAKE3 hash-chained append-only metadata log; mirrors
-//!                `citrate-agent-runtime` `AuditChain`.
+//! Modules (built per `PLANSET/05_SPRINTS_AND_WPS.md`):
+//! - [`audit`]    — BLAKE3 hash-chained append-only metadata log.
+//! - [`identity`] — SIWE handshake (secp256k1) + nonce store + wallet binding attestation.
+//! - [`mls`]      — OpenMLS group engine (feature `mls`; the relay does NOT enable it).
 //!
-//! Secret MLS state in `mls` is `pub(crate)` to the module: the relay links this crate
-//! for `store`/`audit` only and is statically prevented from touching group keys
-//! (the server-blind invariant — see `PLANSET/02_ARCHITECTURE.md`).
+//! The server-blind invariant is enforced at the dependency graph: `comms-relay`
+//! depends on this crate with `default-features = false`, so the [`mls`] module —
+//! which is the only place group secrets live — is not even compiled into the relay.
 
 #![forbid(unsafe_code)]
+
+pub mod audit;
+pub mod identity;
+
+#[cfg(feature = "mls")]
+pub mod mls;
