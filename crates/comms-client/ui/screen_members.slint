@@ -49,7 +49,7 @@ export component MembersScreen inherits Rectangle {
     property <[string]> roles: ["All", "Owner", "Admin", "Member", "Partner", "Guest", "Agent"];
 
     // every member from data.jsx MEMBERS (people + agents)
-    property <[MemberRow]> members: [
+    in property <[MemberRow]> members: [
         { name: "Saul Loveman", initials: "SL", tint: #2f4502, role: "Owner", addr: "0x1f2e9c4a7b3d8e10aa9f", status: "active", external: false, devices: 3 },
         { name: "Priya Anand", initials: "PA", tint: #1b4965, role: "Admin", addr: "0x7a4b1d9e2c6f0837bb12", status: "active", external: false, devices: 2 },
         { name: "Mateo Ferraro", initials: "MF", tint: #6e5100, role: "Member", addr: "0x3c8f6e1a0d5b9274cc34", status: "active", external: false, devices: 1 },

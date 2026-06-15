@@ -72,7 +72,7 @@ component BoardColumn inherits Rectangle {
 export component ProjectsScreen inherits Rectangle {
     background: Theme.paper;
 
-    property <[Task]> tasks: [
+    in property <[Task]> tasks: [
         { id: "TASK-118", title: "Air-gap deployment runbook", assignee: "MF", status: "Doing", priority: "high", due: "Jun 20" },
         { id: "TASK-119", title: "Post-quantum security review", assignee: "IP", status: "Review", priority: "high", due: "Jun 22" },
         { id: "TASK-117", title: "Co-signed deployment SOW", assignee: "PA", status: "Todo", priority: "medium", due: "Jun 24" },

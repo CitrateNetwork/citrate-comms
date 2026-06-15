@@ -88,7 +88,7 @@ component BoardColumn inherits Rectangle {
 export component CrmScreen inherits Rectangle {
     background: Theme.paper;
 
-    property <[Deal]> deals: [
+    in property <[Deal]> deals: [
         { name: "Northwind — self-hosted pilot", account: "Northwind Traders", value: "$240,000", stage: "Proposal", priority: "high", owner: "PA", close: "Jul 18", has-channel: true },
         { name: "Helios Group expansion", account: "Helios Group", value: "$88,000", stage: "Qualified", priority: "medium", owner: "MF", close: "Aug 02" },
         { name: "Atlas Freight rollout", account: "Atlas Freight", value: "$410,000", stage: "Lead", priority: "high", owner: "PA", close: "Sep 10" },

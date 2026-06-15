@@ -46,6 +46,7 @@ export component CommsScreen inherits HorizontalLayout {
     spacing: 0;
     callback add-agent();
     callback add-member();
+    callback send(string);
     property <[Chan]> channels: [
         { name: "deals", preview: "@crm-agent: Linked Northwind to this thread.", time: "2m", unread: 3, has-agent: true, starred: true, tag: "pipeline", active: true },
         { name: "eng", preview: "Hana: key rotation job is green across all nodes.", time: "18m", unread: 0, has-agent: true, starred: true, tag: "engineering" },
@@ -53,13 +54,13 @@ export component CommsScreen inherits HorizontalLayout {
         { name: "security", preview: "Ivo: ML-KEM migration plan attached.", time: "3h", unread: 1, tag: "sensitive" },
         { name: "announcements", preview: "3 topics · 14 replies", time: "1d", tag: "forum", forum: true },
     ];
-    property <[Person]> members: [
+    in property <[Person]> members: [
         { name: "Saul Loveman", initials: "SL", tint: #2f4502, role: "Owner", addr: "0x1f2e9c4a…" },
         { name: "Priya Anand", initials: "PA", tint: #1b4965, role: "Admin", addr: "0x7a4b1d9e…" },
         { name: "Mateo Ferraro", initials: "MF", tint: #6e5100, role: "Member", addr: "0x3c8f6e1a…" },
         { name: "Lena Brandt", initials: "LB", tint: #b07b00, role: "Partner", addr: "0x2b6c4e8a…", external: true },
     ];
-    property <[Msg]> messages: [
+    in property <[Msg]> messages: [
         { system: true, boundary: true, text: "You joined on Jun 14 · Earlier messages stay private to members who were here." },
         { author: "Priya Anand", initials: "PA", tint: #1b4965, role: "Admin", ts: "09:14", text: "Morning — Northwind came back warm after the demo. They want a self-hosted pilot on their own iron, fully air-gapped.\n\nThat's exactly our story. I'm moving them to Proposal." },
         { author: "Mateo Ferraro", initials: "MF", tint: #6e5100, role: "Member", ts: "09:16", text: "Love it. Security review will matter to them — they asked specifically about post-quantum. Worth looping that in early." },
@@ -154,9 +155,16 @@ export component CommsScreen inherits HorizontalLayout {
                         VerticalLayout {
                             Rectangle {
                                 height: 36px;
-                                HorizontalLayout {
-                                    padding-left: 16px; alignment: start;
-                                    Text { text: "Message #deals"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center; }
+                                input := TextInput {
+                                    x: 16px; width: parent.width - 32px; height: parent.height;
+                                    text: "";
+                                    font-family: Theme.font-sans; font-size: 16px; color: Theme.ink-2;
+                                    vertical-alignment: center;
+                                    single-line: true;
+                                    accepted => { root.send(self.text); self.text = ""; }
+                                }
+                                if input.text == "": Text {
+                                    x: 16px; text: "Message #deals"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center;
                                 }
                             }
                             Rectangle {
@@ -166,11 +174,12 @@ export component CommsScreen inherits HorizontalLayout {
                                     Text { text: "@"; color: Theme.fg-2; font-size: 15px; vertical-alignment: center; }
                                     Text { text: "Link a record"; color: Theme.fg-2; font-size: 12px; vertical-alignment: center; }
                                     Rectangle { horizontal-stretch: 1; }
-                                    Text { text: "Encrypted to 5 members"; color: Theme.fg-3; font-size: 12px; vertical-alignment: center; }
+                                    Text { text: "Encrypted to " + root.members.length + " members"; color: Theme.fg-3; font-size: 12px; vertical-alignment: center; }
                                     Rectangle {
                                         width: 72px; height: 26px; border-radius: 6px; background: Theme.citrate-green; border-width: 1px; border-color: Theme.citrate-green-deep;
                                         y: (parent.height - 26px)/2;
                                         Text { text: "Send"; color: Theme.ink; font-size: 13px; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
+                                        TouchArea { mouse-cursor: pointer; clicked => { root.send(input.text); input.text = ""; } }
                                     }
                                 }
                             }

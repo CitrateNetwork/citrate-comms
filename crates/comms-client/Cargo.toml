@@ -14,9 +14,14 @@ path = "src/main.rs"
 [dependencies]
 comms-proto = { path = "../comms-proto" }
 comms-core = { path = "../comms-core" }
-# Native UI. The screens are translated from the Claude Design handoff bundle
-# (design/handoff/) against the brand tokens. @citrate-ui-kit can be swapped in later;
-# for now the kit primitives are recreated locally in ui/ with identical token names.
+# The client drives an in-process server-blind relay + a real MLS group + the domain
+# store (src/backend.rs), so the screens render LIVE decrypted data, not static fixtures.
+comms-relay = { path = "../comms-relay" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+hex = "0.4"
+# Native UI. Screens translated from the Claude Design handoff (design/handoff/) against
+# the brand tokens; @citrate-ui-kit can be swapped in for the locally-recreated primitives.
 slint = { workspace = true }
 
 [build-dependencies]

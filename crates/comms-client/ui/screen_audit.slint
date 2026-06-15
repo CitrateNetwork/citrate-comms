@@ -91,7 +91,7 @@ component AuditRowView inherits Rectangle {
 export component AuditScreen inherits Rectangle {
     background: Theme.sealed-bg;
 
-    property <[AuditRow]> records: [
+    in property <[AuditRow]> records: [
         { seq: "1042", ts: "Jun 14 · 09:31:06 UTC", event: "EnvelopeReceipt", summary: "Envelope delivered · 2.1 KB · text", actor: "@crm-agent", hash: "0x9af3…c1d4" },
         { seq: "1041", ts: "Jun 14 · 09:31:02 UTC", event: "RoleAsserted", summary: "Agent action recorded · scope #deals", actor: "@crm-agent", hash: "0x71be…0a88" },
         { seq: "1040", ts: "Jun 14 · 09:18:44 UTC", event: "AgentAdded", summary: "@crm-agent added to #deals", actor: "Priya", hash: "0x3c0d…ff21" },

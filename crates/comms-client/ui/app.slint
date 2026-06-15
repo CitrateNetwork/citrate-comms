@@ -1,5 +1,5 @@
 // citrate-comms — native client (COMMS-S2). Shell + router; screens are per-file.
-import { Theme, Chan } from "theme.slint";
+import { Theme, Chan, Msg, Person, Deal, Task, MemberRow, AuditRow } from "theme.slint";
 import { Avatar } from "primitives.slint";
 import { CommsScreen } from "screen_comms.slint";
 import { CrmScreen } from "screen_crm.slint";
@@ -45,6 +45,15 @@ export component AppWindow inherits Window {
     property <string> route: "comms";
     property <bool> signed-in: false;
     property <string> overlay: "";  // "" | addAgent | offboard | invite
+
+    // live data from the backend (src/backend.rs); main.rs sets these.
+    in property <[Msg]> ws-messages;
+    in property <[Person]> ws-members;
+    in property <[Deal]> ws-deals;
+    in property <[Task]> ws-tasks;
+    in property <[MemberRow]> ws-member-rows;
+    in property <[AuditRow]> ws-audit;
+    callback send-message(string);
     property <[Chan]> rail-channels: [
         { name: "deals", unread: 3, active: true },
         { name: "announcements", forum: true },
@@ -136,17 +145,21 @@ export component AppWindow inherits Window {
             Rectangle {
                 horizontal-stretch: 1; background: Theme.paper;
                 if root.route == "comms": CommsScreen {
+                    messages: root.ws-messages;
+                    members: root.ws-members;
+                    send(t) => { root.send-message(t); }
                     add-agent => { root.overlay = "addAgent"; }
                     add-member => { root.overlay = "invite"; }
                 }
-                if root.route == "crm": CrmScreen {}
-                if root.route == "projects": ProjectsScreen {}
+                if root.route == "crm": CrmScreen { deals: root.ws-deals; }
+                if root.route == "projects": ProjectsScreen { tasks: root.ws-tasks; }
                 if root.route == "agents": AgentsScreen {}
                 if root.route == "members": MembersScreen {
+                    members: root.ws-member-rows;
                     invite => { root.overlay = "invite"; }
                     offboard => { root.overlay = "offboard"; }
                 }
-                if root.route == "audit": AuditScreen {}
+                if root.route == "audit": AuditScreen { records: root.ws-audit; }
                 if root.route == "security": SecurityScreen {}
                 if root.route == "settings": SettingsScreen {}
             }

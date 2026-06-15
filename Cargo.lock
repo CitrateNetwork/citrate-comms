@@ -1042,6 +1042,8 @@ dependencies = [
  "comms-core",
  "comms-proto",
  "comms-relay",
+ "hex",
+ "serde",
  "slint",
  "slint-build",
  "tokio",
