@@ -1,0 +1,136 @@
+// nav — the command palette (⌘K) and the me-menu dropdown.
+import { Theme } from "theme.slint";
+import { Avatar, Hairline } from "primitives.slint";
+
+struct NavItem {
+    label: string,
+    route: string,
+    kind: string,
+}
+
+export component CommandPalette inherits Rectangle {
+    callback navigate(string);
+    callback close();
+    property <[NavItem]> items: [
+        { label: "Comms", route: "comms", kind: "View" },
+        { label: "CRM — deals & contacts", route: "crm", kind: "View" },
+        { label: "Projects — task board", route: "projects", kind: "View" },
+        { label: "Agents", route: "agents", kind: "View" },
+        { label: "Members", route: "members", kind: "View" },
+        { label: "Security — post-quantum posture", route: "security", kind: "View" },
+        { label: "Audit — the sealed ledger", route: "audit", kind: "View" },
+        { label: "Settings", route: "settings", kind: "View" },
+        { label: "# deals", route: "comms", kind: "Channel" },
+        { label: "≡ announcements", route: "forum", kind: "Forum" },
+    ];
+
+    background: #0e0f0c80;
+    // scrim click-away
+    TouchArea { clicked => { root.close(); } }
+
+    Rectangle {
+        width: 600px;
+        height: 440px;
+        x: (parent.width - 600px) / 2;
+        y: 120px;
+        background: Theme.paper-pure;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border-1;
+        drop-shadow-color: #0e0f0c80;
+        drop-shadow-blur: 60px;
+        drop-shadow-offset-y: 24px;
+        // a click on the card must NOT close the palette
+        TouchArea {}
+
+        VerticalLayout {
+            // input row
+            Rectangle {
+                height: 60px;
+                border-width: 1px;
+                border-color: Theme.border-1;
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 20px; spacing: 12px; alignment: start;
+                    Text { text: "⌕"; color: Theme.fg-3; font-size: 20px; vertical-alignment: center; }
+                    Text { text: "Search this device · go to anything"; color: Theme.fg-3; font-size: 18px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 28px; height: 18px; border-radius: 5px; border-width: 1px; border-color: Theme.border-2; background: Theme.paper-2;
+                        y: (parent.height - 18px)/2;
+                        Text { text: "⌘K"; color: Theme.fg-2; font-family: Theme.font-mono; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+            // results
+            Rectangle {
+                vertical-stretch: 1; clip: true;
+                VerticalLayout {
+                    padding: 8px; spacing: 0;
+                    for it[i] in root.items: Rectangle {
+                        height: 40px;
+                        border-radius: 6px;
+                        background: rowta.has-hover ? Theme.citrate-green-tint : transparent;
+                        rowta := TouchArea { mouse-cursor: pointer; clicked => { root.navigate(it.route); root.close(); } }
+                        HorizontalLayout {
+                            padding-left: 12px; padding-right: 12px; spacing: 12px; alignment: start;
+                            Text { text: it.label; color: Theme.ink; font-size: 14px; vertical-alignment: center; horizontal-stretch: 1; }
+                            Text { text: it.kind; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 0.8px; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component MeMenu inherits Rectangle {
+    callback navigate(string);
+    callback sign-out();
+    callback close();
+    background: transparent;
+    TouchArea { clicked => { root.close(); } }
+
+    Rectangle {
+        x: parent.width - 292px;
+        y: 48px;
+        width: 280px;
+        height: menu.preferred-height;
+        background: Theme.paper-pure;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-1;
+        drop-shadow-color: #0e0f0c66;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 16px;
+        TouchArea {}
+        menu := VerticalLayout {
+            padding: 8px;
+            spacing: 0;
+            // identity header
+            Rectangle {
+                height: 60px;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 8px; spacing: 10px; alignment: start;
+                    Avatar { initials: "SL"; tint: #2f4502; sz: 36px; }
+                    VerticalLayout {
+                        alignment: center; spacing: 2px;
+                        Text { text: "Saul Loveman"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                        Text { text: "0x1f2e9c4a…"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; }
+                    }
+                }
+            }
+            Hairline {}
+            Rectangle {
+                height: 40px; border-radius: 6px;
+                background: t1.has-hover ? Theme.stone-100 : transparent;
+                t1 := TouchArea { mouse-cursor: pointer; clicked => { root.navigate("settings"); root.close(); } }
+                HorizontalLayout { padding-left: 12px; alignment: start; Text { text: "Settings"; color: Theme.fg-1; font-size: 14px; vertical-alignment: center; } }
+            }
+            Rectangle {
+                height: 40px; border-radius: 6px;
+                background: t2.has-hover ? Theme.danger-bg : transparent;
+                t2 := TouchArea { mouse-cursor: pointer; clicked => { root.sign-out(); root.close(); } }
+                HorizontalLayout { padding-left: 12px; alignment: start; Text { text: "Sign out"; color: Theme.danger; font-size: 14px; vertical-alignment: center; } }
+            }
+        }
+    }
+}

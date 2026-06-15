@@ -10,7 +10,9 @@ import { AuditScreen } from "screen_audit.slint";
 import { SecurityScreen } from "screen_security.slint";
 import { SettingsScreen } from "screen_settings.slint";
 import { AuthScreen } from "screen_auth.slint";
+import { ForumScreen } from "screen_forum.slint";
 import { AddAgentDialog, OffboardDialog, InviteDialog } from "overlays.slint";
+import { CommandPalette, MeMenu } from "nav.slint";
 
 component RailItem inherits Rectangle {
     in property <string> label;
@@ -45,6 +47,8 @@ export component AppWindow inherits Window {
     property <string> route: "comms";
     property <bool> signed-in: false;
     property <string> overlay: "";  // "" | addAgent | offboard | invite
+    property <bool> cmdk: false;
+    property <bool> me-open: false;
 
     // live data from the backend (src/backend.rs); main.rs sets these.
     in property <[Msg]> ws-messages;
@@ -66,7 +70,22 @@ export component AppWindow inherits Window {
         signed-in => { root.signed-in = true; }
     }
 
-    if root.signed-in: VerticalLayout {
+    if root.signed-in: FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if ((event.modifiers.control || event.modifiers.meta) && event.text == "k") {
+                root.cmdk = !root.cmdk;
+                return EventResult.accept;
+            }
+            if (event.text == Key.Escape) {
+                root.cmdk = false;
+                root.me-open = false;
+                root.overlay = "";
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+        VerticalLayout {
         spacing: 0;
         // ── title bar ──
         Rectangle {
@@ -95,8 +114,9 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 360px; height: 28px; border-radius: 999px;
                         x: (parent.width - 360px) / 2; y: (parent.height - 28px) / 2;
-                        background: Theme.paper-pure; border-width: 1px; border-color: Theme.border-1;
+                        background: search-ta.has-hover ? Theme.stone-50 : Theme.paper-pure; border-width: 1px; border-color: Theme.border-1;
                         Text { text: "Search this device · go to anything                              ⌘K"; color: Theme.fg-3; font-size: 12px; vertical-alignment: center; horizontal-alignment: center; }
+                        search-ta := TouchArea { mouse-cursor: pointer; clicked => { root.cmdk = true; } }
                     }
                 }
                 HorizontalLayout {
@@ -110,7 +130,11 @@ export component AppWindow inherits Window {
                             Text { text: "· relay.citrate.internal"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
                         }
                     }
-                    Avatar { initials: "SL"; tint: #2f4502; sz: 26px; y: (parent.height - 26px) / 2; }
+                    Rectangle {
+                        width: 26px; height: 26px; y: (parent.height - 26px) / 2;
+                        Avatar { initials: "SL"; tint: #2f4502; sz: 26px; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.me-open = !root.me-open; } }
+                    }
                 }
             }
         }
@@ -126,8 +150,8 @@ export component AppWindow inherits Window {
                     Text { text: "SPACES"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; letter-spacing: 1.4px; }
                     for c[i] in root.rail-channels: RailItem {
                         label: (c.forum ? "≡ " : "# ") + c.name;
-                        active: root.route == "comms" && c.active;
-                        clicked => { root.route = "comms"; }
+                        active: (root.route == "comms" && c.active) || (root.route == "forum" && c.forum);
+                        clicked => { root.route = c.forum ? "forum" : "comms"; }
                     }
                     Rectangle { height: 12px; }
                     RailItem { label: "CRM"; active: root.route == "crm"; clicked => { root.route = "crm"; } }
@@ -151,6 +175,7 @@ export component AppWindow inherits Window {
                     add-agent => { root.overlay = "addAgent"; }
                     add-member => { root.overlay = "invite"; }
                 }
+                if root.route == "forum": ForumScreen {}
                 if root.route == "crm": CrmScreen { deals: root.ws-deals; }
                 if root.route == "projects": ProjectsScreen { tasks: root.ws-tasks; }
                 if root.route == "agents": AgentsScreen {}
@@ -163,6 +188,7 @@ export component AppWindow inherits Window {
                 if root.route == "security": SecurityScreen {}
                 if root.route == "settings": SettingsScreen {}
             }
+        }
         }
     }
 
@@ -178,5 +204,18 @@ export component AppWindow inherits Window {
     if root.signed-in && root.overlay == "invite": InviteDialog {
         width: 100%; height: 100%;
         close => { root.overlay = ""; }
+    }
+
+    // ── command palette (⌘K / search) + me-menu ──
+    if root.signed-in && root.cmdk: CommandPalette {
+        width: 100%; height: 100%;
+        navigate(r) => { root.route = r; root.cmdk = false; }
+        close => { root.cmdk = false; }
+    }
+    if root.signed-in && root.me-open: MeMenu {
+        width: 100%; height: 100%;
+        navigate(r) => { root.route = r; root.me-open = false; }
+        sign-out => { root.signed-in = false; root.me-open = false; }
+        close => { root.me-open = false; }
     }
 }

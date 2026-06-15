@@ -1,0 +1,157 @@
+// Forum — the #announcements channel (company-wide, threaded). Screen 02.
+import { Theme, Thread } from "theme.slint";
+import { Avatar, Btn, Card, ScreenHead, Eyebrow } from "primitives.slint";
+
+component ThreadCard inherits Card {
+    in property <Thread> t;
+    in property <string> initials;
+    in property <color> tint;
+    lifted: false;
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+        // header — avatar + title + meta
+        HorizontalLayout {
+            spacing: 14px;
+            alignment: start;
+            Rectangle {
+                width: 40px;
+                VerticalLayout {
+                    alignment: start;
+                    Avatar { initials: root.initials; tint: root.tint; sz: 40px; }
+                }
+            }
+            VerticalLayout {
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.t.title;
+                    color: Theme.ink;
+                    font-family: Theme.font-display;
+                    font-weight: 500;
+                    font-size: 18px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Text { text: root.t.author; color: Theme.fg-3; font-size: 13px; vertical-alignment: center; }
+                    Text { text: "·"; color: Theme.fg-3; font-size: 13px; vertical-alignment: center; }
+                    Text { text: root.t.last; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+                }
+            }
+        }
+        // excerpt — editorial serif, italic, wrapped
+        Text {
+            text: root.t.excerpt;
+            color: Theme.fg-2;
+            font-family: Theme.font-editorial;
+            font-italic: true;
+            font-size: 17px;
+            wrap: word-wrap;
+        }
+        // footer — replies count + participant avatars + following indicator
+        HorizontalLayout {
+            spacing: 14px;
+            alignment: start;
+            Text {
+                text: root.t.replies + " replies";
+                color: Theme.fg-2;
+                font-family: Theme.font-mono;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            // small stack of participant avatars
+            HorizontalLayout {
+                spacing: -6px;
+                alignment: start;
+                Avatar { initials: "SL"; tint: #2f4502; sz: 22px; }
+                Avatar { initials: "PA"; tint: #1b4965; sz: 22px; }
+                Avatar { initials: "MF"; tint: #6e5100; sz: 22px; }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            // following indicator — green dot + label
+            Rectangle {
+                if root.t.following: HorizontalLayout {
+                    spacing: 7px;
+                    alignment: end;
+                    Rectangle {
+                        width: 8px; height: 8px; border-radius: 4px;
+                        y: (parent.height - 8px) / 2;
+                        background: Theme.citrate-green;
+                    }
+                    Text { text: "Following"; color: Theme.citrate-green-deep; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+}
+
+export component ForumScreen inherits Rectangle {
+    callback new-topic();
+    background: Theme.paper;
+    property <[Thread]> threads: [
+        {
+            title: "Q3 all-hands — agenda and pre-reads",
+            author: "Saul Loveman",
+            excerpt: "Pulling the agenda together. Drop topics by Friday; pre-reads will be witnessed here so we keep a clean record of what we agreed before the room.",
+            replies: 8, last: "2h", following: true,
+        },
+        {
+            title: "Naming the trust model: ‘witnesses, not watchers’",
+            author: "Priya Anand",
+            excerpt: "How we talk about agents matters. They’re visible participants on the record — not surveillance. Proposing we standardize the language across the product.",
+            replies: 4, last: "1d", following: false,
+        },
+        {
+            title: "Welcoming Lena (Brandt & Co.) as our first partner",
+            author: "Saul Loveman",
+            excerpt: "Lena joins as an external Partner scoped to #deals only. Say hello — and a note on what Partner access does and doesn’t grant.",
+            replies: 2, last: "3d", following: true,
+        },
+    ];
+
+    VerticalLayout {
+        // header row — ScreenHead + New topic button
+        Rectangle {
+            height: 88px;
+            HorizontalLayout {
+                ScreenHead {
+                    title: "announcements";
+                    subtitle: "Company-wide, threaded. Decisions get witnessed here so we keep a clean record.";
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 160px;
+                    background: Theme.paper;
+                    border-width: 1px;
+                    border-color: Theme.border-1;
+                    Btn {
+                        text: "+ New topic";
+                        primary: true;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 132px;
+                        clicked => { root.new-topic(); }
+                    }
+                }
+            }
+        }
+        // scrolling list of thread cards
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                Eyebrow { text: "3 TOPICS · 14 REPLIES"; }
+                for t[i] in root.threads: ThreadCard {
+                    t: t;
+                    initials: t.author == "Priya Anand" ? "PA" : "SL";
+                    tint: t.author == "Priya Anand" ? #1b4965 : #2f4502;
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}

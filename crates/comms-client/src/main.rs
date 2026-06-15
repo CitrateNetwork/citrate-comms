@@ -142,8 +142,25 @@ fn populate(app: &AppWindow, ws: &Workspace) {
     app.set_ws_audit(audit_model(ws));
 }
 
+/// Register the embedded brand fonts (Geist / Geist Mono / Space Grotesk / Cormorant)
+/// into Slint's shared font collection so type renders on-brand. Must run after the
+/// platform is initialized (i.e. after `AppWindow::new`).
+fn register_brand_fonts() {
+    use slint::fontique_08::fontique;
+    for bytes in [
+        include_bytes!("../ui/fonts/Geist.ttf").as_slice(),
+        include_bytes!("../ui/fonts/GeistMono.ttf").as_slice(),
+        include_bytes!("../ui/fonts/SpaceGrotesk.ttf").as_slice(),
+        include_bytes!("../ui/fonts/Cormorant.ttf").as_slice(),
+    ] {
+        let blob = fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
+        let _ = slint::fontique_08::shared_collection().register_fonts(blob, None);
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
+    register_brand_fonts();
 
     match Workspace::bootstrap() {
         Ok(workspace) => {

@@ -22,7 +22,8 @@ serde = { workspace = true }
 hex = "0.4"
 # Native UI. Screens translated from the Claude Design handoff (design/handoff/) against
 # the brand tokens; @citrate-ui-kit can be swapped in for the locally-recreated primitives.
-slint = { workspace = true }
+# `unstable-fontique-08` lets us register the embedded brand fonts at runtime.
+slint = { workspace = true, features = ["unstable-fontique-08"] }
 
 [build-dependencies]
 slint-build = "1.16"
