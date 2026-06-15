@@ -1,9 +1,15 @@
 //! citrate-comms desktop client (COMMS-S2).
 //!
 //! The native Slint UI, translated from the Claude Design handoff (`design/handoff/`).
-//! This first pass renders the app shell + the primary **channel screen** with the brand
-//! tokens. The data is the design's static `#deals` scenario; wiring the screens to the
-//! `comms-core` MLS/domain layer and the relay (`comms-relay::ws`) is the next S2 step.
+//! Shell + the full screen set (channel, CRM, projects, agents, members, sealed audit,
+//! security, settings), the Info/Ledger right panel (the Witness differentiator), and
+//! the add-agent / offboard / invite overlays. Data is the design's static scenario;
+//! wiring the screens to `comms-core` (MLS/domain) over `comms-relay::ws` is COMMS-S2 WP-2.9.
+//!
+//! Brand fonts (Geist / Geist Mono / Space Grotesk / Cormorant) are staged in `ui/fonts/`;
+//! the theme references them by family name. Embedding them at runtime uses Slint 1.16's
+//! `fontique` collection API (an unstable feature) — wired in a follow-up; until then the
+//! families fall back to close system equivalents.
 
 slint::include_modules!();
 

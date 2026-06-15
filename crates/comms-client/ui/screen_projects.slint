@@ -1,0 +1,121 @@
+// Projects — task kanban board (Todo / Doing / Review / Done). Screen 03.
+import { Theme, Task } from "theme.slint";
+import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead } from "primitives.slint";
+
+// one task card
+component TaskCard inherits Card {
+    in property <Task> task;
+    in property <bool> linked: false;
+    VerticalLayout {
+        padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
+        spacing: 8px;
+        Text {
+            text: root.task.title;
+            color: Theme.ink; font-family: Theme.font-sans; font-size: 14px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px; alignment: start;
+            RiskBadge { level: root.task.priority; }
+            Text {
+                text: root.task.due;
+                color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if root.linked: Text { text: "#"; color: Theme.citrate-green-deep; font-family: Theme.font-mono; font-size: 13px; vertical-alignment: center; }
+            Avatar { initials: root.task.assignee; sz: 24px; }
+        }
+    }
+}
+
+// one kanban column for a single status
+component BoardColumn inherits Rectangle {
+    in property <string> status;
+    in property <int> count;
+    in property <[Task]> tasks;
+    width: 300px;
+    background: Theme.paper-2;
+    border-width: 1px; border-color: Theme.border-1; border-radius: 8px;
+    VerticalLayout {
+        Rectangle {
+            height: 44px;
+            border-width: 1px; border-color: Theme.border-1;
+            HorizontalLayout {
+                padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: start;
+                Rectangle {
+                    width: 7px; height: 7px; border-radius: 3.5px;
+                    y: (parent.height - 7px) / 2;
+                    background: Theme.stage-dot(root.status);
+                }
+                Text { text: root.status; color: Theme.ink; font-weight: 600; font-size: 14px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: root.count; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+            VerticalLayout {
+                padding: 12px; spacing: 0;
+                for t[i] in root.tasks: Rectangle {
+                    if t.status == root.status: VerticalLayout {
+                        padding-bottom: 12px;
+                        TaskCard { task: t; linked: true; }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}
+
+export component ProjectsScreen inherits Rectangle {
+    background: Theme.paper;
+
+    property <[Task]> tasks: [
+        { id: "TASK-118", title: "Air-gap deployment runbook", assignee: "MF", status: "Doing", priority: "high", due: "Jun 20" },
+        { id: "TASK-119", title: "Post-quantum security review", assignee: "IP", status: "Review", priority: "high", due: "Jun 22" },
+        { id: "TASK-117", title: "Co-signed deployment SOW", assignee: "PA", status: "Todo", priority: "medium", due: "Jun 24" },
+        { id: "TASK-120", title: "Security posture one-pager", assignee: "PA", status: "Done", priority: "low", due: "Jun 14" },
+    ];
+
+    VerticalLayout {
+        // header + actions
+        Rectangle {
+            ScreenHead {
+                title: "Board";
+                subtitle: "Tasks the deal spawned. Each task can link the conversation where the work actually happens.";
+            }
+            HorizontalLayout {
+                padding-right: 24px; spacing: 10px; alignment: end;
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Btn { text: "Assignee"; }
+                        Btn { text: "+ New task"; primary: true; }
+                    }
+                }
+            }
+        }
+
+        // body: task kanban
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                Eyebrow { text: "PROJECT · NORTHWIND PILOT"; }
+                Rectangle {
+                    vertical-stretch: 1; clip: true;
+                    HorizontalLayout {
+                        spacing: 16px; alignment: start;
+                        BoardColumn { status: "Todo"; count: 1; tasks: root.tasks; }
+                        BoardColumn { status: "Doing"; count: 1; tasks: root.tasks; }
+                        BoardColumn { status: "Review"; count: 1; tasks: root.tasks; }
+                        BoardColumn { status: "Done"; count: 1; tasks: root.tasks; }
+                    }
+                }
+            }
+        }
+    }
+}

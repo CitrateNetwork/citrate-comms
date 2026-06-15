@@ -1,0 +1,190 @@
+// Comms — the channel screen (list + stream + Info/Ledger right panel). Screen 01.
+import { Theme, Chan, Person, Msg } from "theme.slint";
+import { Avatar, RoleGlyph, Chip, SurfBadge, Btn, LinkedRecord } from "primitives.slint";
+import { LedgerPanel } from "ledger.slint";
+
+component MessageRow inherits Rectangle {
+    in property <Msg> m;
+    horizontal-stretch: 1;
+    HorizontalLayout {
+        spacing: 12px;
+        alignment: start;
+        Rectangle {
+            width: 40px;
+            VerticalLayout {
+                alignment: start;
+                if !root.m.system: Avatar { initials: root.m.initials; tint: root.m.tint; agent: root.m.is-agent; sz: 32px; }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if root.m.is-agent: Rectangle { x: 0; width: 2px; background: Theme.citrate-green-tint; }
+            VerticalLayout {
+                padding-left: root.m.is-agent ? 12px : 0px;
+                spacing: 3px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: root.m.author;
+                        color: root.m.is-agent ? Theme.citrate-green-dark : Theme.ink;
+                        font-family: root.m.is-agent ? Theme.font-mono : Theme.font-sans;
+                        font-weight: 600; font-size: root.m.is-agent ? 13px : 14px; vertical-alignment: center;
+                    }
+                    if root.m.is-agent: SurfBadge { text: "AGENT"; kind: "agent"; }
+                    if root.m.role != "" && !root.m.is-agent: RoleGlyph { role: root.m.role; }
+                    Text { text: root.m.ts; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; vertical-alignment: center; }
+                }
+                Text { text: root.m.text; color: root.m.is-agent ? Theme.graphite : Theme.ink-2; font-family: Theme.font-sans; font-size: 16px; wrap: word-wrap; }
+                if root.m.has-link: LinkedRecord { kind: root.m.link-kind; name: root.m.link-name; id: root.m.link-id; }
+            }
+        }
+    }
+}
+
+export component CommsScreen inherits HorizontalLayout {
+    spacing: 0;
+    callback add-agent();
+    callback add-member();
+    property <[Chan]> channels: [
+        { name: "deals", preview: "@crm-agent: Linked Northwind to this thread.", time: "2m", unread: 3, has-agent: true, starred: true, tag: "pipeline", active: true },
+        { name: "eng", preview: "Hana: key rotation job is green across all nodes.", time: "18m", unread: 0, has-agent: true, starred: true, tag: "engineering" },
+        { name: "design", preview: "Priya: roster panel feels right now.", time: "1h", tag: "design" },
+        { name: "security", preview: "Ivo: ML-KEM migration plan attached.", time: "3h", unread: 1, tag: "sensitive" },
+        { name: "announcements", preview: "3 topics · 14 replies", time: "1d", tag: "forum", forum: true },
+    ];
+    property <[Person]> members: [
+        { name: "Saul Loveman", initials: "SL", tint: #2f4502, role: "Owner", addr: "0x1f2e9c4a…" },
+        { name: "Priya Anand", initials: "PA", tint: #1b4965, role: "Admin", addr: "0x7a4b1d9e…" },
+        { name: "Mateo Ferraro", initials: "MF", tint: #6e5100, role: "Member", addr: "0x3c8f6e1a…" },
+        { name: "Lena Brandt", initials: "LB", tint: #b07b00, role: "Partner", addr: "0x2b6c4e8a…", external: true },
+    ];
+    property <[Msg]> messages: [
+        { system: true, boundary: true, text: "You joined on Jun 14 · Earlier messages stay private to members who were here." },
+        { author: "Priya Anand", initials: "PA", tint: #1b4965, role: "Admin", ts: "09:14", text: "Morning — Northwind came back warm after the demo. They want a self-hosted pilot on their own iron, fully air-gapped.\n\nThat's exactly our story. I'm moving them to Proposal." },
+        { author: "Mateo Ferraro", initials: "MF", tint: #6e5100, role: "Member", ts: "09:16", text: "Love it. Security review will matter to them — they asked specifically about post-quantum. Worth looping that in early." },
+        { system: true, text: "Priya added @crm-agent to the channel — it can read this channel and post. Everyone here can see it joined." },
+        { author: "@crm-agent", initials: "CA", tint: #0e0f0c, ts: "09:18", is-agent: true, text: "I've linked the Northwind opportunity to this conversation. Value $240,000 · stage now Proposal · close target Jul 18. I'll keep the record and thread in sync.", has-link: true, link-kind: "deal", link-name: "Northwind — self-hosted pilot", link-id: "DEAL-2291" },
+        { author: "Saul Loveman", initials: "SL", tint: #2f4502, role: "Owner", ts: "09:21", text: "Good. Let's spin up the pilot tasks so nothing slips. Mateo — own the air-gap runbook?" },
+    ];
+
+    // channel list (280)
+    Rectangle {
+        width: 280px; background: Theme.paper-2; border-width: 1px; border-color: Theme.border-1;
+        VerticalLayout {
+            Rectangle {
+                height: 56px; background: Theme.paper-2; border-width: 1px; border-color: Theme.border-1;
+                HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px; alignment: space-between;
+                    Text { text: "Comms"; color: Theme.ink; font-family: Theme.font-display; font-weight: 500; font-size: 18px; vertical-alignment: center; }
+                    Btn { text: "+ New"; y: (parent.height - 36px)/2; }
+                }
+            }
+            for c[i] in root.channels: Rectangle {
+                height: 78px;
+                background: c.active ? Theme.paper-pure : (cta.has-hover ? Theme.paper-pure : transparent);
+                cta := TouchArea { mouse-cursor: pointer; }
+                if c.active: Rectangle { x: 0; width: 2px; background: Theme.citrate-green; }
+                VerticalLayout {
+                    padding: 12px; spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: c.forum ? "≡" : "#"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 13px; vertical-alignment: center; }
+                        Text { text: c.name; color: Theme.ink; font-size: 14px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        Text { text: c.time; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; vertical-alignment: center; }
+                    }
+                    Text { text: c.preview; color: Theme.fg-2; font-size: 13px; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        if c.has-agent: SurfBadge { text: "AGENT"; }
+                        Chip { text: c.tag; }
+                    }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+
+    // channel view (flex)
+    Rectangle {
+        horizontal-stretch: 1; background: Theme.paper;
+        VerticalLayout {
+            Rectangle {
+                height: 64px; background: Theme.paper-2; border-width: 1px; border-color: Theme.border-1;
+                HorizontalLayout {
+                    padding-left: 24px; padding-right: 24px; spacing: 16px; alignment: start;
+                    VerticalLayout {
+                        alignment: center; spacing: 2px; horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Text { text: "# deals"; color: Theme.ink; font-family: Theme.font-display; font-weight: 500; font-size: 18px; vertical-alignment: center; }
+                            SurfBadge { text: "AGENT"; }
+                        }
+                        Text { text: "Pipeline, partners, and the deals desk."; color: Theme.fg-2; font-size: 13px; }
+                    }
+                    Text { text: "5 members"; color: Theme.fg-2; font-size: 13px; vertical-alignment: center; }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1; clip: true;
+                VerticalLayout {
+                    padding: 24px; spacing: 22px;
+                    Rectangle { vertical-stretch: 1; }
+                    for m[i] in root.messages: Rectangle {
+                        if m.boundary: HorizontalLayout {
+                            spacing: 16px; alignment: center;
+                            Rectangle { height: 1px; background: Theme.citrate-green-tint; horizontal-stretch: 1; }
+                            Text { text: m.text; color: Theme.citrate-green-dark; font-size: 12px; font-weight: 500; vertical-alignment: center; horizontal-alignment: center; }
+                            Rectangle { height: 1px; background: Theme.citrate-green-tint; horizontal-stretch: 1; }
+                        }
+                        if m.system && !m.boundary: HorizontalLayout {
+                            alignment: center;
+                            Text { text: m.text; color: Theme.fg-3; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                        }
+                        if !m.system: MessageRow { m: m; }
+                    }
+                }
+            }
+            Rectangle {
+                height: 96px; background: Theme.paper; border-width: 1px; border-color: Theme.border-1;
+                VerticalLayout {
+                    padding: 16px;
+                    Rectangle {
+                        border-width: 1px; border-color: Theme.border-2; border-radius: 8px; background: Theme.paper-pure;
+                        VerticalLayout {
+                            Rectangle {
+                                height: 36px;
+                                HorizontalLayout {
+                                    padding-left: 16px; alignment: start;
+                                    Text { text: "Message #deals"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center; }
+                                }
+                            }
+                            Rectangle {
+                                height: 32px; border-width: 1px; border-color: Theme.stone-100;
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 8px; spacing: 12px; alignment: start;
+                                    Text { text: "@"; color: Theme.fg-2; font-size: 15px; vertical-alignment: center; }
+                                    Text { text: "Link a record"; color: Theme.fg-2; font-size: 12px; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: "Encrypted to 5 members"; color: Theme.fg-3; font-size: 12px; vertical-alignment: center; }
+                                    Rectangle {
+                                        width: 72px; height: 26px; border-radius: 6px; background: Theme.citrate-green; border-width: 1px; border-color: Theme.citrate-green-deep;
+                                        y: (parent.height - 26px)/2;
+                                        Text { text: "Send"; color: Theme.ink; font-size: 13px; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // right panel — Info (roster) / Ledger (the Witness differentiator)
+    LedgerPanel {
+        members: root.members;
+        add-agent => { root.add-agent(); }
+        add-member => { root.add-member(); }
+    }
+}

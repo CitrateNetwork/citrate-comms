@@ -1,0 +1,157 @@
+// citrate-comms — brand theme + data shapes. Tokens are 1:1 with the design's
+// tokens.css (design/handoff/project/styles/tokens.css) and @citrate-ui-kit.
+
+export global Theme {
+    // brand
+    out property <color> citrate-green: #8ecc09;
+    out property <color> citrate-green-deep: #5a8205;
+    out property <color> citrate-green-dark: #2f4502;
+    out property <color> citrate-green-tint: #e8f3c6;
+    out property <color> citrate-yellow: #ffbd10;
+    out property <color> yellow-deep: #c89400;
+    out property <color> yellow-dark: #6e5100;
+    out property <color> yellow-tint: #fff1c4;
+    // ink / stone / paper
+    out property <color> ink: #0e0f0c;
+    out property <color> ink-2: #1f221d;
+    out property <color> graphite: #3a3d36;
+    out property <color> stone-900: #2a2c27;
+    out property <color> stone-700: #555851;
+    out property <color> stone-500: #84867f;
+    out property <color> stone-400: #a5a79f;
+    out property <color> stone-300: #c3c4be;
+    out property <color> stone-200: #d9dad4;
+    out property <color> stone-150: #e3e2dc;
+    out property <color> stone-100: #ecebe4;
+    out property <color> stone-50: #f1efe8;
+    out property <color> paper: #f4f1ea;
+    out property <color> paper-2: #faf8f3;
+    out property <color> paper-pure: #ffffff;
+    out property <color> deep-evergreen: #0f2a1a;
+    // semantic
+    out property <color> success: #4f8a05;
+    out property <color> success-bg: #ecf5d4;
+    out property <color> warning: #b07b00;
+    out property <color> warning-bg: #fff1c4;
+    out property <color> danger: #a72414;
+    out property <color> danger-bg: #f6e1de;
+    out property <color> info: #1b4965;
+    out property <color> info-bg: #dbe7ef;
+    // fg / borders
+    out property <color> fg-1: #0e0f0c;
+    out property <color> fg-2: #555851;
+    out property <color> fg-3: #84867f;
+    out property <color> border-1: #d9dad4;
+    out property <color> border-2: #c3c4be;
+    // sealed-ledger zone (audit vault)
+    out property <color> sealed-bg: #0c2216;
+    out property <color> sealed-bg-2: #0f2a1a;
+    out property <color> sealed-surface: #123524;
+    out property <color> sealed-bg-hard: #07140c;
+    out property <color> sealed-border: #2a3f33;
+    out property <color> sealed-border-2: #36503f;
+    out property <color> sealed-fg: #cde7d6;
+    out property <color> sealed-fg-2: #8fae99;
+    out property <color> sealed-fg-3: #5f7a68;
+    out property <color> sealed-hover: #15311f;
+    out property <color> sealed-tint-green: #14361f;
+    // type
+    out property <string> font-display: "Space Grotesk";
+    out property <string> font-sans: "Geist";
+    out property <string> font-mono: "Geist Mono";
+    out property <string> font-editorial: "Cormorant";
+
+    // role glyph palette
+    public pure function role-bg(r: string) -> color {
+        r == "Owner" ? root.ink
+        : r == "Admin" ? root.citrate-green-dark
+        : r == "Partner" ? root.warning-bg
+        : r == "Guest" ? root.stone-100
+        : r == "Agent" ? root.ink
+        : root.stone-150
+    }
+    public pure function role-fg(r: string) -> color {
+        r == "Owner" ? root.citrate-green
+        : r == "Admin" ? #d6ec9a
+        : r == "Partner" ? root.warning
+        : r == "Agent" ? root.citrate-green
+        : root.fg-2
+    }
+    public pure function role-abbr(r: string) -> string {
+        r == "Owner" ? "OW" : r == "Admin" ? "AD" : r == "Member" ? "ME"
+        : r == "Partner" ? "PT" : r == "Guest" ? "GU" : "AG"
+    }
+    // risk/priority palette: low|medium|high
+    public pure function risk-bg(l: string) -> color {
+        l == "high" ? root.danger-bg : l == "medium" ? root.warning-bg : root.success-bg
+    }
+    public pure function risk-fg(l: string) -> color {
+        l == "high" ? root.danger : l == "medium" ? root.warning : root.success
+    }
+    // deal-stage / task-status accent dot
+    public pure function stage-dot(s: string) -> color {
+        s == "Lead" ? root.stone-400 : s == "Qualified" ? root.info
+        : s == "Proposal" ? root.citrate-green : s == "Won" ? root.success
+        : s == "Lost" ? root.danger
+        : s == "Todo" ? root.stone-400 : s == "Doing" ? root.citrate-green
+        : s == "Review" ? root.warning : s == "Done" ? root.success : root.stone-400
+    }
+}
+
+// ───────────────────────────── data shapes ─────────────────────────────
+export struct Person {
+    name: string, initials: string, tint: color, role: string,
+    addr: string, is-agent: bool, external: bool,
+}
+export struct Chan {
+    name: string, preview: string, time: string, unread: int,
+    has-agent: bool, starred: bool, tag: string, forum: bool, active: bool,
+}
+export struct Msg {
+    author: string, initials: string, tint: color, role: string, ts: string,
+    text: string, is-agent: bool, system: bool, boundary: bool,
+    has-link: bool, link-kind: string, link-name: string, link-id: string, state: string,
+}
+export struct Deal {
+    id: string, name: string, account: string, value: string, stage: string,
+    priority: string, owner: string, close: string, has-channel: bool,
+}
+export struct Task {
+    id: string, title: string, assignee: string, status: string,
+    priority: string, due: string,
+}
+export struct Contact {
+    name: string, title: string, account: string, owner: string, last-touch: string, email: string,
+}
+export struct Account {
+    name: string, domain: string, contacts: int, open-deals: int,
+}
+export struct Project {
+    name: string, status: string, todo: int, doing: int, review: int, done: int,
+}
+export struct AgentRow {
+    name: string, initials: string, status: string, sponsor: string, channels: string, activity: int,
+}
+export struct AuditRow {
+    seq: string, ts: string, event: string, summary: string, actor: string, hash: string,
+}
+export struct Device {
+    name: string, last-active: string, current: bool, key: string,
+}
+export struct LedgerEntry {
+    kind: string, text: string, by: string, ts: string, hash: string,
+    owner: string, due: string, status: string, has-commit: bool, done: bool,
+}
+export struct Thread {
+    title: string, author: string, excerpt: string, replies: int, last: string, following: bool,
+}
+export struct MemberRow {
+    name: string, initials: string, tint: color, role: string, addr: string,
+    status: string, external: bool, devices: int,
+}
+export struct SuiteRow {
+    role: string, algo: string, pq: bool,
+}
+export struct HandshakeStep {
+    name: string, desc: string,
+}

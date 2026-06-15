@@ -1,0 +1,199 @@
+// CRM — deals pipeline kanban + contacts table. Screen 02.
+import { Theme, Deal, Contact } from "theme.slint";
+import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead } from "primitives.slint";
+
+// one pipeline card (a single deal)
+component DealCard inherits Card {
+    in property <Deal> deal;
+    VerticalLayout {
+        padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
+        spacing: 0;
+        Text {
+            text: root.deal.name;
+            color: Theme.ink; font-family: Theme.font-sans; font-weight: 600; font-size: 14px;
+            wrap: word-wrap;
+        }
+        Rectangle { height: 4px; }
+        Text {
+            text: root.deal.account;
+            color: Theme.fg-2; font-size: 12px;
+        }
+        Rectangle { height: 12px; }
+        HorizontalLayout {
+            spacing: 8px; alignment: start;
+            Text {
+                text: root.deal.value;
+                color: Theme.ink; font-family: Theme.font-mono; font-weight: 600; font-size: 14px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            RiskBadge { level: root.deal.priority; }
+            Avatar { initials: root.deal.owner; sz: 24px; }
+        }
+        if root.deal.has-channel: Rectangle { height: 10px; }
+        if root.deal.has-channel: Rectangle {
+            height: 1px; background: Theme.stone-100;
+        }
+        if root.deal.has-channel: Rectangle { height: 10px; }
+        if root.deal.has-channel: HorizontalLayout {
+            spacing: 6px; alignment: start;
+            Text { text: "#"; color: Theme.citrate-green-deep; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+            Text { text: "Linked to #deals"; color: Theme.citrate-green-deep; font-size: 12px; vertical-alignment: center; }
+        }
+    }
+}
+
+// one kanban column for a single stage
+component BoardColumn inherits Rectangle {
+    in property <string> stage;
+    in property <string> count-label;
+    in property <[Deal]> deals;
+    width: 300px;
+    background: Theme.paper-2;
+    border-width: 1px; border-color: Theme.border-1; border-radius: 8px;
+    VerticalLayout {
+        // column head
+        Rectangle {
+            height: 44px;
+            border-width: 1px; border-color: Theme.border-1;
+            HorizontalLayout {
+                padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: start;
+                Rectangle {
+                    width: 7px; height: 7px; border-radius: 3.5px;
+                    y: (parent.height - 7px) / 2;
+                    background: Theme.stage-dot(root.stage);
+                }
+                Text { text: root.stage; color: Theme.ink; font-weight: 600; font-size: 14px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: root.count-label; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+            }
+        }
+        // column body
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+            VerticalLayout {
+                padding: 12px; spacing: 0;
+                for d[i] in root.deals: Rectangle {
+                    if d.stage == root.stage: VerticalLayout {
+                        padding-bottom: 12px;
+                        DealCard { deal: d; }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}
+
+export component CrmScreen inherits Rectangle {
+    background: Theme.paper;
+
+    property <[Deal]> deals: [
+        { name: "Northwind — self-hosted pilot", account: "Northwind Traders", value: "$240,000", stage: "Proposal", priority: "high", owner: "PA", close: "Jul 18", has-channel: true },
+        { name: "Helios Group expansion", account: "Helios Group", value: "$88,000", stage: "Qualified", priority: "medium", owner: "MF", close: "Aug 02" },
+        { name: "Atlas Freight rollout", account: "Atlas Freight", value: "$410,000", stage: "Lead", priority: "high", owner: "PA", close: "Sep 10" },
+        { name: "Verge Labs renewal", account: "Verge Labs", value: "$64,000", stage: "Won", priority: "low", owner: "SL", close: "Jun 09" },
+        { name: "Cobalt Mfg evaluation", account: "Cobalt Mfg", value: "$122,000", stage: "Lost", priority: "low", owner: "MF", close: "May 28" },
+        { name: "Orion Dynamics security buy", account: "Orion Dynamics", value: "$305,000", stage: "Qualified", priority: "high", owner: "PA", close: "Aug 20" },
+    ];
+
+    property <[Contact]> contacts: [
+        { name: "Dana Whitfield", title: "VP Infrastructure", account: "Northwind Traders", owner: "PA", last-touch: "2m ago", email: "dana@northwind.example" },
+        { name: "Owen Mbeki", title: "CISO", account: "Northwind Traders", owner: "PA", last-touch: "1h ago", email: "owen@northwind.example" },
+        { name: "Sara Lindqvist", title: "Head of Ops", account: "Helios Group", owner: "MF", last-touch: "Yesterday", email: "sara@helios.example" },
+        { name: "Raj Malhotra", title: "CTO", account: "Atlas Freight", owner: "PA", last-touch: "3d ago", email: "raj@atlasfreight.example" },
+        { name: "Tomás Reyes", title: "Procurement Lead", account: "Orion Dynamics", owner: "PA", last-touch: "5d ago", email: "tomas@orion.example" },
+    ];
+
+    VerticalLayout {
+        // header + new-deal action
+        Rectangle {
+            ScreenHead {
+                title: "Customers";
+                subtitle: "Contacts, accounts, and the deals desk — each deal can carry its own encrypted conversation.";
+            }
+            HorizontalLayout {
+                padding-right: 24px; spacing: 10px; alignment: end;
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Btn { text: "Filter"; }
+                        Btn { text: "+ New deal"; primary: true; }
+                    }
+                }
+            }
+        }
+
+        // body: pipeline board on top, contacts table below
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+            VerticalLayout {
+                padding: 24px; spacing: 24px;
+
+                // ── deals pipeline kanban ──
+                VerticalLayout {
+                    spacing: 12px;
+                    Eyebrow { text: "DEALS PIPELINE"; }
+                    Rectangle {
+                        height: 420px; clip: true;
+                        HorizontalLayout {
+                            spacing: 16px; alignment: start;
+                            BoardColumn { stage: "Lead"; count-label: "1 · $410,000"; deals: root.deals; }
+                            BoardColumn { stage: "Qualified"; count-label: "2 · $393,000"; deals: root.deals; }
+                            BoardColumn { stage: "Proposal"; count-label: "1 · $240,000"; deals: root.deals; }
+                            BoardColumn { stage: "Won"; count-label: "1 · $64,000"; deals: root.deals; }
+                            BoardColumn { stage: "Lost"; count-label: "1 · $122,000"; deals: root.deals; }
+                        }
+                    }
+                }
+
+                // ── contacts table ──
+                VerticalLayout {
+                    spacing: 12px;
+                    Eyebrow { text: "CONTACTS"; }
+                    Card {
+                        clip: true;
+                        VerticalLayout {
+                            // header row
+                            Rectangle {
+                                height: 38px; background: Theme.paper-2;
+                                border-width: 1px; border-color: Theme.border-2;
+                                HorizontalLayout {
+                                    padding-left: 16px; padding-right: 16px; spacing: 16px; alignment: start;
+                                    Eyebrow { text: "NAME"; width: 220px; vertical-alignment: center; }
+                                    Eyebrow { text: "TITLE"; width: 180px; vertical-alignment: center; }
+                                    Eyebrow { text: "ACCOUNT"; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Eyebrow { text: "OWNER"; width: 80px; vertical-alignment: center; }
+                                    Eyebrow { text: "LAST TOUCH"; width: 110px; vertical-alignment: center; }
+                                }
+                            }
+                            // data rows
+                            for c[i] in root.contacts: Rectangle {
+                                height: 52px;
+                                if i > 0: Rectangle { y: 0; height: 1px; background: Theme.stone-150; }
+                                HorizontalLayout {
+                                    padding-left: 16px; padding-right: 16px; spacing: 16px; alignment: start;
+                                    HorizontalLayout {
+                                        width: 220px; spacing: 10px; alignment: start;
+                                        Avatar { initials: c.name == "Dana Whitfield" ? "DW" : c.name == "Owen Mbeki" ? "OM" : c.name == "Sara Lindqvist" ? "SL" : c.name == "Raj Malhotra" ? "RM" : "TR"; sz: 26px; }
+                                        Text { text: c.name; color: Theme.ink; font-size: 14px; font-weight: 500; vertical-alignment: center; overflow: elide; }
+                                    }
+                                    Text { text: c.title; width: 180px; color: Theme.fg-2; font-size: 14px; vertical-alignment: center; overflow: elide; }
+                                    Text { text: c.account; horizontal-stretch: 1; color: Theme.ink; font-size: 14px; vertical-alignment: center; overflow: elide; }
+                                    HorizontalLayout {
+                                        width: 80px; spacing: 6px; alignment: start;
+                                        Avatar { initials: c.owner; sz: 22px; }
+                                    }
+                                    Text { text: c.last-touch; width: 110px; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}

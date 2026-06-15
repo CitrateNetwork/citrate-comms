@@ -1,0 +1,302 @@
+// Settings — Identity, Devices, Connection, Appearance, Automation. Screen 06.
+// Sub-nav rail + section panes. The Automation section carries the dangerous
+// "let agents witness on their own" toggle (red switch, OFF by default).
+import { Theme, Device } from "theme.slint";
+import { Card, Eyebrow, Hairline, Chip, SurfBadge, SevDot, ScreenHead } from "primitives.slint";
+
+// honest-note: paper-2 box with a 3px left border (danger or green-deep)
+component HonestNote inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger: false;
+    background: Theme.paper-2;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border-1;
+    VerticalLayout {
+        // left accent bar overlay handled by the inner Rectangle
+        Rectangle {
+            VerticalLayout {
+                padding-left: 17px; padding-right: 14px; padding-top: 12px; padding-bottom: 12px;
+                Text {
+                    text: root.text;
+                    color: Theme.ink-2; font-size: 13px; wrap: word-wrap;
+                }
+            }
+            Rectangle {
+                x: 0; width: 3px; height: parent.height;
+                background: root.danger ? Theme.danger : Theme.citrate-green-deep;
+                border-top-left-radius: 6px; border-bottom-left-radius: 6px;
+            }
+        }
+    }
+}
+
+// 44×26 rounded toggle — static (OFF state) red-when-on switch
+component DangerSwitch inherits Rectangle {
+    in property <bool> on: false;
+    width: 44px;
+    height: 26px;
+    border-radius: 13px;
+    background: root.on ? Theme.danger : Theme.stone-300;
+    Rectangle {
+        width: 20px; height: 20px; border-radius: 10px;
+        y: 3px;
+        x: root.on ? parent.width - 23px : 3px;
+        background: #ffffff;
+        drop-shadow-color: #0000004d;
+        drop-shadow-blur: 3px;
+        drop-shadow-offset-y: 1px;
+    }
+}
+
+// labeled mono field (wallet / relay host) with leading glyph
+component MonoField inherits Rectangle {
+    in property <string> glyph;
+    in property <string> value;
+    height: 42px;
+    background: Theme.paper-2;
+    border-width: 1px;
+    border-color: Theme.border-1;
+    border-radius: 8px;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 8px; alignment: start;
+        Text { text: root.glyph; color: Theme.fg-3; font-size: 14px; vertical-alignment: center; }
+        Text {
+            text: root.value;
+            color: Theme.ink; font-family: Theme.font-mono; font-size: 13px;
+            vertical-alignment: center; horizontal-stretch: 1; overflow: elide;
+        }
+    }
+}
+
+// static appearance row (label + value)
+component AppearanceRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> last: false;
+    height: 48px;
+    if !root.last: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.stone-100; }
+    HorizontalLayout {
+        alignment: space-between;
+        Text { text: root.label; color: Theme.ink; font-size: 14px; vertical-alignment: center; }
+        Text { text: root.value; color: Theme.fg-2; font-size: 13px; vertical-alignment: center; }
+    }
+}
+
+export component SettingsScreen inherits Rectangle {
+    background: Theme.paper;
+
+    property <string> name: "Saul Loveman";
+    property <string> wallet: "0x1f2e9c4a7b3d8e10aa9f";
+    property <string> relay-host: "relay.citrate.internal";
+    property <[string]> sections: ["Identity", "Devices", "Connection", "Appearance", "Automation"];
+    property <[Device]> devices: [
+        { name: "Saul · MacBook Pro", last-active: "Active now", current: true, key: "0xkp_8e…a201" },
+        { name: "Saul · Studio (on-prem)", last-active: "12m ago", current: false, key: "0xkp_3c…77fd" },
+        { name: "Saul · iPhone", last-active: "2h ago", current: false, key: "0xkp_b9…0e14" },
+    ];
+
+    VerticalLayout {
+        ScreenHead {
+            title: "Settings";
+            subtitle: "Identity, devices, connection, and automation.";
+        }
+        HorizontalLayout {
+            spacing: 0;
+
+            // ── sub-nav rail ──
+            Rectangle {
+                width: 200px; background: Theme.paper-2;
+                border-width: 1px; border-color: Theme.border-1;
+                VerticalLayout {
+                    padding: 16px; spacing: 4px; alignment: start;
+                    for s[i] in root.sections: Rectangle {
+                        height: 34px; border-radius: 6px;
+                        background: i == 0 ? Theme.citrate-green-tint : transparent;
+                        HorizontalLayout {
+                            padding-left: 12px; padding-right: 12px; alignment: start;
+                            Text {
+                                text: s;
+                                color: i == 0 ? Theme.citrate-green-dark : Theme.fg-2;
+                                font-size: 14px; font-weight: i == 0 ? 600 : 450;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── section panes (stacked vertically, scroll) ──
+            Rectangle {
+                horizontal-stretch: 1; clip: true; background: Theme.paper;
+                VerticalLayout {
+                    padding: 24px; spacing: 16px;
+
+                    Rectangle {
+                        max-width: 680px;
+                        VerticalLayout {
+                            spacing: 16px;
+
+                            // ── Identity ──
+                            Card {
+                                VerticalLayout {
+                                    padding: 24px; spacing: 8px;
+                                    Eyebrow { text: "DISPLAY NAME"; }
+                                    Rectangle {
+                                        height: 42px; background: Theme.paper-pure;
+                                        border-width: 1px; border-color: Theme.border-1; border-radius: 8px;
+                                        HorizontalLayout {
+                                            padding-left: 14px; padding-right: 14px; alignment: start;
+                                            Text {
+                                                text: root.name;
+                                                color: Theme.ink; font-size: 14px; vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 8px; }
+                                    Eyebrow { text: "WALLET ADDRESS · YOUR IDENTITY"; }
+                                    MonoField { glyph: "◈"; value: root.wallet; }
+                                    Rectangle { height: 8px; }
+                                    HorizontalLayout {
+                                        spacing: 10px; alignment: start;
+                                        Eyebrow { text: "VERIFICATION"; vertical-alignment: center; }
+                                        Chip { text: "KYC verified"; accent: true; }
+                                    }
+                                }
+                            }
+
+                            // ── Devices ──
+                            Card {
+                                VerticalLayout {
+                                    padding: 24px; spacing: 0;
+                                    Eyebrow { text: "DEVICES"; }
+                                    Rectangle { height: 12px; }
+                                    HonestNote {
+                                        text: "Each device is its own secure member of every space, with its own key. Removing a device revokes just that key — your other devices are unaffected.";
+                                    }
+                                    Rectangle { height: 8px; }
+                                    for d[i] in root.devices: Rectangle {
+                                        height: 54px;
+                                        Rectangle { y: parent.height - 1px; height: 1px; background: Theme.stone-100; }
+                                        HorizontalLayout {
+                                            spacing: 12px; alignment: start;
+                                            Text { text: "▢"; color: Theme.fg-2; font-size: 18px; vertical-alignment: center; }
+                                            VerticalLayout {
+                                                alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                                HorizontalLayout {
+                                                    spacing: 8px; alignment: start;
+                                                    Text {
+                                                        text: d.name;
+                                                        color: Theme.ink; font-size: 14px; font-weight: 500;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    if d.current: SurfBadge { text: "THIS DEVICE"; kind: "e2e"; }
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 6px; alignment: start;
+                                                    Text {
+                                                        text: d.last-active + " ·";
+                                                        color: Theme.fg-3; font-size: 12px; vertical-alignment: center;
+                                                    }
+                                                    Text {
+                                                        text: d.key;
+                                                        color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Connection ──
+                            Card {
+                                VerticalLayout {
+                                    padding: 24px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 10px; alignment: start;
+                                        SevDot { level: "pass"; }
+                                        Text {
+                                            text: "Connected — " + root.relay-host;
+                                            color: Theme.ink; font-size: 15px; font-weight: 600; vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        SurfBadge { text: "ON-PREM"; }
+                                    }
+                                    Rectangle { height: 6px; }
+                                    Eyebrow { text: "RELAY HOST"; }
+                                    MonoField { glyph: "🌐"; value: root.relay-host; }
+                                    Rectangle { height: 6px; }
+                                    Text {
+                                        text: "This workspace is self-hosted at your own relay. It runs offline and air-gapped — the relay only moves sealed envelopes between devices and can never read them.";
+                                        color: Theme.fg-2; font-size: 14px; wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            // ── Appearance ──
+                            Card {
+                                VerticalLayout {
+                                    padding: 24px; spacing: 0;
+                                    Eyebrow { text: "APPEARANCE"; }
+                                    Rectangle { height: 8px; }
+                                    AppearanceRow { label: "Density"; value: "Comfortable"; }
+                                    AppearanceRow { label: "Message style"; value: "Editorial"; }
+                                    AppearanceRow { label: "Agent presence"; value: "Distinct"; }
+                                    AppearanceRow { label: "Reduced motion"; value: "Off"; last: true; }
+                                }
+                            }
+
+                            // ── Automation (dangerous) ──
+                            Card {
+                                VerticalLayout {
+                                    padding: 24px; spacing: 0;
+                                    Eyebrow { text: "AGENT AUTOMATION"; }
+                                    Rectangle { height: 10px; }
+                                    Text {
+                                        text: "By default, agents propose decisions and commitments and a human taps to witness them. This keeps the \"a person stood behind this\" guarantee that makes the ledger trustworthy.";
+                                        color: Theme.fg-2; font-size: 14px; wrap: word-wrap;
+                                    }
+                                    Rectangle { height: 16px; }
+                                    // the dangerous toggle row (OFF state)
+                                    Rectangle {
+                                        background: Theme.paper-2;
+                                        border-width: 1px; border-color: Theme.border-1; border-radius: 8px;
+                                        HorizontalLayout {
+                                            padding-left: 18px; padding-right: 18px; padding-top: 16px; padding-bottom: 16px;
+                                            spacing: 16px; alignment: start;
+                                            VerticalLayout {
+                                                alignment: center; spacing: 6px; horizontal-stretch: 1;
+                                                HorizontalLayout {
+                                                    spacing: 8px; alignment: start;
+                                                    Text { text: "ⓘ"; color: Theme.danger; font-size: 15px; vertical-alignment: center; }
+                                                    Text {
+                                                        text: "Let agents witness on their own";
+                                                        color: Theme.ink; font-size: 14px; font-weight: 600;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: "Agents file decisions and commitments to the ledger and audit log without a human tap.";
+                                                    color: Theme.fg-2; font-size: 13px; wrap: word-wrap;
+                                                }
+                                            }
+                                            DangerSwitch { on: false; }
+                                        }
+                                    }
+                                    Rectangle { height: 14px; }
+                                    HonestNote {
+                                        danger: true;
+                                        text: "Turning this on weakens the core guarantee that a person stood behind every witnessed record. Records agents file are marked AUTO and still carry the agent's signature in the audit log. You can turn this off anytime; it cannot un-file what was already written.";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+        }
+    }
+}

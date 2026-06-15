@@ -1,0 +1,96 @@
+// Auth — the sign-in brand moment. Full-window, centered.
+import { Theme } from "theme.slint";
+import { Btn, Eyebrow } from "primitives.slint";
+
+export component AuthScreen inherits Rectangle {
+    callback signed-in();
+    background: Theme.paper;
+
+    VerticalLayout {
+        alignment: center;
+
+        // centered brand column
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: 380px;
+                spacing: 0px;
+                alignment: center;
+
+                // dark ink logo tile
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        border-radius: 14px;
+                        background: Theme.ink;
+                        Text {
+                            text: "◇";
+                            color: Theme.citrate-green;
+                            font-family: Theme.font-display;
+                            font-size: 30px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle { height: 24px; }
+
+                // product name
+                Text {
+                    text: "citrate-comms";
+                    color: Theme.ink;
+                    font-family: Theme.font-display;
+                    font-weight: 500;
+                    font-size: 34px;
+                    letter-spacing: -0.6px;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle { height: 10px; }
+
+                // serif / editorial subtitle
+                Text {
+                    text: "a beautifully bound ledger that happens to be a chat app";
+                    color: Theme.fg-2;
+                    font-family: Theme.font-editorial;
+                    font-italic: true;
+                    font-size: 17px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                Rectangle { height: 32px; }
+
+                // primary sign-in button
+                Btn {
+                    text: "Sign in with your Citrate wallet";
+                    primary: true;
+                    h: 46px;
+                    clicked => { root.signed-in(); }
+                }
+
+                Rectangle { height: 28px; }
+
+                // footnote with lock glyph
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    Text {
+                        text: "🔒";
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "End-to-end encrypted · self-hosted";
+                        color: Theme.fg-3;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

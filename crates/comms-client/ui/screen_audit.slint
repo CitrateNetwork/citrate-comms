@@ -1,0 +1,260 @@
+// Audit — the sealed-ledger vault. Screen 04 · the dark "vault" highlight.
+// A permanent, tamper-evident record. Dark evergreen sealed-* zone (not paper).
+import { Theme, AuditRow } from "theme.slint";
+import { Btn, SevDot, AnchorMark, Eyebrow, Hairline } from "primitives.slint";
+
+// One dark audit row. Columns: SEQ · TIME · EVENT · SUMMARY · ACTOR · HASH.
+component AuditRowView inherits Rectangle {
+    in property <AuditRow> a;
+    height: 52px;
+    background: touch.has-hover ? Theme.sealed-hover : transparent;
+    animate background { duration: 120ms; }
+    touch := TouchArea { mouse-cursor: default; }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 16px;
+        alignment: start;
+        // SEQ
+        Text {
+            width: 56px;
+            text: root.a.seq;
+            color: Theme.sealed-fg-3;
+            font-family: Theme.font-mono;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        // TIME
+        Text {
+            width: 188px;
+            text: root.a.ts;
+            color: Theme.sealed-fg-2;
+            font-family: Theme.font-mono;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        // EVENT (dot/badge + mono name) + SUMMARY
+        Rectangle {
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    y: (parent.height - 8px) / 2;
+                    background: Theme.citrate-green;
+                }
+                Text {
+                    text: root.a.event;
+                    color: Theme.citrate-green;
+                    font-family: Theme.font-mono;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "· " + root.a.summary;
+                    color: Theme.sealed-fg-2;
+                    font-family: Theme.font-sans;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+        }
+        // ACTOR
+        Text {
+            width: 110px;
+            text: root.a.actor;
+            color: root.a.actor == "system" ? Theme.sealed-fg-3 : Theme.sealed-fg;
+            font-family: root.a.actor == "system" ? Theme.font-mono : Theme.font-sans;
+            font-size: 13px;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        // HASH
+        Text {
+            width: 96px;
+            text: root.a.hash;
+            color: Theme.sealed-fg-2;
+            font-family: Theme.font-mono;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component AuditScreen inherits Rectangle {
+    background: Theme.sealed-bg;
+
+    property <[AuditRow]> records: [
+        { seq: "1042", ts: "Jun 14 · 09:31:06 UTC", event: "EnvelopeReceipt", summary: "Envelope delivered · 2.1 KB · text", actor: "@crm-agent", hash: "0x9af3…c1d4" },
+        { seq: "1041", ts: "Jun 14 · 09:31:02 UTC", event: "RoleAsserted", summary: "Agent action recorded · scope #deals", actor: "@crm-agent", hash: "0x71be…0a88" },
+        { seq: "1040", ts: "Jun 14 · 09:18:44 UTC", event: "AgentAdded", summary: "@crm-agent added to #deals", actor: "Priya", hash: "0x3c0d…ff21" },
+        { seq: "1039", ts: "Jun 14 · 09:14:10 UTC", event: "KeyPackagePublished", summary: "Device key published · ML-KEM-768", actor: "Priya", hash: "0xb20a…7e6c" },
+        { seq: "1038", ts: "Jun 13 · 18:02:51 UTC", event: "MemberAdded", summary: "Lena Brandt added as Partner · scope #deals", actor: "Saul", hash: "0x55f1…9d3b" },
+        { seq: "1037", ts: "Jun 13 · 17:40:19 UTC", event: "RoleRevoked", summary: "Guest access expired · Q. Reviewer", actor: "system", hash: "0x0e8c…42a0" },
+        { seq: "1036", ts: "Jun 12 · 11:23:07 UTC", event: "GroupCreated", summary: "Channel #security created", actor: "Saul", hash: "0xd417…b6e2" },
+        { seq: "1035", ts: "Jun 12 · 10:05:33 UTC", event: "MemberRemoved", summary: "Contractor offboarded · scope #eng", actor: "Priya", hash: "0x8a92…1c70" },
+    ];
+
+    VerticalLayout {
+        // ── header zone ────────────────────────────────────────────────
+        Rectangle {
+            background: transparent;
+            VerticalLayout {
+                padding-left: 40px;
+                padding-right: 40px;
+                padding-top: 32px;
+                padding-bottom: 24px;
+                spacing: 8px;
+                Eyebrow {
+                    text: "SEALED LEDGER";
+                    color: Theme.sealed-fg-3;
+                }
+                Text {
+                    text: "Audit";
+                    color: Theme.sealed-fg;
+                    font-family: Theme.font-display;
+                    font-weight: 500;
+                    font-size: 36px;
+                }
+                Text {
+                    text: "A permanent, tamper-evident record of what happened — who joined, what was delivered. Never the contents of your messages.";
+                    color: Theme.sealed-fg-2;
+                    font-family: Theme.font-editorial;
+                    font-italic: true;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                    max-width: 640px;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.sealed-border; }
+
+        // ── body: sealed bar + table ──────────────────────────────────
+        Rectangle {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding-left: 40px;
+                padding-right: 40px;
+                padding-top: 24px;
+                padding-bottom: 48px;
+                spacing: 24px;
+
+                // sealed bar — integrity + anchor + actions
+                Rectangle {
+                    height: 76px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.sealed-border;
+                    background: Theme.sealed-surface;
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 24px;
+                        alignment: start;
+                        // integrity
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: start;
+                            SevDot { level: "pass"; y: (parent.height - 9px) / 2; }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: "Verified — 1042 records, intact";
+                                    color: Theme.sealed-fg;
+                                    font-family: Theme.font-sans;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "last checked 09:32 UTC";
+                                    color: Theme.sealed-fg-3;
+                                    font-family: Theme.font-mono;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+                        // anchor
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            AnchorMark { text: "Anchored to chain @ block 19,482,330"; }
+                            Text {
+                                text: "Jun 14 06:00 UTC · chain 40204 · 0x6f1c…a9e4";
+                                color: Theme.sealed-fg-3;
+                                font-family: Theme.font-mono;
+                                font-size: 12px;
+                            }
+                        }
+                        // actions
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: end;
+                            Btn { text: "Verify now"; dark: true; y: (parent.height - 36px) / 2; }
+                            Btn { text: "Export"; dark: true; y: (parent.height - 36px) / 2; }
+                        }
+                    }
+                }
+
+                // audit table — dark card
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.sealed-border;
+                    background: Theme.sealed-surface;
+                    clip: true;
+                    VerticalLayout {
+                        // column header
+                        Rectangle {
+                            height: 40px;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 16px;
+                                alignment: start;
+                                Text { width: 56px; text: "SEQ"; color: Theme.sealed-fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 1.2px; vertical-alignment: center; }
+                                Text { width: 188px; text: "TIME"; color: Theme.sealed-fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 1.2px; vertical-alignment: center; }
+                                Text { horizontal-stretch: 1; text: "EVENT"; color: Theme.sealed-fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 1.2px; vertical-alignment: center; }
+                                Text { width: 110px; text: "ACTOR"; color: Theme.sealed-fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 1.2px; vertical-alignment: center; }
+                                Text { width: 96px; text: "HASH"; color: Theme.sealed-fg-3; font-family: Theme.font-mono; font-size: 10px; letter-spacing: 1.2px; vertical-alignment: center; }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.sealed-border-2; }
+
+                        // rows
+                        Rectangle {
+                            vertical-stretch: 1;
+                            clip: true;
+                            VerticalLayout {
+                                alignment: start;
+                                for a[i] in root.records: VerticalLayout {
+                                    AuditRowView { a: a; }
+                                    Rectangle { height: 1px; background: Theme.sealed-border; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // append-only footnote
+                Text {
+                    text: "Append-only. Nothing here can be edited or deleted — by anyone, ever.";
+                    color: Theme.sealed-fg-3;
+                    font-family: Theme.font-editorial;
+                    font-italic: true;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

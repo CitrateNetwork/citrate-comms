@@ -1,0 +1,223 @@
+// citrate-comms — UI-kit primitives (recreated from the design; swappable for @citrate-ui-kit).
+import { Theme } from "theme.slint";
+
+export component Avatar inherits Rectangle {
+    in property <string> initials;
+    in property <color> tint: Theme.graphite;
+    in property <bool> agent: false;
+    in property <length> sz: 32px;
+    width: root.sz;
+    height: root.sz;
+    border-radius: root.agent ? 7px : root.sz / 2;
+    background: root.agent ? Theme.ink : root.tint;
+    border-width: root.agent ? 1px : 0px;
+    border-color: Theme.graphite;
+    Text {
+        text: root.agent ? "◇" : root.initials;
+        color: root.agent ? Theme.citrate-green : #ffffff;
+        font-family: Theme.font-sans;
+        font-weight: 600;
+        font-size: root.agent ? 16px : 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component RoleGlyph inherits Rectangle {
+    in property <string> role;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: Theme.role-bg(root.role);
+    border-width: 1px;
+    border-color: root.role == "Member" || root.role == "Guest" ? Theme.border-1 : Theme.role-bg(root.role);
+    Text {
+        text: Theme.role-abbr(root.role);
+        color: Theme.role-fg(root.role);
+        font-family: Theme.font-mono;
+        font-size: 9px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> accent: false;
+    in property <bool> external: false;
+    height: 22px;
+    border-radius: 999px;
+    background: root.accent ? Theme.citrate-green-tint : root.external ? Theme.warning-bg : Theme.stone-100;
+    border-width: 1px;
+    border-color: root.accent ? #d3e6a3 : root.external ? #ecd9a3 : Theme.border-1;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+        Rectangle {
+            width: 6px; height: 6px; border-radius: 3px;
+            y: (parent.height - 6px) / 2;
+            background: root.accent ? Theme.citrate-green-deep : root.external ? Theme.warning : Theme.stone-400;
+        }
+        Text {
+            text: root.text;
+            color: root.accent ? Theme.citrate-green-dark : root.external ? Theme.warning : Theme.fg-2;
+            font-size: 11px; font-weight: 500; vertical-alignment: center;
+        }
+    }
+}
+
+// mono badge: AGENT / E2E / generic
+export component SurfBadge inherits Rectangle {
+    in property <string> text;
+    in property <string> kind: "agent"; // agent | e2e | dark
+    height: 18px;
+    border-radius: 6px;
+    background: root.kind == "e2e" ? Theme.citrate-green-tint : Theme.ink;
+    HorizontalLayout {
+        padding-left: 7px; padding-right: 7px;
+        Text {
+            text: root.text;
+            color: root.kind == "e2e" ? Theme.citrate-green-dark : Theme.citrate-green;
+            font-family: Theme.font-mono; font-size: 10px; font-weight: 500;
+            letter-spacing: 0.8px; vertical-alignment: center;
+        }
+    }
+}
+
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> dark: false;     // ghost-dark (sealed zone)
+    in property <length> h: 36px;
+    callback clicked;
+    height: root.h;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.primary ? Theme.citrate-green-deep
+        : root.danger ? #e6c6c1
+        : root.dark ? Theme.sealed-border-2
+        : Theme.border-1;
+    background: root.primary ? (touch.has-hover ? #97d80c : Theme.citrate-green)
+        : root.danger ? (touch.has-hover ? #f0d3ce : Theme.danger-bg)
+        : root.dark ? (touch.has-hover ? Theme.sealed-hover : transparent)
+        : (touch.has-hover ? Theme.paper-2 : Theme.paper-pure);
+    animate background { duration: 140ms; }
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 8px; alignment: center;
+        Text {
+            text: root.text;
+            color: root.danger ? Theme.danger : root.dark ? Theme.sealed-fg : Theme.fg-1;
+            font-family: Theme.font-sans; font-size: 14px; font-weight: 500; vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component Card inherits Rectangle {
+    in property <bool> lifted: false;
+    background: Theme.paper-pure;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border-1;
+    drop-shadow-color: root.lifted ? #0e0f0c2e : transparent;
+    drop-shadow-blur: root.lifted ? 24px : 0px;
+    drop-shadow-offset-y: root.lifted ? 8px : 0px;
+}
+
+export component Hairline inherits Rectangle {
+    height: 1px;
+    background: Theme.border-1;
+}
+
+export component Eyebrow inherits Text {
+    color: Theme.fg-3;
+    font-family: Theme.font-mono;
+    font-size: 11px;
+    letter-spacing: 1.4px;
+}
+
+export component RiskBadge inherits Rectangle {
+    in property <string> level;  // low | medium | high
+    height: 22px;
+    border-radius: 999px;
+    background: Theme.risk-bg(root.level);
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        padding-left: 9px; padding-right: 9px; spacing: 6px; alignment: center;
+        Rectangle {
+            width: 7px; height: 7px; border-radius: 3.5px;
+            y: (parent.height - 7px)/2;
+            background: Theme.risk-fg(root.level);
+        }
+        Text {
+            text: root.level;
+            color: Theme.risk-fg(root.level);
+            font-size: 11px; font-weight: 600; vertical-alignment: center;
+        }
+    }
+}
+
+export component SevDot inherits Rectangle {
+    in property <string> level: "pass"; // pass | warn | block
+    width: 9px; height: 9px; border-radius: 4.5px;
+    background: root.level == "warn" ? Theme.citrate-yellow
+        : root.level == "block" ? Theme.danger : Theme.citrate-green;
+}
+
+export component AnchorMark inherits HorizontalLayout {
+    in property <string> text;
+    spacing: 6px;
+    alignment: start;
+    Text { text: "⚓"; color: Theme.citrate-green; font-size: 12px; vertical-alignment: center; }
+    Text { text: root.text; color: Theme.citrate-green; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+}
+
+// linked-record chip (DEAL-2291 / TASK-118)
+export component LinkedRecord inherits Rectangle {
+    in property <string> kind;  // deal | task
+    in property <string> name;
+    in property <string> id;
+    height: 30px;
+    border-radius: 999px;
+    border-width: 1px;
+    border-color: Theme.border-2;
+    background: Theme.paper-2;
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        padding-left: 8px; padding-right: 12px; spacing: 8px; alignment: start;
+        Rectangle {
+            width: kindtext.width + 10px; height: 18px;
+            y: (parent.height - 18px) / 2;
+            border-radius: 4px;
+            background: root.kind == "deal" ? Theme.citrate-green-dark : Theme.info;
+            kindtext := Text {
+                text: root.kind == "deal" ? "DEAL" : "TASK";
+                color: root.kind == "deal" ? #d6ec9a : #cfe3ee;
+                font-family: Theme.font-mono; font-size: 9px; letter-spacing: 0.7px;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        Text { text: root.name; color: Theme.fg-1; font-size: 13px; vertical-alignment: center; overflow: elide; }
+        Text { text: root.id; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
+    }
+}
+
+// generic screen header (title + subtitle)
+export component ScreenHead inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    height: 88px;
+    background: Theme.paper;
+    border-width: 1px;
+    border-color: Theme.border-1;
+    VerticalLayout {
+        padding-left: 24px; padding-right: 24px;
+        alignment: center; spacing: 4px;
+        Text { text: root.title; color: Theme.ink; font-family: Theme.font-display; font-weight: 500; font-size: 28px; }
+        Text { text: root.subtitle; color: Theme.fg-2; font-size: 14px; }
+    }
+}

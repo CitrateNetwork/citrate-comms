@@ -1,0 +1,352 @@
+// Overlays — modal dialogs. Each fills the window with a scrim + centered 520px card.
+import { Theme } from "theme.slint";
+import { Avatar, RoleGlyph, SurfBadge, Btn, Eyebrow, Hairline } from "primitives.slint";
+
+// ── Add an agent — the trust moment ──────────────────────────────────────────
+export component AddAgentDialog inherits Rectangle {
+    callback close();
+
+    // full-window scrim
+    Rectangle {
+        background: #0e0f0c80;
+        TouchArea { clicked => { root.close(); } }
+    }
+
+    // centered card
+    Rectangle {
+        width: 520px;
+        height: card.preferred-height;
+        x: (parent.width - 520px) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.paper-pure;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border-1;
+        drop-shadow-color: #0e0f0c80;
+        drop-shadow-blur: 80px;
+        drop-shadow-offset-y: 24px;
+        // swallow clicks so they don't reach the scrim
+        TouchArea {}
+
+        card := VerticalLayout {
+            // head
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-top: 20px; padding-bottom: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Eyebrow { text: "ADD AN AGENT"; vertical-alignment: center; }
+                    Text {
+                        text: "✕"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center;
+                        TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    }
+                }
+                Text {
+                    text: "Add an agent";
+                    color: Theme.ink;
+                    font-family: Theme.font-display;
+                    font-weight: 500;
+                    font-size: 24px;
+                }
+            }
+
+            // body
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-bottom: 20px;
+                spacing: 16px;
+
+                // honest-note (green left border)
+                Rectangle {
+                    background: Theme.paper-2;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.border-1;
+                    height: note.preferred-height;
+                    // 3px left rule
+                    Rectangle { x: 0; width: 3px; border-radius: 999px; background: Theme.citrate-green-deep; }
+                    note := VerticalLayout {
+                        padding: 14px;
+                        Text {
+                            text: "@crm-agent will be added as a member and can read this channel. Everyone in the channel will see it joined.";
+                            color: Theme.ink-2;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // agent avatar + trust statement
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Avatar { initials: "CA"; agent: true; sz: 40px; }
+                    VerticalLayout {
+                        spacing: 3px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            Text { text: "@crm-agent"; color: Theme.ink; font-family: Theme.font-mono; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                            SurfBadge { text: "AGENT"; }
+                        }
+                        Text {
+                            text: "read + post · cannot change membership";
+                            color: Theme.fg-3;
+                            font-size: 12px;
+                        }
+                    }
+                }
+            }
+
+            Hairline {}
+
+            // foot
+            Rectangle {
+                background: Theme.paper-2;
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 24px; padding-right: 24px; spacing: 8px; alignment: end;
+                    Btn { text: "Cancel"; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                    Btn { text: "Add agent"; primary: true; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                }
+            }
+        }
+    }
+}
+
+// ── Remove member — the honest-semantics confirm ─────────────────────────────
+export component OffboardDialog inherits Rectangle {
+    callback close();
+
+    Rectangle {
+        background: #0e0f0c80;
+        TouchArea { clicked => { root.close(); } }
+    }
+
+    Rectangle {
+        width: 520px;
+        height: card.preferred-height;
+        x: (parent.width - 520px) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.paper-pure;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border-1;
+        drop-shadow-color: #0e0f0c80;
+        drop-shadow-blur: 80px;
+        drop-shadow-offset-y: 24px;
+        TouchArea {}
+
+        card := VerticalLayout {
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-top: 20px; padding-bottom: 16px;
+                spacing: 12px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Eyebrow { text: "REMOVE MEMBER · SENSITIVE"; vertical-alignment: center; }
+                    Text {
+                        text: "✕"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center;
+                        TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Avatar { initials: "PA"; tint: #1b4965; sz: 44px; }
+                    VerticalLayout {
+                        spacing: 3px;
+                        Text {
+                            text: "Remove Priya?";
+                            color: Theme.ink;
+                            font-family: Theme.font-display;
+                            font-weight: 500;
+                            font-size: 22px;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            RoleGlyph { role: "Admin"; }
+                            Text { text: "Admin"; color: Theme.fg-3; font-size: 12px; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-bottom: 20px;
+
+                // DANGER honest-note (red left border)
+                Rectangle {
+                    background: Theme.paper-2;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.border-1;
+                    height: note.preferred-height;
+                    Rectangle { x: 0; width: 3px; border-radius: 999px; background: Theme.danger; }
+                    note := VerticalLayout {
+                        padding: 14px;
+                        Text {
+                            text: "She loses access to new messages in #deals right away. She keeps what she already saw — this isn't a remote wipe, and it can't be undone.";
+                            color: Theme.ink-2;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            Hairline {}
+
+            Rectangle {
+                background: Theme.paper-2;
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 24px; padding-right: 24px; spacing: 8px; alignment: end;
+                    Btn { text: "Cancel"; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                    Btn { text: "Remove member"; danger: true; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                }
+            }
+        }
+    }
+}
+
+// ── Invite to the workspace ───────────────────────────────────────────────────
+export component InviteDialog inherits Rectangle {
+    callback close();
+    property <string> role: "Member";
+
+    Rectangle {
+        background: #0e0f0c80;
+        TouchArea { clicked => { root.close(); } }
+    }
+
+    Rectangle {
+        width: 520px;
+        height: card.preferred-height;
+        x: (parent.width - 520px) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.paper-pure;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border-1;
+        drop-shadow-color: #0e0f0c80;
+        drop-shadow-blur: 80px;
+        drop-shadow-offset-y: 24px;
+        TouchArea {}
+
+        card := VerticalLayout {
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-top: 20px; padding-bottom: 16px;
+                spacing: 8px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Eyebrow { text: "INVITE · ONBOARD"; vertical-alignment: center; }
+                    Text {
+                        text: "✕"; color: Theme.fg-3; font-size: 16px; vertical-alignment: center;
+                        TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    }
+                }
+                Text {
+                    text: "Invite to the workspace";
+                    color: Theme.ink;
+                    font-family: Theme.font-display;
+                    font-weight: 500;
+                    font-size: 24px;
+                }
+            }
+
+            VerticalLayout {
+                padding-left: 24px; padding-right: 24px; padding-bottom: 20px;
+                spacing: 18px;
+
+                // identity row
+                VerticalLayout {
+                    spacing: 8px;
+                    Eyebrow { text: "IDENTITY"; }
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.border-1;
+                        background: Theme.paper-pure;
+                        HorizontalLayout {
+                            padding-left: 12px; padding-right: 12px; alignment: start;
+                            Text {
+                                text: "Wallet address (0x…) or generate invite link";
+                                color: Theme.fg-3;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // role rows
+                VerticalLayout {
+                    spacing: 8px;
+                    Eyebrow { text: "ROLE"; }
+                    role-row := VerticalLayout {
+                        spacing: 8px;
+                        for r[i] in [
+                            { name: "Member", desc: "Full member of chosen channels" },
+                            { name: "Partner", desc: "External · scoped to specific channels" },
+                            { name: "Guest", desc: "Read-only · access expires" },
+                        ]: Rectangle {
+                            height: 56px;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: root.role == r.name ? Theme.citrate-green-deep : Theme.border-1;
+                            background: root.role == r.name ? Theme.citrate-green-tint : Theme.paper-pure;
+                            ta := TouchArea { mouse-cursor: pointer; clicked => { root.role = r.name; } }
+                            HorizontalLayout {
+                                padding-left: 14px; padding-right: 14px; spacing: 12px; alignment: start;
+                                VerticalLayout { alignment: center; RoleGlyph { role: r.name; } }
+                                VerticalLayout {
+                                    alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                    Text { text: r.name; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                                    Text { text: r.desc; color: Theme.fg-2; font-size: 12px; }
+                                }
+                                if root.role == r.name: Text {
+                                    text: "✓"; color: Theme.citrate-green-deep; font-size: 16px; font-weight: 700; vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // scope row
+                VerticalLayout {
+                    spacing: 8px;
+                    Eyebrow { text: "SCOPE"; }
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.border-1;
+                        background: Theme.paper-pure;
+                        HorizontalLayout {
+                            padding-left: 12px; padding-right: 12px; alignment: start;
+                            Text {
+                                text: "Channels they can see — # deals";
+                                color: Theme.fg-3;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Hairline {}
+
+            Rectangle {
+                background: Theme.paper-2;
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 24px; padding-right: 24px; spacing: 8px; alignment: end;
+                    Btn { text: "Cancel"; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                    Btn { text: "Send invite"; primary: true; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                }
+            }
+        }
+    }
+}
