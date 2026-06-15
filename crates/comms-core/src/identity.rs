@@ -349,6 +349,58 @@ mod tests {
         }
     }
 
+    /// WP-4.3 (`PLANSET/07` §2.3) — every secp256k1 verify path rejects malleable high-S
+    /// signatures. We take a valid low-S signature, flip `s → N - s` (its high-S twin) and
+    /// the recovery parity (a textbook malleability transform), and assert the shared
+    /// recovery helper refuses it. SIWE, the binding attestation, and RoleAssertions all
+    /// route through this helper, so one guard covers them all.
+    #[test]
+    fn high_s_signatures_are_rejected() {
+        // secp256k1 group order N, big-endian.
+        const N: [u8; 32] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+            0x41, 0x41,
+        ];
+        // Big-endian `a - b` for a >= b.
+        fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            let mut borrow = 0i16;
+            for i in (0..32).rev() {
+                let mut d = a[i] as i16 - b[i] as i16 - borrow;
+                if d < 0 {
+                    d += 256;
+                    borrow = 1;
+                } else {
+                    borrow = 0;
+                }
+                out[i] = d as u8;
+            }
+            out
+        }
+
+        let domain = b"citrate-comms/test";
+        let blob = b"authorize the agent";
+        let wallet = EthWallet::generate();
+        let low = wallet.sign_blob(domain, blob);
+        // Sanity: the honest low-S signature verifies.
+        assert_eq!(recover_blob_signer(domain, blob, &low).unwrap(), wallet.address());
+
+        // Forge its high-S malleable twin: s' = N - s, flip recovery parity.
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&low[32..64]);
+        let high_s = sub_be(&N, &s);
+        let mut tampered = low;
+        tampered[32..64].copy_from_slice(&high_s);
+        tampered[64] ^= 1;
+
+        assert_eq!(
+            recover_blob_signer(domain, blob, &tampered),
+            Err(IdentityError::HighS),
+            "high-S signature must be rejected at the door"
+        );
+    }
+
     #[test]
     fn valid_login_recovers_wallet() {
         let mut nonces = InMemoryNonceStore::new();

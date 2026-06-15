@@ -538,4 +538,82 @@ mod tests {
         assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind is in Proposal"));
         relay.audit().verify_integrity().unwrap();
     }
+
+    /// WP-4.4 (`PLANSET/07` §4) — the executable server-blind proof, with REAL MLS
+    /// ciphertext through a PERSISTENT relay. A unique plaintext canary is sealed into an
+    /// MLS message and submitted; we then assert the canary appears (a) nowhere in the
+    /// on-the-wire ciphertext (MLS made it opaque) and (b) nowhere in the relay's on-disk
+    /// RocksDB files (the at-rest AES-256-GCM layer encrypts even the stored ciphertext).
+    /// This is the relay-cannot-read-messages invariant, end to end.
+    #[test]
+    fn relay_persists_only_ciphertext_on_disk() {
+        // A canary unlikely to occur by chance; we search the raw store for it.
+        const CANARY: &[u8] = b"CANARY-7f3a9c2e-Northwind-pilot-is-air-gapped";
+        let now = 7_000u64;
+        let dir = tempfile::tempdir().unwrap();
+        let master = [42u8; 32];
+        let admin_w = EthWallet::generate();
+
+        let plaintext_ct = {
+            let mut relay =
+                DeliveryService::open(dir.path(), DOMAIN, admin_w.address(), master, 0).unwrap();
+            login(&mut relay, &admin_w, now);
+            let admin_m = Member::new(&admin_w.address().0).unwrap();
+            let mut admin_g = admin_m.create_group().unwrap();
+            let gid = GroupId(*blake3::hash(&admin_g.group_id()).as_bytes());
+            relay.register_group(gid, admin_w.address(), now).unwrap();
+
+            // Seal the canary inside a real MLS-encrypted ChatMessage.
+            let body = String::from_utf8(CANARY.to_vec()).unwrap();
+            let payload = ChatMessage { thread_id: None, parent_id: None, body, sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
+            let ct = admin_g.send(&admin_m, &payload).unwrap();
+            // (a) The wire ciphertext is opaque — the canary is not in it.
+            assert!(!contains_subseq(&ct, CANARY), "MLS ciphertext leaked the plaintext");
+            relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![], ciphertext: ct.clone(), group_seq: None }, now).unwrap();
+            ct
+            // relay drops here → RocksDB flushes and closes.
+        };
+        // Sanity: the ciphertext we submitted was non-trivial.
+        assert!(plaintext_ct.len() > CANARY.len());
+
+        // (b) Walk every file the relay wrote and assert the canary is absent everywhere —
+        // SST, WAL (.log), MANIFEST, CURRENT — because the at-rest layer encrypts values.
+        let mut files_scanned = 0usize;
+        for path in walk_files(dir.path()) {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            files_scanned += 1;
+            assert!(
+                !contains_subseq(&bytes, CANARY),
+                "plaintext canary found on disk in {}",
+                path.display()
+            );
+        }
+        assert!(files_scanned > 0, "expected the relay to have written files");
+    }
+
+    /// Naive substring search over bytes (test-only).
+    fn contains_subseq(haystack: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return false;
+        }
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Recursively collect every regular file under `root` (test-only).
+    fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
 }

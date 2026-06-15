@@ -14,6 +14,7 @@ use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use std::path::Path;
+use zeroize::Zeroizing;
 
 /// Column families the relay persists (ciphertext + metadata only — never plaintext).
 pub const CF_ENVELOPES: &str = "envelopes"; // group_id(32) ‖ seq(8 BE) -> Envelope
@@ -30,7 +31,9 @@ pub type KvPairs = Vec<(Vec<u8>, Vec<u8>)>;
 /// An encrypted RocksDB store. Cheap to clone keys; the DB handle is owned.
 pub struct EncryptedStore {
     db: DB,
-    master: [u8; 32],
+    /// The 32-byte master key. Held in `Zeroizing` so it is wiped when the store drops —
+    /// no master key lingers in a freed allocation (`PLANSET/07` §2.2).
+    master: Zeroizing<[u8; 32]>,
 }
 
 impl EncryptedStore {
@@ -44,13 +47,18 @@ impl EncryptedStore {
             .map(|n| ColumnFamilyDescriptor::new(*n, Options::default()))
             .collect::<Vec<_>>();
         let db = DB::open_cf_descriptors(&opts, path, cfs).map_err(|e| StoreError::Db(e.to_string()))?;
-        Ok(Self { db, master })
+        Ok(Self { db, master: Zeroizing::new(master) })
     }
 
     fn cipher(&self, cf: &str) -> Aes256Gcm {
-        // Per-CF data key: domain-separated keyed KDF over the master key.
-        let cf_key = blake3::derive_key(&format!("citrate-comms/store/cf/v1:{cf}"), &self.master);
-        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&cf_key))
+        // Per-CF data key: domain-separated keyed KDF over the master key. The derived key
+        // is `Zeroizing` so it is wiped once the cipher has copied it in — the only place
+        // the per-CF key exists in our memory is this short-lived buffer.
+        let cf_key = Zeroizing::new(blake3::derive_key(
+            &format!("citrate-comms/store/cf/v1:{cf}"),
+            self.master.as_ref(),
+        ));
+        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(cf_key.as_ref()))
     }
 
     /// Encrypt + store `plaintext` under `key` in column family `cf` (AAD = cf name).

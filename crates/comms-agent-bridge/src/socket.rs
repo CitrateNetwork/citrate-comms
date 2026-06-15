@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -82,7 +83,8 @@ impl AgentSocket {
 
         let hello: Handshake = conn.read_frame().await?.ok_or(SocketError::HandshakeClosed)?;
         let Handshake::Auth { token } = hello;
-        if !constant_time_eq(token.as_bytes(), self.bearer.as_bytes()) {
+        // Audited constant-time comparator (`subtle`) — never `==` on the secret bearer.
+        if !bool::from(token.as_bytes().ct_eq(self.bearer.as_bytes())) {
             // Fail-closed: drop the connection without leaking which check failed.
             return Err(SocketError::Unauthorized);
         }
@@ -225,18 +227,6 @@ pub fn random_bearer() -> Result<String, SocketError> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf).map_err(|e| SocketError::Rng(e.to_string()))?;
     Ok(hex::encode(buf))
-}
-
-/// Constant-time byte comparison — avoids leaking the bearer via timing.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[derive(Debug, thiserror::Error)]

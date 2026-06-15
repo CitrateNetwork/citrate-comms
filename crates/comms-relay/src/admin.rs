@@ -19,6 +19,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -111,19 +112,8 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let expected = format!("Bearer {token}");
-    constant_time_eq(presented.as_bytes(), expected.as_bytes())
-}
-
-/// Length-independent-leak-free equality (compares lengths, then XOR-accumulates).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    // Audited constant-time comparator (`subtle`) — never `==` on the secret bearer.
+    presented.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 #[derive(Debug, thiserror::Error)]

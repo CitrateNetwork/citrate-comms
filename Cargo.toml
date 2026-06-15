@@ -29,6 +29,7 @@ serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"              # CBOR for canonical envelope + record encoding
 thiserror = "1"
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
+subtle = "2"                  # constant-time equality for tokens / auth tags (no `==` on secrets)
 # crypto grade (matches citrate-chain)
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
