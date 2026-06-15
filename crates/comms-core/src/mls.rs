@@ -39,6 +39,15 @@ pub struct AddOutput {
     pub ratchet_tree: Vec<u8>,
 }
 
+/// What `remove` produces: the Commit removing a member (no Welcome). Applying it
+/// rotates the group secret so the removed member loses access to future epochs.
+pub struct RemoveOutput {
+    /// MLS Commit — fanned out to the REMAINING members.
+    pub commit: Vec<u8>,
+    /// The new public ratchet tree at the post-removal epoch.
+    pub ratchet_tree: Vec<u8>,
+}
+
 impl MlsMember {
     /// Create a member with the given credential identity bytes (for citrate-comms
     /// this is the canonical CBOR of `{ wallet_address, mls_sig_pubkey }`).
@@ -153,6 +162,38 @@ impl GroupHandle {
             .tls_serialize_detached()
             .map_err(|e| MlsError::Codec(format!("ratchet tree serialize: {e:?}")))?;
         Ok(AddOutput { commit, welcome, ratchet_tree })
+    }
+
+    /// Find a member's leaf index by their MLS signature public key (the value
+    /// bound to their wallet by the attestation). Returns `None` if not a member.
+    pub fn member_index_by_sig(&self, sig_pubkey: &[u8]) -> Option<u32> {
+        self.group
+            .members()
+            .find(|m| m.signature_key.as_slice() == sig_pubkey)
+            .map(|m| m.index.u32())
+    }
+
+    /// Remove a member by leaf index (offboarding). Produces a Commit with a path
+    /// update — the new epoch secret is unknown to the removed member, so from the
+    /// next epoch forward they cannot decrypt. The admin merges the commit so its
+    /// own view advances.
+    pub fn remove(&mut self, admin: &MlsMember, leaf_index: u32) -> Result<RemoveOutput, MlsError> {
+        let (commit, _welcome, _group_info) = self
+            .group
+            .remove_members(&admin.provider, &admin.signer, &[LeafNodeIndex::new(leaf_index)])
+            .map_err(|e| MlsError::Group(format!("remove_members: {e:?}")))?;
+        self.group
+            .merge_pending_commit(&admin.provider)
+            .map_err(|e| MlsError::Group(format!("merge remove commit: {e:?}")))?;
+        let commit = commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("remove commit serialize: {e:?}")))?;
+        let ratchet_tree = self
+            .group
+            .export_ratchet_tree()
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("ratchet tree serialize: {e:?}")))?;
+        Ok(RemoveOutput { commit, ratchet_tree })
     }
 
     /// Apply an incoming Commit (a membership/epoch change from another member).

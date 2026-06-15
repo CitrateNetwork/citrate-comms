@@ -262,6 +262,29 @@ impl EthWallet {
         let digest = binding_digest(&self.address, mls_sig_pubkey, relay_domain, nonce);
         self.sign_digest(&digest)
     }
+
+    /// Sign an arbitrary domain-separated blob (used for signed `RoleAssertion`s).
+    /// The signed digest is `BLAKE3(domain ‖ blob)`.
+    pub fn sign_blob(&self, domain: &[u8], blob: &[u8]) -> [u8; 65] {
+        self.sign_digest(&blob_digest(domain, blob))
+    }
+}
+
+/// Domain-separated digest used by [`EthWallet::sign_blob`] / [`recover_blob_signer`].
+fn blob_digest(domain: &[u8], blob: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    h.update(blob);
+    *h.finalize().as_bytes()
+}
+
+/// Recover the wallet that signed a domain-separated blob (public-key verification).
+pub fn recover_blob_signer(
+    domain: &[u8],
+    blob: &[u8],
+    signature: &[u8; 65],
+) -> Result<WalletAddress, IdentityError> {
+    recover_address(&blob_digest(domain, blob), signature)
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -22,8 +22,10 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use comms_core::audit::{AuditChain, AuditError};
 use comms_core::identity::{self, InMemoryNonceStore, NonceStore, SiweMessage};
+use comms_core::rbac::{self, Capability, RbacError};
 use comms_proto::{
-    AuditEvent, Envelope, EnvelopeKind, GroupId, KeyPackagePublication, KeyPackageRef, WalletAddress,
+    AuditEvent, Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, KeyPackageRef,
+    RoleAssertion, WalletAddress,
 };
 
 /// Per-group routing + ordering state. Holds NO secrets — only ciphertext, the
@@ -41,9 +43,26 @@ struct GroupState {
     log: Vec<Envelope>,
 }
 
+/// Parameters for [`DeliveryService::offboard`]. Bundled so the call site reads as
+/// one intent ("offboard this member with this Remove commit").
+pub struct OffboardRequest<'a> {
+    pub group_id: GroupId,
+    pub admin: WalletAddress,
+    /// `None` if the admin IS the workspace owner; otherwise an owner-signed grant.
+    pub admin_assertion: Option<&'a RoleAssertion>,
+    pub removed: WalletAddress,
+    /// The MLS Remove commit (`EnvelopeKind::Commit`) at the new epoch.
+    pub remove_commit: Envelope,
+    /// The public ratchet tree at the post-removal epoch.
+    pub ratchet_tree: Vec<u8>,
+}
+
 /// The server-blind relay.
 pub struct DeliveryService {
     domain: String,
+    /// The workspace owner — the trust anchor for RBAC `RoleAssertion`s the relay
+    /// verifies before admitting a membership-mutating op.
+    owner: WalletAddress,
     nonces: InMemoryNonceStore,
     /// One-time-use KeyPackage directory, keyed by wallet.
     key_packages: HashMap<WalletAddress, VecDeque<KeyPackagePublication>>,
@@ -56,9 +75,14 @@ pub struct DeliveryService {
 }
 
 impl DeliveryService {
-    pub fn new(domain: impl Into<String>, genesis_ts_ms: u64) -> Result<Self, RelayError> {
+    pub fn new(
+        domain: impl Into<String>,
+        owner: WalletAddress,
+        genesis_ts_ms: u64,
+    ) -> Result<Self, RelayError> {
         Ok(Self {
             domain: domain.into(),
+            owner,
             nonces: InMemoryNonceStore::new(),
             key_packages: HashMap::new(),
             groups: HashMap::new(),
@@ -70,6 +94,10 @@ impl DeliveryService {
 
     pub fn domain(&self) -> &str {
         &self.domain
+    }
+
+    pub fn owner(&self) -> WalletAddress {
+        self.owner
     }
 
     // ─────────────────────────── handshake ───────────────────────────
@@ -196,6 +224,50 @@ impl DeliveryService {
         self.groups.get(group_id).map(|g| g.ratchet_tree.as_slice())
     }
 
+    /// **Atomic offboard.** Revoke a member's role AND their future-message access in
+    /// one operation: the RBAC check, the MLS Remove commit (which rotates the group
+    /// secret), the roster drop, and the audit all happen together at one epoch. The
+    /// actor must be the workspace owner or hold an owner-signed assertion whose role
+    /// can `RemoveMember`. The removed member keeps prior plaintext but cannot decrypt
+    /// anything from the new epoch forward (forward security — `PLANSET/02` §3.2/§4.3).
+    pub fn offboard(&mut self, req: OffboardRequest, now_ms: u64) -> Result<u64, RelayError> {
+        let OffboardRequest { group_id, admin, admin_assertion, removed, remove_commit, ratchet_tree } = req;
+        self.require_session(&admin)?;
+        // RBAC: owner is the trust anchor; anyone else must present an owner-signed
+        // assertion whose role carries RemoveMember.
+        if admin != self.owner {
+            let a = admin_assertion.ok_or(RelayError::NotAuthorized)?;
+            rbac::verify_grant_chain(a, admin, self.owner, now_ms).map_err(RelayError::Rbac)?;
+            if !rbac::can(a.role, Capability::RemoveMember) {
+                return Err(RelayError::NotAuthorized);
+            }
+        }
+        {
+            let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
+            if !state.members.contains(&admin) || !state.members.contains(&removed) {
+                return Err(RelayError::NotAMember);
+            }
+        }
+        debug_assert_eq!(remove_commit.kind, EnvelopeKind::Commit);
+        // Apply the Remove commit on the ordered path (first-writer-wins, receipt
+        // audit, fan-out to the REMAINING members).
+        let seq = self.submit(remove_commit, now_ms)?;
+        // Atomic with the commit: drop from the roster, refresh the public ratchet
+        // tree, and record the offboard as a single logical event pair.
+        let epoch = {
+            let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
+            state.members.remove(&removed);
+            state.ratchet_tree = ratchet_tree;
+            state.current_epoch
+        };
+        self.audit.append(
+            AuditEvent::MemberRemoved { group_id, member: removed, epoch: EpochId(epoch) },
+            now_ms,
+        )?;
+        self.audit.append(AuditEvent::RoleRevoked { subject: removed, scope: Some(group_id) }, now_ms)?;
+        Ok(seq)
+    }
+
     // ─────────────────────── submit / deliver ───────────────────────
 
     /// Accept an envelope: assign its `group_seq`, enforce Commit ordering, store
@@ -279,6 +351,8 @@ impl DeliveryService {
 pub enum RelayError {
     #[error("session not authenticated (SIWE handshake required)")]
     NotAuthenticated,
+    #[error("actor not authorized for this membership operation")]
+    NotAuthorized,
     #[error("SIWE verification failed: {0}")]
     Siwe(comms_core::identity::IdentityError),
     #[error("binding attestation failed: {0}")]
@@ -297,6 +371,8 @@ pub enum RelayError {
     EpochAlreadyCommitted { epoch: u64 },
     #[error("no key package available for wallet")]
     NoKeyPackage,
+    #[error("rbac check failed: {0}")]
+    Rbac(RbacError),
     #[error(transparent)]
     Audit(#[from] AuditError),
 }
@@ -338,9 +414,9 @@ mod tests {
 
     #[test]
     fn ciphertext_only_store_and_audit_verifies() {
-        let mut relay = DeliveryService::new("relay.citrate.ai", 0).unwrap();
         let alice = EthWallet::generate();
         let bob = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
         login(&mut relay, &alice, 10);
         login(&mut relay, &bob, 11);
 
@@ -371,8 +447,8 @@ mod tests {
 
     #[test]
     fn first_writer_wins_per_epoch() {
-        let mut relay = DeliveryService::new("relay.citrate.ai", 0).unwrap();
         let alice = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
         login(&mut relay, &alice, 1);
         let gid = GroupId([1; 32]);
         relay.register_group(gid, alice.address(), 2).unwrap();
@@ -388,8 +464,8 @@ mod tests {
 
     #[test]
     fn unauthenticated_submit_is_rejected() {
-        let mut relay = DeliveryService::new("relay.citrate.ai", 0).unwrap();
         let alice = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
         let gid = GroupId([1; 32]);
         // No login → register fails fail-closed.
         assert!(matches!(relay.register_group(gid, alice.address(), 1), Err(RelayError::NotAuthenticated)));
@@ -397,9 +473,9 @@ mod tests {
 
     #[test]
     fn non_member_cannot_submit() {
-        let mut relay = DeliveryService::new("relay.citrate.ai", 0).unwrap();
         let alice = EthWallet::generate();
         let mallory = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
         login(&mut relay, &alice, 1);
         login(&mut relay, &mallory, 2);
         let gid = GroupId([1; 32]);

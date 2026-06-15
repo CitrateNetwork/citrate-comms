@@ -129,7 +129,7 @@ pub struct RoleAssertion {
     pub role: Role,
     /// `None` == workspace-wide; `Some(group)` == channel-scoped.
     pub scope: Option<GroupId>,
-    /// Unix seconds; `None` == no expiry.
+    /// Unix milliseconds; `None` == no expiry.
     pub not_after: Option<u64>,
     pub issuer: WalletAddress,
     /// secp256k1 signature by `issuer` over the canonical encoding of the fields above.

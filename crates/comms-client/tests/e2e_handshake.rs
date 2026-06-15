@@ -12,7 +12,7 @@
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::MlsMember;
 use comms_proto::{Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID};
-use comms_relay::DeliveryService;
+use comms_relay::{DeliveryService, OffboardRequest};
 
 /// SIWE login helper — mirrors the handshake a client performs on connect.
 fn login(relay: &mut DeliveryService, wallet: &EthWallet, now: u64) {
@@ -39,11 +39,11 @@ fn group_id_of(member_group: &comms_core::mls::GroupHandle) -> GroupId {
 
 #[test]
 fn two_members_exchange_a_message_through_a_blind_relay() {
-    let mut relay = DeliveryService::new("relay.citrate.ai", 0).unwrap();
-
     // ── 1. Both parties authenticate with SIWE (wallet = durable identity). ──
     let alice_wallet = EthWallet::generate();
     let bob_wallet = EthWallet::generate();
+    // Alice is the workspace owner (the RBAC trust anchor).
+    let mut relay = DeliveryService::new("relay.citrate.ai", alice_wallet.address(), 0).unwrap();
     login(&mut relay, &alice_wallet, 10);
     login(&mut relay, &bob_wallet, 11);
 
@@ -140,4 +140,99 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
     // Audit recorded the metadata events (group create, key package, member add, receipts) — never content.
     let n = relay.audit().len();
     assert!(n >= 5, "expected genesis + group + kp + member-add + >=2 receipts, got {n}");
+}
+
+/// COMMS-S1 (WP-1.3) — atomic offboard. An owner removes a member; from the next
+/// epoch the removed member cannot decrypt, and the relay records role + access
+/// revocation together. Demonstrates forward security as the enforcement mechanism.
+#[test]
+fn offboard_atomically_revokes_role_and_future_access() {
+    let alice_wallet = EthWallet::generate(); // owner
+    let bob_wallet = EthWallet::generate();
+    let mut relay = DeliveryService::new("relay.citrate.ai", alice_wallet.address(), 0).unwrap();
+    login(&mut relay, &alice_wallet, 10);
+    login(&mut relay, &bob_wallet, 11);
+
+    // Bob publishes a KeyPackage; Alice creates the group and adds him.
+    let bob_member = MlsMember::new(&bob_wallet.address().0).unwrap();
+    let bob_sig_pub = bob_member.sig_pubkey();
+    let pub_nonce = relay.issue_challenge(12);
+    relay
+        .publish_key_package(
+            KeyPackagePublication {
+                wallet: bob_wallet.address(),
+                key_package: bob_member.fresh_key_package().unwrap(),
+                mls_sig_pubkey: bob_sig_pub.clone(),
+                binding_attestation: bob_wallet.sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce).to_vec(),
+                nonce: pub_nonce,
+                relay_domain: relay.domain().to_string(),
+            },
+            12,
+        )
+        .unwrap();
+
+    let alice_member = MlsMember::new(&alice_wallet.address().0).unwrap();
+    let mut alice_group = alice_member.create_group().unwrap();
+    let gid = group_id_of(&alice_group);
+    relay.register_group(gid, alice_wallet.address(), 13).unwrap();
+
+    let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
+    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
+    relay
+        .submit(
+            Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
+                sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None },
+            14,
+        )
+        .unwrap();
+    let welcome_env = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
+        sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
+    relay.onboard(gid, alice_wallet.address(), bob_wallet.address(), welcome_env, add.ratchet_tree, 15).unwrap();
+    let inbox = relay.fetch(&bob_wallet.address());
+    let welcome = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
+    let ratchet_tree = relay.ratchet_tree(&gid).unwrap().to_vec();
+    let mut bob_group = bob_member.join(&welcome.ciphertext, &ratchet_tree).unwrap();
+
+    // Pre-offboard: Bob can read.
+    let ct1 = alice_group.send(&alice_member, b"before offboard").unwrap();
+    assert_eq!(bob_group.receive(&bob_member, &ct1).unwrap(), b"before offboard");
+
+    // ── OFFBOARD: Alice removes Bob (MLS Remove → epoch 2), then the relay applies it atomically. ──
+    let bob_leaf = alice_group.member_index_by_sig(&bob_sig_pub).expect("bob is a member");
+    let removal = alice_group.remove(&alice_member, bob_leaf).unwrap();
+    assert_eq!(alice_group.epoch(), 2, "remove commit advances the epoch");
+
+    let remove_commit = Envelope { group_id: gid, epoch: EpochId(2), kind: EnvelopeKind::Commit,
+        sender: alice_wallet.address(), recipients: vec![], ciphertext: removal.commit, group_seq: None };
+    // Alice is the owner → no assertion needed (the trust anchor).
+    relay.offboard(
+        OffboardRequest {
+            group_id: gid,
+            admin: alice_wallet.address(),
+            admin_assertion: None,
+            removed: bob_wallet.address(),
+            remove_commit,
+            ratchet_tree: removal.ratchet_tree,
+        },
+        16,
+    ).unwrap();
+
+    // Bob is off the roster.
+    let members = relay.group_members(&gid).unwrap();
+    assert!(!members.contains(&bob_wallet.address()), "removed member is off the roster");
+
+    // ── Forward security: a post-offboard message cannot be decrypted by Bob. ──
+    let ct2 = alice_group.send(&alice_member, b"after offboard - confidential").unwrap();
+    assert!(
+        bob_group.receive(&bob_member, &ct2).is_err(),
+        "removed member must not decrypt messages from the new epoch"
+    );
+
+    // Audit recorded the offboard (MemberRemoved + RoleRevoked) and still verifies.
+    relay.audit().verify_integrity().unwrap();
+    let saw_removed = relay.audit().records().iter().any(|r| matches!(
+        r.event, comms_proto::AuditEvent::MemberRemoved { .. }));
+    let saw_revoked = relay.audit().records().iter().any(|r| matches!(
+        r.event, comms_proto::AuditEvent::RoleRevoked { .. }));
+    assert!(saw_removed && saw_revoked, "offboard recorded both member removal and role revocation");
 }
