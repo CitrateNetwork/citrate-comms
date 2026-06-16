@@ -1,0 +1,31 @@
+# citrate-comms relay — Caddy reverse proxy with automatic HTTPS.
+#
+# Caddy terminates TLS (Let's Encrypt) at :443 and proxies to the loopback-bound,
+# server-blind relay. WebSocket upgrades pass through transparently — no extra config.
+# Clients connect to  wss://comms.example.com  ; the relay only ever sees loopback ws://.
+#
+# Replace comms.example.com with your real hostname (must have a DNS A/AAAA record
+# pointing at this droplet BEFORE Caddy starts, so the ACME challenge can complete).
+
+comms.example.com {
+	# The relay listens on 127.0.0.1:8787 (CITRATE_COMMS_BIND). Caddy handles the
+	# wss:// <-> ws:// bridge and the TLS cert automatically.
+	reverse_proxy 127.0.0.1:8787
+
+	# Optional hardening headers (the payload is already E2E-encrypted; these protect
+	# the transport surface and stop the page being framed if anything is ever served).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# Keep access logs lean — the relay is metadata-bearing; don't duplicate it verbosely.
+	log {
+		output file /var/log/caddy/comms.log
+		format console
+	}
+}
+
+# NOTE: the relay's admin surface (CITRATE_COMMS_ADMIN_BIND, default 127.0.0.1:8788) is
+# deliberately NOT proxied — it is loopback + bearer-gated and must never be exposed.

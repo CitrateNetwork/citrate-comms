@@ -1,0 +1,48 @@
+# systemd unit for the citrate-comms server-blind relay.
+# Install to /etc/systemd/system/comms-relay.service, then:
+#   systemctl daemon-reload && systemctl enable --now comms-relay
+#
+# The relay holds NO group secrets (server-blind) — only ciphertext + routing metadata
+# encrypted at rest with the master key from the EnvironmentFile. It binds loopback;
+# Caddy fronts it with TLS (see Caddyfile).
+
+[Unit]
+Description=citrate-comms server-blind relay
+Documentation=https://github.com/citrate-labs/citrate-comms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=comms
+Group=comms
+WorkingDirectory=/opt/citrate-comms
+EnvironmentFile=/opt/citrate-comms/.env
+ExecStart=/opt/citrate-comms/bin/comms-relay
+Restart=on-failure
+RestartSec=3
+# Fail fast if it crash-loops at boot (e.g. bad config) rather than spinning forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# ── sandboxing (fail-closed posture; the relay needs only its data dir) ──
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# Only the RocksDB store is writable.
+ReadWritePaths=/opt/citrate-comms/data
+# Drop all Linux capabilities — it binds a high (>1024) loopback port, no privilege needed.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
