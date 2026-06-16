@@ -66,7 +66,9 @@ CITRATE_COMMS_RELAY=wss://comms.<yourdomain> \
 CITRATE_COMMS_DOMAIN=comms.<yourdomain> \
 CITRATE_COMMS_PEER=0x<bob> \
 citrate-comms
-# A must sign in with the SAME wallet as CITRATE_COMMS_OWNER on the relay.
+# A uses its own keyring wallet — it does NOT need to be the CITRATE_COMMS_OWNER
+# address. (The owner is only the RBAC trust anchor for role grants / offboarding;
+# any authenticated client may create a channel.)
 ```
 A creates a channel and invites B; B joins automatically; the header pill goes
 **● live**; messages are MLS-encrypted end to end. The relay never sees plaintext.
