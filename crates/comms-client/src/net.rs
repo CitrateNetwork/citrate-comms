@@ -215,30 +215,49 @@ impl NetSession {
             .map_err(NetError::Ws)
     }
 
-    /// Await the next decrypted inbound event for our channel. Application messages are
-    /// decrypted; membership Commits are processed (advancing our epoch).
+    /// Await the next raw envelope pushed by the relay (borrows `&self` only, so a driver
+    /// loop can `select`/poll it without holding a `&mut self` borrow). Returns `None` on
+    /// a closed connection. The bytes are still ciphertext — feed it to [`apply`](Self::apply).
+    pub async fn next_envelope(&self) -> Option<Envelope> {
+        self.client.next_delivered().await
+    }
+
+    /// Apply a delivered envelope to our MLS state: decrypt application messages, process
+    /// membership Commits (advancing our epoch). Returns `Ok(None)` for envelopes not for
+    /// our channel or that produce no user-visible event. Synchronous (no `await`), so it
+    /// composes with [`next_envelope`](Self::next_envelope) in a poll loop.
+    pub fn apply(&mut self, env: Envelope) -> Result<Option<Inbound>, NetError> {
+        let ch = self.channel.as_mut().ok_or(NetError::NotInChannel)?;
+        if env.group_id != ch.gid {
+            return Ok(None);
+        }
+        match env.kind {
+            EnvelopeKind::Application => {
+                let pt = ch.group.receive(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
+                let msg = ChatMessage::decode(&pt).map_err(|e| NetError::Codec(e.to_string()))?;
+                Ok(Some(Inbound::Message { group: ch.gid, sender: env.sender, text: msg.body }))
+            }
+            EnvelopeKind::Commit => {
+                ch.group.process_commit(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
+                ch.epoch = ch.group.epoch();
+                if !ch.members.contains(&env.sender) {
+                    ch.members.push(env.sender);
+                }
+                Ok(Some(Inbound::System { text: "channel membership changed".into() }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Await the next decrypted inbound event for our channel (a convenience that loops
+    /// [`next_envelope`](Self::next_envelope) + [`apply`](Self::apply)). The driver uses
+    /// the split form; this is exercised by tests.
+    #[allow(dead_code)]
     pub async fn recv(&mut self) -> Result<Inbound, NetError> {
         loop {
-            let env = self.client.next_delivered().await.ok_or(NetError::Closed)?;
-            let ch = self.channel.as_mut().ok_or(NetError::NotInChannel)?;
-            if env.group_id != ch.gid {
-                continue;
-            }
-            match env.kind {
-                EnvelopeKind::Application => {
-                    let pt = ch.group.receive(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
-                    let msg = ChatMessage::decode(&pt).map_err(|e| NetError::Codec(e.to_string()))?;
-                    return Ok(Inbound::Message { group: ch.gid, sender: env.sender, text: msg.body });
-                }
-                EnvelopeKind::Commit => {
-                    ch.group.process_commit(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
-                    ch.epoch = ch.group.epoch();
-                    if !ch.members.contains(&env.sender) {
-                        ch.members.push(env.sender);
-                    }
-                    return Ok(Inbound::System { text: "channel membership changed".into() });
-                }
-                _ => continue,
+            let env = self.next_envelope().await.ok_or(NetError::Closed)?;
+            if let Some(inb) = self.apply(env)? {
+                return Ok(inb);
             }
         }
     }

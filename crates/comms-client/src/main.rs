@@ -7,10 +7,8 @@
 //! the composer's Send performs a real MLS encrypt → relay submit.
 
 mod backend;
-// The networked session core (remote relay over wss://). Tested now; the Slint event
-// loop is wired to it in the next increment — allow dead_code until then.
-#[allow(dead_code)]
 mod net;
+mod netdrive;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -166,26 +164,49 @@ fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
     register_brand_fonts();
 
-    match Workspace::bootstrap() {
-        Ok(workspace) => {
-            let ws = Rc::new(RefCell::new(workspace));
-            populate(&app, &ws.borrow());
+    if netdrive::is_enabled() {
+        // ── Networked mode: talk to a REMOTE relay over wss:// (two real teammates). ──
+        // Other tabs (CRM/PM/audit) stay empty here; this mode is the live chat path.
+        app.set_relay_status("sign in to connect".into());
+        app.set_relay_endpoint("not connected".into());
+        app.set_relay_ok(false);
+        // The connection starts when the user signs in (the AuthScreen → `connect`).
+        let app_weak = app.as_weak();
+        app.on_connect(move || {
+            if let Some(app) = app_weak.upgrade() {
+                let cmd_tx = netdrive::start(&app);
+                // Composer Send forwards to the background session.
+                app.on_send_message(move |text| {
+                    let _ = cmd_tx.send(netdrive::UiCmd::Send(text.to_string()));
+                });
+            }
+        });
+    } else {
+        // ── In-process demo: the LIVE local backend (src/backend.rs). ──
+        match Workspace::bootstrap() {
+            Ok(workspace) => {
+                let ws = Rc::new(RefCell::new(workspace));
+                populate(&app, &ws.borrow());
+                app.set_relay_status("demo".into());
+                app.set_relay_endpoint("in-process".into());
+                app.set_relay_ok(true);
 
-            // Live send: real MLS encrypt → relay submit → re-render the stream + audit.
-            let app_weak = app.as_weak();
-            let ws_send = ws.clone();
-            app.on_send_message(move |text| {
-                ws_send.borrow_mut().send(&text);
-                if let Some(app) = app_weak.upgrade() {
-                    let ws = ws_send.borrow();
-                    app.set_ws_messages(messages_model(&ws));
-                    app.set_ws_audit(audit_model(&ws));
-                }
-            });
-        }
-        Err(e) => {
-            // Fall back to the screens' built-in static data if the backend can't start.
-            eprintln!("citrate-comms: backend bootstrap failed ({e}); showing static fixtures");
+                // Live send: real MLS encrypt → relay submit → re-render the stream + audit.
+                let app_weak = app.as_weak();
+                let ws_send = ws.clone();
+                app.on_send_message(move |text| {
+                    ws_send.borrow_mut().send(&text);
+                    if let Some(app) = app_weak.upgrade() {
+                        let ws = ws_send.borrow();
+                        app.set_ws_messages(messages_model(&ws));
+                        app.set_ws_audit(audit_model(&ws));
+                    }
+                });
+            }
+            Err(e) => {
+                // Fall back to the screens' built-in static data if the backend can't start.
+                eprintln!("citrate-comms: backend bootstrap failed ({e}); showing static fixtures");
+            }
         }
     }
 

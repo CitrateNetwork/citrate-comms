@@ -57,7 +57,13 @@ export component AppWindow inherits Window {
     in property <[Task]> ws-tasks;
     in property <[MemberRow]> ws-member-rows;
     in property <[AuditRow]> ws-audit;
+    // connection state for the header pill (main.rs sets these).
+    in property <string> relay-status: "demo";
+    in property <string> relay-endpoint: "in-process";
+    in property <bool> relay-ok: true;
     callback send-message(string);
+    // fired when the user signs in — main.rs kicks off the networked connect/login.
+    callback connect();
     property <[Chan]> rail-channels: [
         { name: "deals", unread: 3, active: true },
         { name: "announcements", forum: true },
@@ -67,7 +73,7 @@ export component AppWindow inherits Window {
     ];
 
     if !root.signed-in: AuthScreen {
-        signed-in => { root.signed-in = true; }
+        signed-in => { root.signed-in = true; root.connect(); }
     }
 
     if root.signed-in: FocusScope {
@@ -125,9 +131,9 @@ export component AppWindow inherits Window {
                         height: 28px; border-radius: 999px; border-width: 1px; border-color: Theme.border-1; background: Theme.paper-pure; y: (parent.height - 28px) / 2;
                         HorizontalLayout {
                             padding-left: 12px; padding-right: 12px; spacing: 8px; alignment: center;
-                            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Theme.citrate-green; y: (parent.height - 8px)/2; }
-                            Text { text: "Connected"; color: Theme.fg-2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
-                            Text { text: "· relay.citrate.internal"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
+                            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.relay-ok ? Theme.citrate-green : #f4bf4f; y: (parent.height - 8px)/2; }
+                            Text { text: root.relay-status; color: Theme.fg-2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                            Text { text: "· " + root.relay-endpoint; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
                         }
                     }
                     Rectangle {
