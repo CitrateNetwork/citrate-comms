@@ -10,3 +10,4 @@ Cargo.lock.orig
 # Slint build artifacts
 *.slint.rs
 # Vendored deps for airgap builds are committed deliberately; do not ignore vendor/
+/dist
