@@ -1,0 +1,27 @@
+[package]
+name = "comms-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms release tooling — reproducibility-gated manifest builder + Ed25519 signer (COMMS-S4 WP-4.7)."
+
+[[bin]]
+name = "build-manifest"
+path = "src/bin/build_manifest.rs"
+
+[[bin]]
+name = "sign-manifest"
+path = "src/bin/sign_manifest.rs"
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = "0.4"
+toml = "0.8"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

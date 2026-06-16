@@ -1,0 +1,204 @@
+# Release pipeline — fires on a `vX.Y.Z` tag (COMMS-S4 WP-4.7, PLANSET/07 §1.1).
+#
+# Phases:
+#   1. Two-machine reproducibility gate: build `comms-relay` with `--locked` on two
+#      distinct runners; assert byte equality. Machine A's binary is THE shipped relay
+#      artifact — nothing downstream rebuilds it.
+#   2. Gate: cargo fmt --check + clippy -D warnings + test --workspace --locked.
+#   3. Build the desktop client (`citrate-comms`) and stage both binaries + deploy assets.
+#   4. cargo-audit BLOCKS the release; CycloneDX SBOM from the pre-cached tool.
+#   5. build-manifest (bound to the gate via --expect) + Ed25519 sign-manifest.
+#   6. Upload the signed bundle.
+#
+# Invariants: every cargo build/test/clippy carries `--locked`; the shipped relay IS the
+# reproducibility-gated artifact (hash re-verified before staging, bound into the signed
+# manifest via --expect); cargo-audit is blocking; no release-time `cargo install`
+# (tools are pre-cached in Dockerfile.builder). citrate-comms is path-only — no deploy keys.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0-rc.1)"
+        required: true
+
+jobs:
+  repro-matrix:
+    name: reproducible relay build (machine ${{ matrix.machine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [A, B]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build builder image
+        run: docker build -f Dockerfile.builder -t citrate-comms-builder .
+      - name: build comms-relay (locked)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder \
+            cargo build --release --locked -p comms-relay --bin comms-relay
+      - name: hash binary
+        run: |
+          sha256sum target/release/comms-relay > "comms-relay.sha256.machine-${{ matrix.machine }}.txt"
+          cat "comms-relay.sha256.machine-${{ matrix.machine }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-machine-${{ matrix.machine }}
+          path: comms-relay.sha256.machine-${{ matrix.machine }}.txt
+      - name: upload gated binary (machine A is the shipped artifact)
+        if: matrix.machine == 'A'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-machine-A
+          path: target/release/comms-relay
+          if-no-files-found: error
+
+  repro-compare:
+    name: assert byte-reproducibility
+    runs-on: ubuntu-latest
+    needs: repro-matrix
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: hash-machine-A, path: . }
+      - uses: actions/download-artifact@v4
+        with: { name: hash-machine-B, path: . }
+      - name: compare
+        run: |
+          sha_a=$(awk '{print $1}' comms-relay.sha256.machine-A.txt)
+          sha_b=$(awk '{print $1}' comms-relay.sha256.machine-B.txt)
+          echo "A: $sha_a"; echo "B: $sha_b"
+          if [ "$sha_a" != "$sha_b" ]; then
+            echo "::error ::two-machine reproducibility failed: $sha_a != $sha_b"; exit 1
+          fi
+          echo "reproducible: OK ($sha_a)"
+
+  build:
+    name: gate, test, sign
+    runs-on: ubuntu-latest
+    needs: repro-compare
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then TAG="${{ github.event.inputs.tag }}"; else TAG="${GITHUB_REF##*/}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "git_rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: build builder image
+        run: docker build -f Dockerfile.builder -t citrate-comms-builder:${{ steps.tag.outputs.tag }} .
+
+      - name: workspace gate (fmt + clippy + test, locked)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+            bash -lc '
+              cargo fmt --all -- --check &&
+              cargo clippy --workspace --all-targets --locked -- -D warnings &&
+              cargo test --workspace --release --locked
+            '
+
+      - name: build desktop client (citrate-comms)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+            cargo build --release --locked -p comms-client --bin citrate-comms
+
+      - name: download reproducibility-gated relay
+        uses: actions/download-artifact@v4
+        with: { name: bin-machine-A, path: gated-bin }
+      - name: download machine hashes
+        uses: actions/download-artifact@v4
+        with: { pattern: hash-machine-*, merge-multiple: true, path: . }
+
+      - name: verify shipped relay equals the reproducibility gate
+        id: gate
+        run: |
+          sha_a=$(awk '{print $1}' comms-relay.sha256.machine-A.txt)
+          sha_b=$(awk '{print $1}' comms-relay.sha256.machine-B.txt)
+          sha_bin=$(sha256sum gated-bin/comms-relay | awk '{print $1}')
+          if [ "$sha_a" != "$sha_b" ] || [ "$sha_bin" != "$sha_a" ]; then
+            echo "::error ::shipped relay != reproducibility gate (A=$sha_a B=$sha_b shipped=$sha_bin)"; exit 1
+          fi
+          echo "gated_sha256=$sha_bin" >> "$GITHUB_OUTPUT"
+          echo "shipped relay == gate: OK ($sha_bin)"
+
+      - name: stage release bundle
+        run: |
+          mkdir -p release-staging/bin release-staging/sbom release-staging/deploy
+          cp gated-bin/comms-relay release-staging/bin/
+          cp target/release/citrate-comms release-staging/bin/
+          chmod +x release-staging/bin/*
+          cp -r deploy/* release-staging/deploy/
+          cp deploy/DEPLOY.md release-staging/
+
+      - name: cargo-audit gate (blocking)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+            cargo audit > release-staging/sbom/cargo-audit.txt
+          cat release-staging/sbom/cargo-audit.txt
+
+      - name: SBOM (CycloneDX)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+            cargo cyclonedx --format json --override-filename sbom
+          for f in crates/*/sbom.json; do cp "$f" "release-staging/sbom/$(basename $(dirname $f)).cdx.json"; done
+          find crates -name sbom.json -delete
+
+      - name: build release.manifest.toml (bound to the gate)
+        run: |
+          docker run --rm -v "$PWD":/work -w /work citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+            cargo run --release --quiet --locked -p comms-release --bin build-manifest -- \
+              --version "${{ steps.tag.outputs.tag }}" \
+              --git-rev "${{ steps.tag.outputs.git_rev }}" \
+              --staging release-staging \
+              --expect "bin/comms-relay=${{ steps.gate.outputs.gated_sha256 }}" \
+              --out release-staging/release.manifest.toml
+          cat release-staging/release.manifest.toml
+
+      - name: sign release manifest (Ed25519)
+        env:
+          RELEASE_SIGNING_KEY_HEX: ${{ secrets.RELEASE_SIGNING_KEY_HEX }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY_HEX" ]; then
+            echo "::warning ::RELEASE_SIGNING_KEY_HEX not set; producing UNSIGNED bundle (see docs/audit/HSM_SEAM.md)"
+          else
+            docker run --rm -v "$PWD":/work -w /work -e RELEASE_SIGNING_KEY_HEX citrate-comms-builder:${{ steps.tag.outputs.tag }} \
+              cargo run --release --quiet --locked -p comms-release --bin sign-manifest -- \
+                --input release-staging/release.manifest.toml --out release-staging/release.manifest.toml
+          fi
+
+      - name: package tarball
+        run: |
+          tar -C release-staging -czf "citrate-comms-${{ steps.tag.outputs.tag }}.tar.gz" .
+          sha256sum "citrate-comms-${{ steps.tag.outputs.tag }}.tar.gz" > "citrate-comms-${{ steps.tag.outputs.tag }}.tar.gz.sha256"
+
+      - name: upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: citrate-comms ${{ steps.tag.outputs.tag }}
+          draft: true
+          prerelease: true
+          body: |
+            Auto-built by .github/workflows/release.yml.
+
+            Bundle: `comms-relay` (server-blind relay, reproducibility-gated) +
+            `citrate-comms` (desktop client) + deploy assets + SBOM + signed manifest.
+
+            The shipped `bin/comms-relay` is the two-machine gate's machine-A artifact,
+            hash-verified against both machines and bound into the signed manifest (--expect).
+
+            Signing: **${{ secrets.RELEASE_SIGNING_KEY_HEX != '' && 'soft-key (pre-production)' || 'UNSIGNED (set RELEASE_SIGNING_KEY_HEX)' }}** — see docs/audit/HSM_SEAM.md.
+            Deploy: deploy/DEPLOY.md · Airgap: docs/audit/AIRGAP_TEST.md
+          files: |
+            citrate-comms-${{ steps.tag.outputs.tag }}.tar.gz
+            citrate-comms-${{ steps.tag.outputs.tag }}.tar.gz.sha256

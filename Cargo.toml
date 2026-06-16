@@ -12,6 +12,7 @@ members = [
     "crates/comms-relay",
     "crates/comms-agent-bridge",
     "crates/comms-client",
+    "crates/comms-release",
 ]
 
 [workspace.package]

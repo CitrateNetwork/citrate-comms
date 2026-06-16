@@ -1,0 +1,6 @@
+# Pin the toolchain for reproducible release builds (COMMS-S4 WP-4.7).
+# A specific version (not "stable") so two machines resolve the SAME compiler.
+# Bump in tandem with Dockerfile.builder's base-image digest.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,49 @@
+# cargo-deny config for citrate-comms (COMMS-S4 WP-4.7).
+#
+# Mirrors the citrate-chain / nist-agent supply-chain posture: the `licenses.allow` list
+# is the smallest set that permits the current dependency graph. Adding a license requires
+# a PR that updates this file, forcing reviewers to confirm it is redistribution-safe.
+#
+# `cargo audit` BLOCKS the release (no soft-fail); accepted advisories are explicit,
+# reviewed `[advisories] ignore` entries here — never a continue-on-error step.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # (none yet — add a RUSTSEC id + a one-line justification when an advisory is
+    #  reviewed and accepted; the entry is the audit trail.)
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+    # CDLA-Permissive-2.0 — pulled in by webpki-roots (the client's wss:// TLS roots).
+    "CDLA-Permissive-2.0",
+    # GPL-3.0 / Slint's royalty-free desktop-distribution license. The comms-client
+    # Slint surface is shipped as an end-user desktop app; review Slint's licensing
+    # terms before any commercial redistribution.
+    "GPL-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
