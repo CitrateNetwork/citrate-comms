@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
+pub mod endpoint;
 pub mod keyvault;
 pub mod ws;
 

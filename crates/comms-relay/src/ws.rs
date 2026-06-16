@@ -319,7 +319,25 @@ pub struct RelayClient {
 impl RelayClient {
     /// Connect, spawn the read/write tasks, and return the connector plus the relay's
     /// initial SIWE challenge nonce.
+    ///
+    /// **Connection hardening (WP-4.6):** refuses plaintext `ws://` to a remote host —
+    /// only `wss://` (TLS) or loopback `ws://` are allowed. For a trusted private network
+    /// where you knowingly want plaintext, use [`RelayClient::connect_insecure`].
     pub async fn connect(url: &str) -> Result<(Self, String), WsError> {
+        Self::connect_with_policy(url, false).await
+    }
+
+    /// Like [`connect`](Self::connect) but permits plaintext `ws://` to a non-loopback
+    /// host (trusted private network / LAN airgap). Use deliberately — metadata and the
+    /// SIWE handshake travel in the clear.
+    pub async fn connect_insecure(url: &str) -> Result<(Self, String), WsError> {
+        Self::connect_with_policy(url, true).await
+    }
+
+    async fn connect_with_policy(url: &str, allow_insecure: bool) -> Result<(Self, String), WsError> {
+        // Fail closed BEFORE dialing if the endpoint is insecure.
+        crate::endpoint::enforce_endpoint_policy(url, allow_insecure)
+            .map_err(|e| WsError::InsecureEndpoint(e.to_string()))?;
         let (ws, _resp) = tokio_tungstenite::connect_async(url).await.map_err(|e| WsError::Ws(e.to_string()))?;
         let (mut write, mut read) = ws.split();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientFrame>();
@@ -442,10 +460,30 @@ impl RelayClient {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WP-4.6: `connect` fails closed on a remote `ws://` endpoint — and does so BEFORE
+    /// dialing, so it resolves instantly even though nothing is listening. (The
+    /// `connect_insecure` opt-in bypassing the guard is covered by the `endpoint` policy
+    /// tests, which avoid an actual hang-prone dial.)
+    #[tokio::test]
+    async fn connect_refuses_remote_plaintext_before_dialing() {
+        let refused = RelayClient::connect("ws://relay.example.com:8787").await.err();
+        assert!(matches!(refused, Some(WsError::InsecureEndpoint(_))), "remote ws:// must be refused");
+        // wss:// is permitted by the guard (then fails on the dial, not the policy).
+        let dial = RelayClient::connect("wss://127.0.0.1:1").await.err();
+        assert!(!matches!(dial, Some(WsError::InsecureEndpoint(_))), "wss must pass the guard");
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WsError {
     #[error("websocket error: {0}")]
     Ws(String),
+    #[error("insecure endpoint refused: {0}")]
+    InsecureEndpoint(String),
     #[error("connection closed")]
     Closed,
     #[error("protocol error: {0}")]

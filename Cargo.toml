@@ -46,7 +46,8 @@ openmls_traits = "0.3"
 rocksdb = "0.22"
 # async / transport
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+# rustls (webpki roots) so the client can dial wss:// anywhere without system OpenSSL.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 axum = "0.7"
 # identity / keyring
 keyring = "3"
