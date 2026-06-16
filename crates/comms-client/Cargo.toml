@@ -19,11 +19,15 @@ comms-core = { path = "../comms-core" }
 comms-relay = { path = "../comms-relay" }
 blake3 = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
 hex = "0.4"
 # Native UI. Screens translated from the Claude Design handoff (design/handoff/) against
 # the brand tokens; @citrate-ui-kit can be swapped in for the locally-recreated primitives.
 # `unstable-fontique-08` lets us register the embedded brand fonts at runtime.
 slint = { workspace = true, features = ["unstable-fontique-08"] }
+# The networked session (src/net.rs) drives a real MLS client against a REMOTE relay over
+# wss://; a background tokio runtime carries the async RelayClient for the Slint UI.
+tokio = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.16"

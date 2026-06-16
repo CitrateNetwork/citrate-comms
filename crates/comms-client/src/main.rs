@@ -7,6 +7,10 @@
 //! the composer's Send performs a real MLS encrypt → relay submit.
 
 mod backend;
+// The networked session core (remote relay over wss://). Tested now; the Slint event
+// loop is wired to it in the next increment — allow dead_code until then.
+#[allow(dead_code)]
+mod net;
 
 use std::cell::RefCell;
 use std::rc::Rc;

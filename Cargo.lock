@@ -1057,6 +1057,7 @@ dependencies = [
  "serde",
  "slint",
  "slint-build",
+ "thiserror 1.0.69",
  "tokio",
 ]
 

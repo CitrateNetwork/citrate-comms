@@ -1,0 +1,322 @@
+//! Networked session — drives a real MLS client against a **remote** server-blind relay
+//! over `wss://` (COMMS-S4). This is what lets two teammates on different machines talk;
+//! the in-process [`backend::Workspace`](crate::backend) is the local demo.
+//!
+//! [`NetSession`] wraps a [`RelayClient`] (the wire) and an [`MlsMember`] (the agent's own
+//! group secrets) into the high-level operations the UI calls: `login`, publish a
+//! KeyPackage, create or join a channel, send a message, and receive decrypted activity.
+//! Every byte the relay sees is ciphertext + routing metadata; plaintext exists only
+//! inside this process.
+
+use comms_core::domain::{ChatMessage, Lamport};
+use comms_core::identity::{EthWallet, SiweMessage};
+use comms_core::mls::{GroupHandle, MlsMember};
+use comms_proto::{
+    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, WalletAddress, CITRATE_CHAIN_ID,
+};
+use comms_relay::ws::{RelayClient, WsError};
+
+/// One joined channel's MLS state.
+struct Channel {
+    gid: GroupId,
+    group: GroupHandle,
+    epoch: u64,
+    /// Best-known roster (used to address application messages). Always includes self.
+    members: Vec<WalletAddress>,
+}
+
+/// A live, authenticated session to a remote relay.
+pub struct NetSession {
+    domain: String,
+    wallet: EthWallet,
+    member: MlsMember,
+    client: RelayClient,
+    channel: Option<Channel>,
+}
+
+/// Decrypted activity surfaced to the UI by [`NetSession::recv`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inbound {
+    /// A decrypted application message.
+    Message { group: GroupId, sender: WalletAddress, text: String },
+    /// A channel system event (e.g. processed a membership Commit).
+    System { text: String },
+}
+
+impl NetSession {
+    /// Connect to `url` and SIWE-authenticate `wallet` for `domain`. Use `wss://…` across
+    /// the internet; loopback `ws://…` is fine locally. `allow_insecure` permits plaintext
+    /// `ws://` to a non-loopback host (a trusted private network / LAN airgap).
+    ///
+    /// `now` MUST be real wall-clock milliseconds (the relay verifies the SIWE expiry
+    /// against its own clock); the message is valid for 10 minutes from `now`.
+    pub async fn login(
+        url: &str,
+        domain: &str,
+        wallet: EthWallet,
+        now: u64,
+        allow_insecure: bool,
+    ) -> Result<Self, NetError> {
+        let (client, nonce) = if allow_insecure {
+            RelayClient::connect_insecure(url).await
+        } else {
+            RelayClient::connect(url).await
+        }
+        .map_err(NetError::Ws)?;
+
+        let msg = SiweMessage {
+            domain: domain.into(),
+            address: wallet.address(),
+            statement: "Sign in to citrate-comms".into(),
+            uri: url.into(),
+            version: "1".into(),
+            chain_id: CITRATE_CHAIN_ID,
+            nonce,
+            issued_at_ms: now,
+            expiration_ms: now + 600_000,
+        };
+        let sig = wallet.sign_siwe(&msg);
+        let who = client.authenticate(msg, sig).await.map_err(NetError::Ws)?;
+        if who != wallet.address() {
+            return Err(NetError::AuthMismatch);
+        }
+        let member = MlsMember::new(&wallet.address().0).map_err(|e| NetError::Mls(e.to_string()))?;
+        Ok(Self { domain: domain.into(), wallet, member, client, channel: None })
+    }
+
+    pub fn wallet(&self) -> WalletAddress {
+        self.wallet.address()
+    }
+    pub fn in_channel(&self) -> bool {
+        self.channel.is_some()
+    }
+    pub fn channel_id(&self) -> Option<GroupId> {
+        self.channel.as_ref().map(|c| c.gid)
+    }
+
+    /// Publish our KeyPackage (with its wallet binding attestation) so a peer can add us.
+    pub async fn publish_keypackage(&self) -> Result<(), NetError> {
+        let sig_pub = self.member.sig_pubkey();
+        let nonce = self.client.challenge().await.map_err(NetError::Ws)?;
+        let pubn = KeyPackagePublication {
+            wallet: self.wallet.address(),
+            key_package: self.member.fresh_key_package().map_err(|e| NetError::Mls(e.to_string()))?,
+            mls_sig_pubkey: sig_pub.clone(),
+            binding_attestation: self.wallet.sign_binding(&sig_pub, &self.domain, &nonce).to_vec(),
+            nonce,
+            relay_domain: self.domain.clone(),
+        };
+        self.client.publish_key_package(pubn).await.map_err(NetError::Ws)
+    }
+
+    /// Create a channel and add `peers` (each must have published a KeyPackage). Each add
+    /// is its own Commit + Welcome; existing members process the later Commits via
+    /// [`recv`](Self::recv). We become the channel owner.
+    pub async fn create_channel(&mut self, peers: &[WalletAddress]) -> Result<GroupId, NetError> {
+        let mut group = self.member.create_group().map_err(|e| NetError::Mls(e.to_string()))?;
+        let gid = GroupId(*blake3::hash(&group.group_id()).as_bytes());
+        self.client.register_group(gid).await.map_err(NetError::Ws)?;
+
+        let mut members = vec![self.wallet.address()];
+        let mut epoch = group.epoch();
+        for &peer in peers {
+            let kp = self
+                .client
+                .take_key_package(peer)
+                .await
+                .map_err(NetError::Ws)?
+                .ok_or(NetError::NoKeyPackage(peer))?;
+            let add = group.add(&self.member, &kp.key_package).map_err(|e| NetError::Mls(e.to_string()))?;
+            epoch = group.epoch();
+            self.client
+                .submit(Envelope {
+                    group_id: gid,
+                    epoch: EpochId(epoch),
+                    kind: EnvelopeKind::Commit,
+                    sender: self.wallet.address(),
+                    recipients: vec![],
+                    ciphertext: add.commit,
+                    group_seq: None,
+                })
+                .await
+                .map_err(NetError::Ws)?;
+            self.client
+                .onboard(
+                    gid,
+                    peer,
+                    Envelope {
+                        group_id: gid,
+                        epoch: EpochId(epoch),
+                        kind: EnvelopeKind::Welcome,
+                        sender: self.wallet.address(),
+                        recipients: vec![peer],
+                        ciphertext: add.welcome,
+                        group_seq: None,
+                    },
+                    add.ratchet_tree,
+                )
+                .await
+                .map_err(NetError::Ws)?;
+            members.push(peer);
+        }
+        self.channel = Some(Channel { gid, group, epoch, members });
+        Ok(gid)
+    }
+
+    /// Block until a Welcome is pushed, then join that channel. The inviter is the
+    /// envelope's sender; we seed the roster with them and ourselves (full roster sync is
+    /// a later refinement).
+    pub async fn join_next_channel(&mut self) -> Result<GroupId, NetError> {
+        loop {
+            let env = self.client.next_delivered().await.ok_or(NetError::Closed)?;
+            if env.kind != EnvelopeKind::Welcome {
+                continue;
+            }
+            let gid = env.group_id;
+            let rt = self
+                .client
+                .ratchet_tree(gid)
+                .await
+                .map_err(NetError::Ws)?
+                .ok_or(NetError::NoRatchetTree)?;
+            let group = self.member.join(&env.ciphertext, &rt).map_err(|e| NetError::Mls(e.to_string()))?;
+            let epoch = group.epoch();
+            let members = vec![self.wallet.address(), env.sender];
+            self.channel = Some(Channel { gid, group, epoch, members });
+            return Ok(gid);
+        }
+    }
+
+    /// Encrypt `body` and submit it to the channel. Returns the relay sequence number.
+    pub async fn send_text(&mut self, body: &str) -> Result<u64, NetError> {
+        let ch = self.channel.as_mut().ok_or(NetError::NotInChannel)?;
+        let payload = ChatMessage {
+            thread_id: None,
+            parent_id: None,
+            body: body.into(),
+            sent: Lamport { counter: 0, actor: self.wallet.address() },
+        }
+        .encode()
+        .map_err(|e| NetError::Codec(e.to_string()))?;
+        let ct = ch.group.send(&self.member, &payload).map_err(|e| NetError::Mls(e.to_string()))?;
+        let recipients: Vec<WalletAddress> =
+            ch.members.iter().copied().filter(|a| *a != self.wallet.address()).collect();
+        self.client
+            .submit(Envelope {
+                group_id: ch.gid,
+                epoch: EpochId(ch.epoch),
+                kind: EnvelopeKind::Application,
+                sender: self.wallet.address(),
+                recipients,
+                ciphertext: ct,
+                group_seq: None,
+            })
+            .await
+            .map_err(NetError::Ws)
+    }
+
+    /// Await the next decrypted inbound event for our channel. Application messages are
+    /// decrypted; membership Commits are processed (advancing our epoch).
+    pub async fn recv(&mut self) -> Result<Inbound, NetError> {
+        loop {
+            let env = self.client.next_delivered().await.ok_or(NetError::Closed)?;
+            let ch = self.channel.as_mut().ok_or(NetError::NotInChannel)?;
+            if env.group_id != ch.gid {
+                continue;
+            }
+            match env.kind {
+                EnvelopeKind::Application => {
+                    let pt = ch.group.receive(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
+                    let msg = ChatMessage::decode(&pt).map_err(|e| NetError::Codec(e.to_string()))?;
+                    return Ok(Inbound::Message { group: ch.gid, sender: env.sender, text: msg.body });
+                }
+                EnvelopeKind::Commit => {
+                    ch.group.process_commit(&self.member, &env.ciphertext).map_err(|e| NetError::Mls(e.to_string()))?;
+                    ch.epoch = ch.group.epoch();
+                    if !ch.members.contains(&env.sender) {
+                        ch.members.push(env.sender);
+                    }
+                    return Ok(Inbound::System { text: "channel membership changed".into() });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NetError {
+    #[error("relay/transport error: {0}")]
+    Ws(#[source] WsError),
+    #[error("relay authenticated a different address than we signed with")]
+    AuthMismatch,
+    #[error("no KeyPackage published for {0:?} — ask them to come online first")]
+    NoKeyPackage(WalletAddress),
+    #[error("relay has no ratchet tree for the channel we were welcomed to")]
+    NoRatchetTree,
+    #[error("not in a channel yet")]
+    NotInChannel,
+    #[error("connection closed")]
+    Closed,
+    #[error("mls error: {0}")]
+    Mls(String),
+    #[error("codec error: {0}")]
+    Codec(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comms_relay::ws::RelayServer;
+    use comms_relay::DeliveryService;
+
+    /// Two NetSessions on a loopback RelayServer chat end to end through the high-level
+    /// API — the same flow two teammates run across the internet, minus the TLS hop.
+    #[tokio::test]
+    async fn two_sessions_chat_over_the_wire() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let alice_w = EthWallet::generate(); // workspace owner
+        let bob_w = EthWallet::generate();
+        let alice_addr = alice_w.address();
+        let bob_addr = bob_w.address();
+        let service = DeliveryService::new(DOMAIN, alice_addr, 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        // The relay checks SIWE expiry against its real wall-clock, so `now` must be real.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let mut alice = NetSession::login(&url, DOMAIN, alice_w, now, false).await.unwrap();
+        let mut bob = NetSession::login(&url, DOMAIN, bob_w, now, false).await.unwrap();
+
+        // Bob comes online and publishes his KeyPackage; Alice creates the channel.
+        bob.publish_keypackage().await.unwrap();
+        let gid = alice.create_channel(&[bob_addr]).await.unwrap();
+
+        // Bob joins from the pushed Welcome.
+        let joined = bob.join_next_channel().await.unwrap();
+        assert_eq!(joined, gid);
+        assert!(alice.in_channel() && bob.in_channel());
+
+        // Alice → Bob, and Bob → Alice, decrypted through the API.
+        alice.send_text("hey, can you see this across the wire?").await.unwrap();
+        match bob.recv().await.unwrap() {
+            Inbound::Message { sender, text, .. } => {
+                assert_eq!(sender, alice_addr);
+                assert!(text.contains("across the wire"));
+            }
+            other => panic!("expected a message, got {other:?}"),
+        }
+        bob.send_text("loud and clear ✅").await.unwrap();
+        match alice.recv().await.unwrap() {
+            Inbound::Message { sender, text, .. } => {
+                assert_eq!(sender, bob_addr);
+                assert!(text.contains("loud and clear"));
+            }
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+}
