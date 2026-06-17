@@ -44,8 +44,11 @@ export component AppWindow inherits Window {
     min-height: 720px;
     background: Theme.paper;
 
-    property <string> route: "comms";
+    in-out property <string> route: "comms";
     property <bool> signed-in: false;
+    // test hook (visual proof harness): render the signed-in shell without the live relay.
+    in property <bool> force-shell: false;
+    property <bool> show-shell: root.signed-in || root.force-shell;
     property <string> overlay: "";  // "" | addAgent | offboard | invite
     property <bool> cmdk: false;
     property <bool> me-open: false;
@@ -74,11 +77,11 @@ export component AppWindow inherits Window {
         { name: "security", unread: 1 },
     ];
 
-    if !root.signed-in: AuthScreen {
+    if !root.show-shell: AuthScreen {
         signed-in => { root.signed-in = true; root.connect(); }
     }
 
-    if root.signed-in: FocusScope {
+    if root.show-shell: FocusScope {
         init => { self.focus(); }
         key-pressed(event) => {
             if ((event.modifiers.control || event.modifiers.meta) && event.text == "k") {

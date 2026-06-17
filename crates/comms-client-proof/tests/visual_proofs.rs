@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Once;
 
-use comms_client_proof::{CommsProofWindow, CrmProofWindow, ProofRoot, SettingsProofWindow};
+use comms_client_proof::{
+    AgentsProofWindow, AuditProofWindow, CommsProofWindow, CrmProofWindow, ForumProofWindow,
+    MembersProofWindow, ProjectsProofWindow, ProofRoot, SecurityProofWindow, SettingsProofWindow,
+};
 use image::RgbaImage;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, PlatformError, WindowAdapter};
@@ -97,6 +100,12 @@ fn screen_goldens_across_sizes() {
         compare_or_save(&format!("comms_{}x{}", size.w, size.h), &render_window!(CommsProofWindow, size));
         compare_or_save(&format!("crm_{}x{}", size.w, size.h), &render_window!(CrmProofWindow, size));
         compare_or_save(&format!("settings_{}x{}", size.w, size.h), &render_window!(SettingsProofWindow, size));
+        compare_or_save(&format!("projects_{}x{}", size.w, size.h), &render_window!(ProjectsProofWindow, size));
+        compare_or_save(&format!("members_{}x{}", size.w, size.h), &render_window!(MembersProofWindow, size));
+        compare_or_save(&format!("agents_{}x{}", size.w, size.h), &render_window!(AgentsProofWindow, size));
+        compare_or_save(&format!("audit_{}x{}", size.w, size.h), &render_window!(AuditProofWindow, size));
+        compare_or_save(&format!("security_{}x{}", size.w, size.h), &render_window!(SecurityProofWindow, size));
+        compare_or_save(&format!("forum_{}x{}", size.w, size.h), &render_window!(ForumProofWindow, size));
     }
 
     // Full-content proofs: a tall window reveals everything the scroll now reaches, so a
@@ -108,4 +117,20 @@ fn screen_goldens_across_sizes() {
     // squeezed (the reported "sections crash into each other at different sizes" bug).
     compare_or_save("comms_narrow_1100x720", &render_window!(CommsProofWindow, Size { w: 1100, h: 720 }));
     compare_or_save("comms_narrow_980x680", &render_window!(CommsProofWindow, Size { w: 980, h: 680 }));
+
+    // Full shell (title bar + rail + routed screen) — proves the header-relative layout
+    // (the "content crashes past the header" report). force-shell renders the signed-in
+    // shell without the live relay.
+    let app_size = Size { w: 1440, h: 900 };
+    compare_or_save("app_settings_1440x900", &render_app(comms_client_proof::AppWindow::new().expect("app"), "settings", app_size));
+    compare_or_save("app_crm_1440x900", &render_app(comms_client_proof::AppWindow::new().expect("app"), "crm", app_size));
+}
+
+/// Render the full AppWindow at a route via force-shell (no live relay).
+fn render_app(app: comms_client_proof::AppWindow, route: &str, size: Size) -> RgbaImage {
+    use slint::ComponentHandle;
+    app.set_force_shell(true);
+    app.set_route(route.into());
+    WINDOW.with(|w| w.set_size(PhysicalSize::new(size.w, size.h)));
+    to_rgba(&app.window().take_snapshot().expect("app take_snapshot"))
 }

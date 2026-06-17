@@ -7,6 +7,16 @@ import { Card, Btn, Eyebrow, Avatar, Chip } from "../../comms-client/ui/primitiv
 import { CommsScreen } from "../../comms-client/ui/screen_comms.slint";
 import { CrmScreen } from "../../comms-client/ui/screen_crm.slint";
 import { SettingsScreen } from "../../comms-client/ui/screen_settings.slint";
+import { ProjectsScreen } from "../../comms-client/ui/screen_projects.slint";
+import { MembersScreen } from "../../comms-client/ui/screen_members.slint";
+import { AgentsScreen } from "../../comms-client/ui/screen_agents.slint";
+import { AuditScreen } from "../../comms-client/ui/screen_audit.slint";
+import { SecurityScreen } from "../../comms-client/ui/screen_security.slint";
+import { ForumScreen } from "../../comms-client/ui/screen_forum.slint";
+// The full shell (title bar + rail + routed screen) — to prove the header-relative layout
+// (the "content crashes past the header" report). Rendered with force-shell + a route.
+import { AppWindow } from "../../comms-client/ui/app.slint";
+export { AppWindow }
 
 // Per-screen proof windows: render the REAL screen (with its design-time fixture data)
 // at a given size, exactly as the content router mounts it. Goldens reveal the
@@ -33,6 +43,54 @@ export component SettingsProofWindow inherits Window {
     width: root.proof-width;
     height: root.proof-height;
     SettingsScreen { width: parent.width; height: parent.height; }
+}
+
+export component ProjectsProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    ProjectsScreen { width: parent.width; height: parent.height; }
+}
+
+export component MembersProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    MembersScreen { width: parent.width; height: parent.height; }
+}
+
+export component AgentsProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    AgentsScreen { width: parent.width; height: parent.height; }
+}
+
+export component AuditProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    AuditScreen { width: parent.width; height: parent.height; }
+}
+
+export component SecurityProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    SecurityScreen { width: parent.width; height: parent.height; }
+}
+
+export component ForumProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    ForumScreen { width: parent.width; height: parent.height; }
 }
 
 export component ProofRoot inherits Window {

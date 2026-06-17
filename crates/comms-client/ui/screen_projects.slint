@@ -53,17 +53,21 @@ component BoardColumn inherits Rectangle {
                 Text { text: root.count; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
             }
         }
-        Rectangle {
-            vertical-stretch: 1; clip: true;
-            VerticalLayout {
+        Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: col-body.preferred-height;
+            col-body := VerticalLayout {
                 padding: 12px; spacing: 0;
-                for t[i] in root.tasks: Rectangle {
+                alignment: start;
+                for t[i] in root.tasks: VerticalLayout {
+                    // collapses to 0 height when the task isn't in this column, so
+                    // matching cards pack at the top instead of scattering by index.
                     if t.status == root.status: VerticalLayout {
                         padding-bottom: 12px;
                         TaskCard { task: t; linked: true; }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
             }
         }
     }
