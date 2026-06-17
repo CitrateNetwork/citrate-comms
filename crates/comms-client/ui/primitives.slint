@@ -221,3 +221,15 @@ export component ScreenHead inherits Rectangle {
         Text { text: root.subtitle; color: Theme.fg-2; font-size: 14px; }
     }
 }
+
+// Selectable / copyable text — a read-only TextInput styled like Text. Use for DATA the
+// user may want to highlight + copy (wallet addresses, message bodies, hashes, names,
+// values). Decorative labels/eyebrows stay `Text`. Caller sets font-family/size/weight.
+export component SelText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    wrap: word-wrap;
+    color: Theme.ink;
+    selection-background-color: Theme.citrate-green-tint;
+    selection-foreground-color: Theme.ink;
+}

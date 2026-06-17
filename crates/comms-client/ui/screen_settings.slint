@@ -2,7 +2,7 @@
 // Sub-nav rail + section panes. The Automation section carries the dangerous
 // "let agents witness on their own" toggle (red switch, OFF by default).
 import { Theme, Device } from "theme.slint";
-import { Card, Eyebrow, Hairline, Chip, SurfBadge, SevDot, ScreenHead } from "primitives.slint";
+import { Card, Eyebrow, Hairline, Chip, SurfBadge, SevDot, ScreenHead, SelText } from "primitives.slint";
 
 // honest-note: paper-2 box with a 3px left border (danger or green-deep)
 component HonestNote inherits Rectangle {
@@ -61,10 +61,14 @@ component MonoField inherits Rectangle {
     HorizontalLayout {
         padding-left: 14px; padding-right: 14px; spacing: 8px; alignment: start;
         Text { text: root.glyph; color: Theme.fg-3; font-size: 14px; vertical-alignment: center; }
-        Text {
-            text: root.value;
-            color: Theme.ink; font-family: Theme.font-mono; font-size: 13px;
-            vertical-alignment: center; horizontal-stretch: 1; overflow: elide;
+        // TextInput has no vertical-alignment — center it in the row via the layout.
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            SelText {
+                text: root.value;
+                color: Theme.ink; font-family: Theme.font-mono; font-size: 13px;
+            }
         }
     }
 }

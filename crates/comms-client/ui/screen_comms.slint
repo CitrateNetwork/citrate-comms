@@ -1,6 +1,6 @@
 // Comms — the channel screen (list + stream + Info/Ledger right panel). Screen 01.
 import { Theme, Chan, Person, Msg } from "theme.slint";
-import { Avatar, RoleGlyph, Chip, SurfBadge, Btn, LinkedRecord } from "primitives.slint";
+import { Avatar, RoleGlyph, Chip, SurfBadge, Btn, LinkedRecord, SelText } from "primitives.slint";
 import { LedgerPanel } from "ledger.slint";
 
 component MessageRow inherits Rectangle {
@@ -35,7 +35,7 @@ component MessageRow inherits Rectangle {
                     if root.m.role != "" && !root.m.is-agent: RoleGlyph { role: root.m.role; }
                     Text { text: root.m.ts; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; vertical-alignment: center; }
                 }
-                Text { text: root.m.text; color: root.m.is-agent ? Theme.graphite : Theme.ink-2; font-family: Theme.font-sans; font-size: 16px; wrap: word-wrap; }
+                SelText { text: root.m.text; color: root.m.is-agent ? Theme.graphite : Theme.ink-2; font-family: Theme.font-sans; font-size: 16px; }
                 if root.m.has-link: LinkedRecord { kind: root.m.link-kind; name: root.m.link-name; id: root.m.link-id; }
             }
         }

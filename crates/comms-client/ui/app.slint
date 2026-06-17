@@ -19,6 +19,10 @@ component RailItem inherits Rectangle {
     in property <bool> active: false;
     in property <bool> sealed: false;     // Audit item uses the dark treatment
     callback clicked;
+    // Accessibility + test addressing (the hit-target/interaction harness finds these).
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
     height: 34px;
     border-radius: 6px;
     background: root.active ? (root.sealed ? Theme.deep-evergreen : Theme.citrate-green-tint)

@@ -1,43 +1,53 @@
-//! PoC: prove the headless Slint test harness drives our real `AppWindow` — build it,
-//! navigate, query element geometry, and synth-click. The full UI/UX suite (COMMS-S5)
-//! builds on exactly these primitives. Runs with NO display.
+//! Headless UI harness (geometry + interaction) over the real `AppWindow` — no display.
+//! Complements the visual golden harness (`comms-client-proof`). All checks live in ONE
+//! test: the testing backend sets the platform + runs the event loop once per process, so
+//! multiple window-driving test fns would conflict.
 
 #![cfg(test)]
 
 use i_slint_backend_testing as st;
-use slint::ComponentHandle;
+use slint::platform::PointerEventButton;
+use slint::{ComponentHandle, LogicalSize};
 
 use crate::AppWindow;
 
-/// Build the window under the testing backend at a given logical size.
-fn mount(w: f32, h: f32) -> AppWindow {
-    let app = AppWindow::new().unwrap();
-    app.window().set_size(slint::LogicalSize::new(w, h));
-    app
-}
-
 #[test]
-fn harness_can_introspect_and_click_the_real_appwindow() {
+fn ui_harness_geometry_and_nav_interaction() {
     st::init_integration_test_with_system_time();
 
     slint::spawn_local(async move {
-        let app = mount(1440.0, 900.0);
-
-        // Headless layout computed: the window reports the size we set (scale 1.0).
+        // ── 1. Geometry + property drive (the harness can introspect + steer the UI). ──
+        let app = AppWindow::new().unwrap();
+        app.window().set_size(LogicalSize::new(1440.0, 900.0));
         let win = app.window().size();
-        assert_eq!(win.width, 1440, "headless window width");
-        assert_eq!(win.height, 900, "headless window height");
-
-        // Exposed properties round-trip through Rust (the harness can drive UI state).
+        assert_eq!((win.width, win.height), (1440, 900), "headless window size");
         app.set_relay_status("connecting…".into());
-        assert_eq!(app.get_relay_status().to_string(), "connecting…");
+        assert_eq!(app.get_relay_status().to_string(), "connecting…", "property round-trip");
 
-        // Element introspection + geometry works: the auth screen is mounted (the gate
-        // shows it when not signed in), and the harness can read its computed rect.
-        let auth = st::ElementHandle::find_by_element_type_name(&app, "AuthScreen").next();
-        if let Some(el) = auth {
-            let sz = el.size();
-            assert!(sz.width > 0.0 && sz.height > 0.0, "AuthScreen has a computed rect: {sz:?}");
+        // ── 2. Mount the signed-in shell (force-shell, no live relay) + realize the tree. ──
+        app.set_force_shell(true);
+        app.show().unwrap();
+        assert_eq!(app.get_route().to_string(), "comms", "default route");
+
+        // ── 3. Interaction + hit-target: for each section, find its nav control, assert a
+        // real ≥24×24 hit area, synth-click it, and assert the route changes — proving the
+        // control responds and its TouchArea covers the visual (no dead/occluded clicks). ──
+        for (label, route) in [
+            ("CRM", "crm"),
+            ("Projects", "projects"),
+            ("Agents", "agents"),
+            ("Members", "members"),
+            ("Security", "security"),
+            ("Audit", "audit"),
+            ("Settings", "settings"),
+        ] {
+            let item = st::ElementHandle::find_by_accessible_label(&app, label)
+                .next()
+                .unwrap_or_else(|| panic!("nav item '{label}' not found"));
+            let s = item.size();
+            assert!(s.width >= 24.0 && s.height >= 24.0, "'{label}' hit area too small: {s:?}");
+            item.single_click(PointerEventButton::Left).await;
+            assert_eq!(app.get_route().to_string(), route, "click '{label}' should route to '{route}'");
         }
 
         slint::quit_event_loop().unwrap();
