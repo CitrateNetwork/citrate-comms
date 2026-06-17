@@ -126,10 +126,12 @@ export component SettingsScreen inherits Rectangle {
                 }
             }
 
-            // ── section panes (stacked vertically, scroll) ──
-            Rectangle {
-                horizontal-stretch: 1; clip: true; background: Theme.paper;
-                VerticalLayout {
+            // ── section panes (stacked vertically, scrollable) ──
+            Flickable {
+                horizontal-stretch: 1;
+                viewport-width: self.width;
+                viewport-height: settings-pane.preferred-height;
+                settings-pane := VerticalLayout {
                     padding: 24px; spacing: 16px;
 
                     Rectangle {

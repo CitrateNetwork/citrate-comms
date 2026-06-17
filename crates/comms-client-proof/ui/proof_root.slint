@@ -4,6 +4,36 @@
 
 import { Theme } from "../../comms-client/ui/theme.slint";
 import { Card, Btn, Eyebrow, Avatar, Chip } from "../../comms-client/ui/primitives.slint";
+import { CommsScreen } from "../../comms-client/ui/screen_comms.slint";
+import { CrmScreen } from "../../comms-client/ui/screen_crm.slint";
+import { SettingsScreen } from "../../comms-client/ui/screen_settings.slint";
+
+// Per-screen proof windows: render the REAL screen (with its design-time fixture data)
+// at a given size, exactly as the content router mounts it. Goldens reveal the
+// screen-internal layout (overlap, alignment, scroll-reach) at the SIZES matrix.
+export component CommsProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    CommsScreen { width: parent.width; height: parent.height; }
+}
+
+export component CrmProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    CrmScreen { width: parent.width; height: parent.height; }
+}
+
+export component SettingsProofWindow inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    SettingsScreen { width: parent.width; height: parent.height; }
+}
 
 export component ProofRoot inherits Window {
     in property <length> proof-width: 1440px;

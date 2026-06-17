@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Once;
 
-use comms_client_proof::ProofRoot;
+use comms_client_proof::{CommsProofWindow, CrmProofWindow, ProofRoot, SettingsProofWindow};
 use image::RgbaImage;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, PlatformError, WindowAdapter};
@@ -69,30 +69,38 @@ struct Size {
 }
 const SIZES: [Size; 3] = [Size { w: 1280, h: 800 }, Size { w: 1440, h: 900 }, Size { w: 1920, h: 1080 }];
 
-fn render(size: Size) -> RgbaImage {
-    init_test_platform();
-    let app = ProofRoot::new().expect("ProofRoot::new");
-    app.set_proof_width(size.w as f32);
-    app.set_proof_height(size.h as f32);
-    WINDOW.with(|w| w.set_size(PhysicalSize::new(size.w, size.h)));
-    let snap = app.window().take_snapshot().expect("take_snapshot");
-    to_rgba(&snap)
+/// Render any proof window (they all expose `set_proof_width/height`) to an RgbaImage.
+macro_rules! render_window {
+    ($Win:ty, $size:expr) => {{
+        let app = <$Win>::new().expect("proof window ::new");
+        app.set_proof_width($size.w as f32);
+        app.set_proof_height($size.h as f32);
+        WINDOW.with(|w| w.set_size(PhysicalSize::new($size.w, $size.h)));
+        to_rgba(&app.window().take_snapshot().expect("take_snapshot"))
+    }};
 }
 
-/// Pipeline proof: rendering the real brand UI headless across the responsiveness matrix
-/// yields non-trivial images, each locked against a committed golden PNG. (One test
-/// function — the software platform hosts one window lifecycle per process; per-screen
-/// scaling is the COMMS-S5 rollout, mirroring citrate-boeing-shell's `*_proof` crates.)
+/// Render the real screens (with their design-time fixtures) headless across the
+/// responsiveness matrix → committed golden PNGs. ALL renders live in ONE test function:
+/// the software platform hosts one window lifecycle per process, so separate
+/// window-creating test fns would conflict (mirrors citrate-boeing-shell's single-lock).
 #[test]
-fn proof_root_goldens_across_sizes() {
-    for (i, size) in SIZES.iter().enumerate() {
-        let img = render(*size);
-        assert_eq!(img.dimensions(), (size.w, size.h), "rendered at the requested size");
-        if i == 0 {
-            // Non-blank: the brand paper background + content produce real variation.
-            let first = img.pixels().next().copied();
-            assert!(img.pixels().any(|p| Some(*p) != first), "render must not be a flat color");
-        }
-        compare_or_save(&format!("proof_root_{}x{}", size.w, size.h), &img);
+fn screen_goldens_across_sizes() {
+    init_test_platform();
+    for size in SIZES {
+        let kit = render_window!(ProofRoot, size);
+        // Sanity: non-blank.
+        let first = kit.pixels().next().copied();
+        assert!(kit.pixels().any(|p| Some(*p) != first), "render must not be flat");
+        compare_or_save(&format!("kit_{}x{}", size.w, size.h), &kit);
+
+        compare_or_save(&format!("comms_{}x{}", size.w, size.h), &render_window!(CommsProofWindow, size));
+        compare_or_save(&format!("crm_{}x{}", size.w, size.h), &render_window!(CrmProofWindow, size));
+        compare_or_save(&format!("settings_{}x{}", size.w, size.h), &render_window!(SettingsProofWindow, size));
     }
+
+    // Full-content proofs: a tall window reveals everything the scroll now reaches, so a
+    // golden documents that no card is lost (the "unreachable settings cards" regression).
+    compare_or_save("settings_full_1440x1700", &render_window!(SettingsProofWindow, Size { w: 1440, h: 1700 }));
+    compare_or_save("crm_full_1440x1500", &render_window!(CrmProofWindow, Size { w: 1440, h: 1500 }));
 }

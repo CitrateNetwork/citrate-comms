@@ -125,19 +125,23 @@ export component CrmScreen inherits Rectangle {
             }
         }
 
-        // body: pipeline board on top, contacts table below
-        Rectangle {
-            vertical-stretch: 1; clip: true;
-            VerticalLayout {
+        // body: pipeline board on top, contacts table below — vertically scrollable
+        Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: crm-body.preferred-height;
+            crm-body := VerticalLayout {
                 padding: 24px; spacing: 24px;
 
-                // ── deals pipeline kanban ──
+                // ── deals pipeline kanban (horizontally scrollable) ──
                 VerticalLayout {
                     spacing: 12px;
                     Eyebrow { text: "DEALS PIPELINE"; }
-                    Rectangle {
-                        height: 420px; clip: true;
-                        HorizontalLayout {
+                    Flickable {
+                        height: 420px;
+                        viewport-height: self.height;
+                        viewport-width: kanban-row.preferred-width;
+                        kanban-row := HorizontalLayout {
                             spacing: 16px; alignment: start;
                             BoardColumn { stage: "Lead"; count-label: "1 · $410,000"; deals: root.deals; }
                             BoardColumn { stage: "Qualified"; count-label: "2 · $393,000"; deals: root.deals; }
