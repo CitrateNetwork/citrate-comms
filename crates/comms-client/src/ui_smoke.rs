@@ -29,6 +29,24 @@ fn ui_harness_geometry_and_nav_interaction() {
         app.show().unwrap();
         assert_eq!(app.get_route().to_string(), "comms", "default route");
 
+        // ── 2b. Comms ledger panel tabs (finding #1): at route=comms the Info pane shows by
+        //       default; clicking the Ledger tab must swap to the ledger pane (proves the
+        //       tab TouchArea isn't occluded / dead). ──
+        let present = |label: &str, app: &AppWindow| {
+            st::ElementHandle::find_by_accessible_label(app, label).next().is_some()
+        };
+        assert!(present("ledger-pane:info", &app), "ledger Info pane shows by default");
+        assert!(!present("ledger-pane:ledger", &app), "ledger pane hidden until its tab is clicked");
+        let ledger_tab = st::ElementHandle::find_by_accessible_label(&app, "ledger-tab:Ledger")
+            .next()
+            .expect("'Ledger' tab");
+        let ts = ledger_tab.size();
+        assert!(ts.height >= 30.0, "ledger tab hit area too short (was the bug): {ts:?}");
+        ledger_tab.single_click(PointerEventButton::Left).await;
+        assert!(present("ledger-pane:ledger", &app), "clicking Ledger tab shows the ledger pane");
+        // restore Info for the rest of the run
+        st::ElementHandle::find_by_accessible_label(&app, "ledger-tab:Info").next().unwrap().single_click(PointerEventButton::Left).await;
+
         // ── 3. Interaction + hit-target: for each section, find its nav control, assert a
         // real ≥24×24 hit area, synth-click it, and assert the route changes — proving the
         // control responds and its TouchArea covers the visual (no dead/occluded clicks). ──
