@@ -1,0 +1,45 @@
+// citrate-comms visual proof root (PoC) — a Window wrapper that renders real client
+// UI (the brand theme + primitives) so the software renderer can snapshot it. Full
+// per-screen proof roots (CommsScreen, CrmScreen, …) follow the same pattern (COMMS-S5).
+
+import { Theme } from "../../comms-client/ui/theme.slint";
+import { Card, Btn, Eyebrow, Avatar, Chip } from "../../comms-client/ui/primitives.slint";
+
+export component ProofRoot inherits Window {
+    in property <length> proof-width: 1440px;
+    in property <length> proof-height: 900px;
+    width: root.proof-width;
+    height: root.proof-height;
+    background: Theme.paper;
+
+    VerticalLayout {
+        padding: 32px;
+        spacing: 20px;
+        alignment: start;
+
+        Eyebrow { text: "CITRATE-COMMS · VISUAL PROOF"; }
+        Text {
+            text: "Out-of-the-box harness";
+            color: Theme.ink;
+            font-family: Theme.font-display;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            Avatar { initials: "SL"; tint: #2f4502; sz: 40px; }
+            Chip { text: "live"; }
+            Btn { text: "Send invite"; primary: true; }
+            Btn { text: "Cancel"; }
+        }
+        Card {
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+                Text { text: "Northwind — self-hosted pilot"; color: Theme.ink; font-weight: 600; font-size: 14px; }
+                Text { text: "$240,000 · Proposal"; color: Theme.fg-2; font-size: 12px; }
+            }
+        }
+    }
+}

@@ -1063,6 +1063,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "comms-client-proof"
+version = "0.0.1"
+dependencies = [
+ "image",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
 name = "comms-core"
 version = "0.0.1"
 dependencies = [
