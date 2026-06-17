@@ -131,7 +131,10 @@ export component CommsScreen inherits HorizontalLayout {
                 VerticalLayout {
                     padding: 24px; spacing: 22px;
                     Rectangle { vertical-stretch: 1; }
-                    for m[i] in root.messages: Rectangle {
+                    // Each row is a VerticalLayout so it sizes to its (wrapping) content —
+                    // a plain Rectangle stays at its default height and the wrapped message
+                    // text overflows into the next row (the narrow-width overlap bug).
+                    for m[i] in root.messages: VerticalLayout {
                         if m.boundary: HorizontalLayout {
                             spacing: 16px; alignment: center;
                             Rectangle { height: 1px; background: Theme.citrate-green-tint; horizontal-stretch: 1; }

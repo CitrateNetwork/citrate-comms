@@ -103,4 +103,9 @@ fn screen_goldens_across_sizes() {
     // golden documents that no card is lost (the "unreachable settings cards" regression).
     compare_or_save("settings_full_1440x1700", &render_window!(SettingsProofWindow, Size { w: 1440, h: 1700 }));
     compare_or_save("crm_full_1440x1500", &render_window!(CrmProofWindow, Size { w: 1440, h: 1500 }));
+
+    // Narrow comms — the message rows must not overlap / clash when the thread column is
+    // squeezed (the reported "sections crash into each other at different sizes" bug).
+    compare_or_save("comms_narrow_1100x720", &render_window!(CommsProofWindow, Size { w: 1100, h: 720 }));
+    compare_or_save("comms_narrow_980x680", &render_window!(CommsProofWindow, Size { w: 980, h: 680 }));
 }
