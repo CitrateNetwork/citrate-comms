@@ -43,6 +43,17 @@ pub enum Inbound {
     System { text: String },
 }
 
+/// Install the rustls `ring` crypto provider as the process default exactly once. rustls
+/// 0.23 has no built-in default, so any `wss://` dial PANICS without this. Idempotent: a
+/// second call (provider already installed) is a no-op.
+fn ensure_tls_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 impl NetSession {
     /// Connect to `url` and SIWE-authenticate `wallet` for `domain`. Use `wss://…` across
     /// the internet; loopback `ws://…` is fine locally. `allow_insecure` permits plaintext
@@ -57,6 +68,7 @@ impl NetSession {
         now: u64,
         allow_insecure: bool,
     ) -> Result<Self, NetError> {
+        ensure_tls_provider(); // rustls needs a provider before any wss:// dial
         let (client, nonce) = if allow_insecure {
             RelayClient::connect_insecure(url).await
         } else {
@@ -298,6 +310,72 @@ mod tests {
     use super::*;
     use comms_relay::ws::RelayServer;
     use comms_relay::DeliveryService;
+
+    /// LIVE readiness gate — connects to the deployed relay over real `wss://`, runs the
+    /// SIWE login, and publishes a KeyPackage. Proves the production relay accepts our
+    /// handshake before two teammates rely on it. Ignored by default (needs the relay up
+    /// + network); run manually:
+    ///   cargo test -p comms-client --bin citrate-comms live_relay_handshake -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "live: needs the deployed relay running + outbound wss"]
+    async fn live_relay_handshake() {
+        const URL: &str = "wss://comms.citrate.ai";
+        const DOMAIN: &str = "comms.citrate.ai";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let wallet = EthWallet::generate();
+        let me = wallet.address().to_hex();
+        let session = NetSession::login(URL, DOMAIN, wallet, now, false)
+            .await
+            .unwrap_or_else(|e| panic!("LIVE login to {URL} failed: {e} (is the relay up? `systemctl status comms-relay`)"));
+        session
+            .publish_keypackage()
+            .await
+            .unwrap_or_else(|e| panic!("LIVE publish_keypackage failed: {e}"));
+        eprintln!("LIVE relay OK — {URL} accepted SIWE login + KeyPackage for {me}");
+    }
+
+    /// LIVE end-to-end — two independent clients over real `wss://` create a channel, join,
+    /// and exchange an MLS-encrypted message through the deployed relay. The definitive
+    /// "ready for real cross-machine data" proof. Ignored by default; run:
+    ///   cargo test -p comms-client --bin citrate-comms live_relay_two_party_chat -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "live: full two-party exchange against the deployed relay"]
+    async fn live_relay_two_party_chat() {
+        const URL: &str = "wss://comms.citrate.ai";
+        const DOMAIN: &str = "comms.citrate.ai";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let alice_w = EthWallet::generate();
+        let bob_w = EthWallet::generate();
+        let alice_addr = alice_w.address();
+        let bob_addr = bob_w.address();
+
+        // Both sign in to the live relay over TLS.
+        let mut alice = NetSession::login(URL, DOMAIN, alice_w, now, false).await.expect("alice live login");
+        let mut bob = NetSession::login(URL, DOMAIN, bob_w, now, false).await.expect("bob live login");
+
+        // Bob comes online; Alice creates a channel and invites him.
+        bob.publish_keypackage().await.expect("bob publish kp");
+        let gid = alice.create_channel(&[bob_addr]).await.expect("alice create channel");
+        let joined = bob.join_next_channel().await.expect("bob join channel");
+        assert_eq!(joined, gid, "bob joined the channel alice created");
+
+        // Alice → Bob, decrypted on the far side through the live relay.
+        alice.send_text("live cross-machine hello ✅").await.expect("alice send");
+        match bob.recv().await.expect("bob recv") {
+            Inbound::Message { sender, text, .. } => {
+                assert_eq!(sender, alice_addr, "sender is alice");
+                assert!(text.contains("live cross-machine"), "decrypted text: {text}");
+            }
+            other => panic!("expected a message, got {other:?}"),
+        }
+        eprintln!("LIVE two-party OK — channel create/join/message over {URL}");
+    }
 
     /// Two NetSessions on a loopback RelayServer chat end to end through the high-level
     /// API — the same flow two teammates run across the internet, minus the TLS hop.

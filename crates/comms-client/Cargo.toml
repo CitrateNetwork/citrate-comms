@@ -21,6 +21,10 @@ blake3 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 hex = "0.4"
+# rustls 0.23 requires a process-default crypto provider to be installed before any wss://
+# connection — without it the client PANICS on connect. We install the `ring` provider at
+# session start (src/net.rs::ensure_tls_provider). `ring` is pure/portable (no cmake).
+rustls = { version = "0.23", features = ["ring"] }
 # Native UI. Screens translated from the Claude Design handoff (design/handoff/) against
 # the brand tokens; @citrate-ui-kit can be swapped in for the locally-recreated primitives.
 # `unstable-fontique-08` lets us register the embedded brand fonts at runtime.
