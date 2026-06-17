@@ -1,7 +1,7 @@
 // Members — the member directory. Everyone in the workspace, people and agents.
 // Roles are signed grants; offboarding is forward-only and honest. Screen 04.
 import { Theme, MemberRow } from "theme.slint";
-import { Avatar, RoleGlyph, SurfBadge, Chip, Btn, Hairline, ScreenHead } from "primitives.slint";
+import { Avatar, RoleGlyph, SurfBadge, Chip, Btn, Hairline, ScreenHead, SelText } from "primitives.slint";
 
 // role filter chip — selectable
 component FilterChip inherits Rectangle {
@@ -163,16 +163,16 @@ export component MembersScreen inherits Rectangle {
                                             }
                                         }
                                     }
-                                    // address (mono)
-                                    Rectangle {
+                                    // address (mono, selectable) — VerticalLayout centers
+                                    // it in the row (mirrors the name cell).
+                                    VerticalLayout {
                                         width: 240px;
-                                        Text {
+                                        alignment: center;
+                                        SelText {
                                             text: m.addr;
                                             color: Theme.fg-2;
                                             font-family: Theme.font-mono;
                                             font-size: 12px;
-                                            vertical-alignment: center;
-                                            overflow: elide;
                                         }
                                     }
                                     // role glyph + label

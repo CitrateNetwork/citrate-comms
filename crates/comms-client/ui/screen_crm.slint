@@ -1,6 +1,6 @@
 // CRM — deals pipeline kanban + contacts table. Screen 02.
 import { Theme, Deal, Contact } from "theme.slint";
-import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead } from "primitives.slint";
+import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead, SelText } from "primitives.slint";
 
 // one pipeline card (a single deal)
 component DealCard inherits Card {
@@ -8,10 +8,9 @@ component DealCard inherits Card {
     VerticalLayout {
         padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
         spacing: 0;
-        Text {
+        SelText {
             text: root.deal.name;
             color: Theme.ink; font-family: Theme.font-sans; font-weight: 600; font-size: 14px;
-            wrap: word-wrap;
         }
         Rectangle { height: 4px; }
         Text {

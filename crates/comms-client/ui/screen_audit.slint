@@ -1,7 +1,7 @@
 // Audit — the sealed-ledger vault. Screen 04 · the dark "vault" highlight.
 // A permanent, tamper-evident record. Dark evergreen sealed-* zone (not paper).
 import { Theme, AuditRow } from "theme.slint";
-import { Btn, SevDot, AnchorMark, Eyebrow, Hairline } from "primitives.slint";
+import { Btn, SevDot, AnchorMark, Eyebrow, Hairline, SelText } from "primitives.slint";
 
 // One dark audit row. Columns: SEQ · TIME · EVENT · SUMMARY · ACTOR · HASH.
 component AuditRowView inherits Rectangle {
@@ -76,14 +76,16 @@ component AuditRowView inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        // HASH
-        Text {
+        // HASH (selectable) — VerticalLayout centers it in the row.
+        VerticalLayout {
             width: 96px;
-            text: root.a.hash;
-            color: Theme.sealed-fg-2;
-            font-family: Theme.font-mono;
-            font-size: 11px;
-            vertical-alignment: center;
+            alignment: center;
+            SelText {
+                text: root.a.hash;
+                color: Theme.sealed-fg-2;
+                font-family: Theme.font-mono;
+                font-size: 11px;
+            }
         }
     }
 }

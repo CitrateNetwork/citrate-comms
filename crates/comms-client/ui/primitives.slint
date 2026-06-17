@@ -94,6 +94,10 @@ export component Btn inherits Rectangle {
     in property <bool> dark: false;     // ghost-dark (sealed zone)
     in property <length> h: 36px;
     callback clicked;
+    // Accessibility + test addressing (hit-target/interaction harness finds these).
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
     height: root.h;
     border-radius: 6px;
     border-width: 1px;
