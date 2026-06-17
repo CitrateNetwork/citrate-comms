@@ -1,6 +1,6 @@
 // Projects — task kanban board (Todo / Doing / Review / Done). Screen 03.
 import { Theme, Task } from "theme.slint";
-import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead } from "primitives.slint";
+import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead, SelText } from "primitives.slint";
 
 // one task card
 component TaskCard inherits Card {
@@ -9,18 +9,16 @@ component TaskCard inherits Card {
     VerticalLayout {
         padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
         spacing: 8px;
-        Text {
+        SelText {
             text: root.task.title;
             color: Theme.ink; font-family: Theme.font-sans; font-size: 14px;
-            wrap: word-wrap;
         }
         HorizontalLayout {
             spacing: 8px; alignment: start;
             RiskBadge { level: root.task.priority; }
-            Text {
+            SelText {
                 text: root.task.due;
                 color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px;
-                vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
             if root.linked: Text { text: "#"; color: Theme.citrate-green-deep; font-family: Theme.font-mono; font-size: 13px; vertical-alignment: center; }

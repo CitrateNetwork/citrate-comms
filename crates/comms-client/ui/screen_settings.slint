@@ -191,23 +191,21 @@ export component SettingsScreen inherits Rectangle {
                                                 alignment: center; spacing: 3px; horizontal-stretch: 1;
                                                 HorizontalLayout {
                                                     spacing: 8px; alignment: start;
-                                                    Text {
+                                                    SelText {
                                                         text: d.name;
                                                         color: Theme.ink; font-size: 14px; font-weight: 500;
-                                                        vertical-alignment: center;
                                                     }
                                                     if d.current: SurfBadge { text: "THIS DEVICE"; kind: "e2e"; }
                                                 }
                                                 HorizontalLayout {
                                                     spacing: 6px; alignment: start;
-                                                    Text {
+                                                    SelText {
                                                         text: d.last-active + " ·";
-                                                        color: Theme.fg-3; font-size: 12px; vertical-alignment: center;
+                                                        color: Theme.fg-3; font-size: 12px;
                                                     }
-                                                    Text {
+                                                    SelText {
                                                         text: d.key;
                                                         color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px;
-                                                        vertical-alignment: center;
                                                     }
                                                 }
                                             }

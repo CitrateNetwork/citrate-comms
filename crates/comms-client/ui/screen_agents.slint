@@ -28,21 +28,19 @@ component AgentCard inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: start;
-                    Text {
+                    SelText {
                         text: root.a.name;
                         color: Theme.ink;
                         font-family: Theme.font-mono;
                         font-weight: 600;
                         font-size: 14px;
-                        vertical-alignment: center;
                     }
                     SurfBadge { text: "AGENT"; kind: "agent"; }
                 }
-                Text {
+                SelText {
                     text: root.purpose;
                     color: Theme.fg-2;
                     font-size: 13px;
-                    wrap: word-wrap;
                 }
             }
             VerticalLayout {
@@ -69,24 +67,22 @@ component AgentCard inherits Rectangle {
             }
             Chip { text: root.a.channels; }
             Rectangle { horizontal-stretch: 1; }
-            Text {
+            SelText {
                 text: "Sponsored by " + root.a.sponsor;
                 color: Theme.fg-3;
                 font-size: 12px;
-                vertical-alignment: center;
             }
         }
         // recent-activity count
         HorizontalLayout {
             spacing: 6px;
             alignment: start;
-            Text {
+            SelText {
                 text: root.a.activity;
                 color: Theme.citrate-green-dark;
                 font-family: Theme.font-mono;
                 font-size: 12px;
                 font-weight: 600;
-                vertical-alignment: center;
             }
             Text {
                 text: "recorded actions · auditable";
@@ -169,19 +165,18 @@ export component AgentsScreen inherits Rectangle {
                                 alignment: start;
                                 Rectangle {
                                     width: 48px;
-                                    Text {
+                                    SelText {
                                         text: act.ts;
                                         color: Theme.fg-3;
                                         font-family: Theme.font-mono;
                                         font-size: 11px;
-                                        vertical-alignment: center;
+                                        y: (parent.height - self.height) / 2;
                                     }
                                 }
-                                Text {
+                                SelText {
                                     text: act.text;
                                     color: Theme.ink-2;
                                     font-size: 13px;
-                                    wrap: word-wrap;
                                     horizontal-stretch: 1;
                                 }
                             }

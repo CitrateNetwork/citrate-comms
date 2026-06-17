@@ -1,7 +1,7 @@
 // Security — post-quantum cryptographic posture surface. Screen 05.
 // Hero (quantum-resistant by design), active cipher suite, post-quantum handshake walk.
 import { Theme, SuiteRow, HandshakeStep, Device } from "theme.slint";
-import { Card, Eyebrow, SevDot, ScreenHead } from "primitives.slint";
+import { Card, Eyebrow, SevDot, ScreenHead, SelText, CellText } from "primitives.slint";
 
 // green "PQ" / "HYBRID PQ" pill
 component PqBadge inherits Rectangle {
@@ -57,21 +57,16 @@ component SuiteRowView inherits Rectangle {
     }
     HorizontalLayout {
         spacing: 12px; alignment: start;
-        Text {
-            text: root.s.role;
-            color: Theme.fg-2; font-size: 13px; vertical-alignment: center;
-            width: 150px; overflow: elide;
-        }
+        CellText { width: 150px; text: root.s.role; color: Theme.fg-2; font-size: 13px; }
         VerticalLayout {
             alignment: center; spacing: 2px; horizontal-stretch: 1;
-            Text {
+            SelText {
                 text: root.s.algo;
                 color: Theme.ink; font-family: Theme.font-mono; font-size: 14px; font-weight: 500;
-                overflow: elide;
             }
-            Text {
+            SelText {
                 text: root.note;
-                color: Theme.fg-3; font-size: 12px; overflow: elide;
+                color: Theme.fg-3; font-size: 12px;
             }
         }
         Rectangle {
@@ -117,9 +112,9 @@ component HandshakeStepView inherits Rectangle {
             padding-bottom: 18px; spacing: 2px; horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: 6px; alignment: start;
-                Text {
+                SelText {
                     text: root.h.name;
-                    color: Theme.ink; font-size: 14px; font-weight: 600; vertical-alignment: center;
+                    color: Theme.ink; font-size: 14px; font-weight: 600;
                 }
                 Text {
                     text: "✓";
@@ -127,9 +122,9 @@ component HandshakeStepView inherits Rectangle {
                     font-size: 13px; font-weight: 600; vertical-alignment: center;
                 }
             }
-            Text {
+            SelText {
                 text: root.h.desc;
-                color: Theme.fg-2; font-size: 13px; wrap: word-wrap;
+                color: Theme.fg-2; font-size: 13px;
             }
         }
     }

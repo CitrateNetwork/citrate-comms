@@ -1,6 +1,6 @@
 // CRM — deals pipeline kanban + contacts table. Screen 02.
 import { Theme, Deal, Contact } from "theme.slint";
-import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead, SelText } from "primitives.slint";
+import { Avatar, Btn, RiskBadge, Card, Eyebrow, ScreenHead, SelText, CellText } from "primitives.slint";
 
 // one pipeline card (a single deal)
 component DealCard inherits Card {
@@ -13,17 +13,19 @@ component DealCard inherits Card {
             color: Theme.ink; font-family: Theme.font-sans; font-weight: 600; font-size: 14px;
         }
         Rectangle { height: 4px; }
-        Text {
+        SelText {
             text: root.deal.account;
             color: Theme.fg-2; font-size: 12px;
         }
         Rectangle { height: 12px; }
         HorizontalLayout {
             spacing: 8px; alignment: start;
-            Text {
-                text: root.deal.value;
-                color: Theme.ink; font-family: Theme.font-mono; font-weight: 600; font-size: 14px;
-                vertical-alignment: center;
+            VerticalLayout {
+                alignment: center;
+                SelText {
+                    text: root.deal.value;
+                    color: Theme.ink; font-family: Theme.font-mono; font-weight: 600; font-size: 14px;
+                }
             }
             Rectangle { horizontal-stretch: 1; }
             RiskBadge { level: root.deal.priority; }
@@ -180,15 +182,15 @@ export component CrmScreen inherits Rectangle {
                                     HorizontalLayout {
                                         width: 220px; spacing: 10px; alignment: start;
                                         Avatar { initials: c.name == "Dana Whitfield" ? "DW" : c.name == "Owen Mbeki" ? "OM" : c.name == "Sara Lindqvist" ? "SL" : c.name == "Raj Malhotra" ? "RM" : "TR"; sz: 26px; }
-                                        Text { text: c.name; color: Theme.ink; font-size: 14px; font-weight: 500; vertical-alignment: center; overflow: elide; }
+                                        CellText { horizontal-stretch: 1; text: c.name; color: Theme.ink; font-size: 14px; font-weight: 500; }
                                     }
-                                    Text { text: c.title; width: 180px; color: Theme.fg-2; font-size: 14px; vertical-alignment: center; overflow: elide; }
-                                    Text { text: c.account; horizontal-stretch: 1; color: Theme.ink; font-size: 14px; vertical-alignment: center; overflow: elide; }
+                                    CellText { width: 180px; text: c.title; color: Theme.fg-2; font-size: 14px; }
+                                    CellText { horizontal-stretch: 1; text: c.account; color: Theme.ink; font-size: 14px; }
                                     HorizontalLayout {
                                         width: 80px; spacing: 6px; alignment: start;
                                         Avatar { initials: c.owner; sz: 22px; }
                                     }
-                                    Text { text: c.last-touch; width: 110px; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; vertical-alignment: center; }
+                                    CellText { width: 110px; text: c.last-touch; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 11px; }
                                 }
                             }
                         }

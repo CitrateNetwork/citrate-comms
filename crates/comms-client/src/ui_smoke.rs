@@ -87,6 +87,30 @@ fn ui_harness_geometry_and_nav_interaction() {
             .single_click(PointerEventButton::Left)
             .await;
         assert!(*fired.borrow(), "'Send invite' should fire the create-channel callback");
+        app.set_overlay("".into());
+
+        // ── 6. Every overlay + the command palette mount their content when triggered
+        //       (each dialog's buttons are covered by the hit-area + a11y checks above; the
+        //       invite SUBMIT flow above proves a dialog button wires through to a callback). ──
+        for (state, component) in [
+            ("invite", "InviteDialog"),
+            ("offboard", "OffboardDialog"),
+            ("addAgent", "AddAgentDialog"),
+        ] {
+            app.set_overlay(state.into());
+            st::mock_elapsed_time(std::time::Duration::from_millis(1));
+            assert!(
+                st::ElementHandle::find_by_element_type_name(&app, component).next().is_some(),
+                "overlay '{state}' should mount {component}"
+            );
+            app.set_overlay("".into());
+        }
+        app.set_cmdk(true);
+        st::mock_elapsed_time(std::time::Duration::from_millis(1));
+        assert!(
+            st::ElementHandle::find_by_element_type_name(&app, "CommandPalette").next().is_some(),
+            "⌘K should mount the CommandPalette"
+        );
 
         slint::quit_event_loop().unwrap();
     })

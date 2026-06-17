@@ -25,15 +25,15 @@ component MessageRow inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: start;
-                    Text {
+                    SelText {
                         text: root.m.author;
                         color: root.m.is-agent ? Theme.citrate-green-dark : Theme.ink;
                         font-family: root.m.is-agent ? Theme.font-mono : Theme.font-sans;
-                        font-weight: 600; font-size: root.m.is-agent ? 13px : 14px; vertical-alignment: center;
+                        font-weight: 600; font-size: root.m.is-agent ? 13px : 14px;
                     }
                     if root.m.is-agent: SurfBadge { text: "AGENT"; kind: "agent"; }
                     if root.m.role != "" && !root.m.is-agent: RoleGlyph { role: root.m.role; }
-                    Text { text: root.m.ts; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; vertical-alignment: center; }
+                    SelText { text: root.m.ts; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; }
                 }
                 SelText { text: root.m.text; color: root.m.is-agent ? Theme.graphite : Theme.ink-2; font-family: Theme.font-sans; font-size: 16px; }
                 if root.m.has-link: LinkedRecord { kind: root.m.link-kind; name: root.m.link-name; id: root.m.link-id; }
@@ -91,10 +91,10 @@ export component CommsScreen inherits HorizontalLayout {
                     HorizontalLayout {
                         spacing: 6px;
                         Text { text: c.forum ? "≡" : "#"; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 13px; vertical-alignment: center; }
-                        Text { text: c.name; color: Theme.ink; font-size: 14px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                        Text { text: c.time; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; vertical-alignment: center; }
+                        SelText { text: c.name; color: Theme.ink; font-size: 14px; font-weight: 600; horizontal-stretch: 1; }
+                        SelText { text: c.time; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 10px; }
                     }
-                    Text { text: c.preview; color: Theme.fg-2; font-size: 13px; overflow: elide; }
+                    SelText { text: c.preview; color: Theme.fg-2; font-size: 13px; }
                     HorizontalLayout {
                         spacing: 8px; alignment: start;
                         if c.has-agent: SurfBadge { text: "AGENT"; }

@@ -237,3 +237,22 @@ export component SelText inherits TextInput {
     selection-background-color: Theme.citrate-green-tint;
     selection-foreground-color: Theme.ink;
 }
+
+// Selectable text sized for a fixed-height table-row CELL — vertically centered (TextInput
+// has no vertical-alignment, and a bare cell won't stretch). Drop-in for a centered Text in
+// a row: `CellText { width: 180px; text: c.title; color: Theme.fg-2; font-size: 14px; }`.
+export component CellText inherits VerticalLayout {
+    in property <string> text;
+    in property <color> color: Theme.ink;
+    in property <length> font-size: 14px;
+    in property <string> font-family;
+    in property <int> font-weight: 400;
+    alignment: center;
+    SelText {
+        text: root.text;
+        color: root.color;
+        font-size: root.font-size;
+        font-family: root.font-family;
+        font-weight: root.font-weight;
+    }
+}

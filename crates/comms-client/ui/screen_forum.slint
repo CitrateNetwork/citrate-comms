@@ -1,6 +1,6 @@
 // Forum — the #announcements channel (company-wide, threaded). Screen 02.
 import { Theme, Thread } from "theme.slint";
-import { Avatar, Btn, Card, ScreenHead, Eyebrow } from "primitives.slint";
+import { Avatar, Btn, Card, ScreenHead, Eyebrow, SelText } from "primitives.slint";
 
 component ThreadCard inherits Card {
     in property <Thread> t;
@@ -24,42 +24,39 @@ component ThreadCard inherits Card {
             VerticalLayout {
                 spacing: 3px;
                 horizontal-stretch: 1;
-                Text {
+                SelText {
                     text: root.t.title;
                     color: Theme.ink;
                     font-family: Theme.font-display;
                     font-weight: 500;
                     font-size: 18px;
-                    wrap: word-wrap;
                 }
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
-                    Text { text: root.t.author; color: Theme.fg-3; font-size: 13px; vertical-alignment: center; }
+                    SelText { text: root.t.author; color: Theme.fg-3; font-size: 13px; }
                     Text { text: "·"; color: Theme.fg-3; font-size: 13px; vertical-alignment: center; }
-                    Text { text: root.t.last; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; vertical-alignment: center; }
+                    SelText { text: root.t.last; color: Theme.fg-3; font-family: Theme.font-mono; font-size: 12px; }
                 }
             }
         }
-        // excerpt — editorial serif, italic, wrapped
-        Text {
+        // excerpt — editorial serif, italic, wrapped (selectable)
+        SelText {
             text: root.t.excerpt;
             color: Theme.fg-2;
             font-family: Theme.font-editorial;
             font-italic: true;
             font-size: 17px;
-            wrap: word-wrap;
         }
         // footer — replies count + participant avatars + following indicator
         HorizontalLayout {
             spacing: 14px;
             alignment: start;
-            Text {
+            SelText {
                 text: root.t.replies + " replies";
                 color: Theme.fg-2;
                 font-family: Theme.font-mono;
                 font-size: 12px;
-                vertical-alignment: center;
             }
             // small stack of participant avatars
             HorizontalLayout {
@@ -138,19 +135,20 @@ export component ForumScreen inherits Rectangle {
             }
         }
         // scrolling list of thread cards
-        Rectangle {
+        Flickable {
             vertical-stretch: 1;
-            clip: true;
-            VerticalLayout {
+            viewport-width: self.width;
+            viewport-height: forum-list.preferred-height;
+            forum-list := VerticalLayout {
                 padding: 24px;
                 spacing: 16px;
+                alignment: start;
                 Eyebrow { text: "3 TOPICS · 14 REPLIES"; }
                 for t[i] in root.threads: ThreadCard {
                     t: t;
                     initials: t.author == "Priya Anand" ? "PA" : "SL";
                     tint: t.author == "Priya Anand" ? #1b4965 : #2f4502;
                 }
-                Rectangle { vertical-stretch: 1; }
             }
         }
     }

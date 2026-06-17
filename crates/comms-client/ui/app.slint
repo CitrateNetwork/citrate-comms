@@ -54,8 +54,8 @@ export component AppWindow inherits Window {
     in property <bool> force-shell: false;
     property <bool> show-shell: root.signed-in || root.force-shell;
     in-out property <string> overlay: "";  // "" | addAgent | offboard | invite
-    property <bool> cmdk: false;
-    property <bool> me-open: false;
+    in-out property <bool> cmdk: false;
+    in-out property <bool> me-open: false;
 
     // live data from the backend (src/backend.rs); main.rs sets these.
     in property <[Msg]> ws-messages;
