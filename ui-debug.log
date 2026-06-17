@@ -1,0 +1,59 @@
+[ui] CITRATE_COMMS_DEBUG on — logging interactions. Click through every screen.
+[ui] connect fired → starting networked session
+[ui] signed-in -> true
+citrate-comms: signed in as 0xd910367499e5fe8a740699abcd373846cad794c8 on wss://comms.citrate.ai
+[ui] overlay -> invite
+[ui] overlay -> (closed)
+[ui] overlay -> addAgent
+[ui] overlay -> (closed)
+[ui] space-click #deals (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #announcements (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> forum
+[ui] space-click #eng (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] space-click #announcements (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> forum
+[ui] route -> settings
+[ui] route -> agents
+[ui] route -> members
+[ui] overlay -> invite
+[ui] overlay -> (closed)
+[ui] space-click #security (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] send-message len=7
+[ui] command-palette open
+[ui] command-palette closed
+[ui] route -> crm
+[ui] route -> agents
+[ui] route -> projects
+[ui] space-click #security (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] me-menu open
+[ui] me-menu closed
+[ui] space-click #design (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #announcements (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> forum
+[ui] space-click #eng (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] space-click #design (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #security (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #eng (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #security (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> members
+[ui] route -> audit
+[ui] route -> projects
+[ui] route -> crm
+[ui] route -> agents
+[ui] route -> audit
+[ui] space-click #announcements (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> forum
+[ui] space-click #eng (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] space-click #security (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #design (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #eng (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] space-click #announcements (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> forum
+[ui] space-click #deals (NOTE: routes to comms/forum, does NOT switch channel — S6.1)
+[ui] route -> comms
+[ui] route -> settings

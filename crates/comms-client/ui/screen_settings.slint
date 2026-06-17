@@ -90,6 +90,8 @@ component AppearanceRow inherits Rectangle {
 export component SettingsScreen inherits Rectangle {
     background: Theme.paper;
 
+    // which sub-nav pane is shown (wired to the rail clicks below).
+    property <string> active-section: "Identity";
     property <string> name: "Saul Loveman";
     property <string> wallet: "0x1f2e9c4a7b3d8e10aa9f";
     property <string> relay-host: "relay.citrate.internal";
@@ -116,16 +118,21 @@ export component SettingsScreen inherits Rectangle {
                     padding: 16px; spacing: 4px; alignment: start;
                     for s[i] in root.sections: Rectangle {
                         height: 34px; border-radius: 6px;
-                        background: i == 0 ? Theme.citrate-green-tint : transparent;
+                        accessible-role: button;
+                        accessible-label: "settings-tab:" + s;
+                        accessible-action-default => { root.active-section = s; }
+                        background: s == root.active-section ? Theme.citrate-green-tint
+                            : (tab-ta.has-hover ? Theme.stone-100 : transparent);
                         HorizontalLayout {
                             padding-left: 12px; padding-right: 12px; alignment: start;
                             Text {
                                 text: s;
-                                color: i == 0 ? Theme.citrate-green-dark : Theme.fg-2;
-                                font-size: 14px; font-weight: i == 0 ? 600 : 450;
+                                color: s == root.active-section ? Theme.citrate-green-dark : Theme.fg-2;
+                                font-size: 14px; font-weight: s == root.active-section ? 600 : 450;
                                 vertical-alignment: center;
                             }
                         }
+                        tab-ta := TouchArea { mouse-cursor: pointer; clicked => { root.active-section = s; } }
                     }
                 }
             }
@@ -144,7 +151,9 @@ export component SettingsScreen inherits Rectangle {
                             spacing: 16px;
 
                             // ── Identity ──
-                            Card {
+                            if root.active-section == "Identity": Card {
+                                accessible-role: text;
+                                accessible-label: "settings-pane:Identity";
                                 VerticalLayout {
                                     padding: 24px; spacing: 8px;
                                     Eyebrow { text: "DISPLAY NAME"; }
@@ -172,7 +181,9 @@ export component SettingsScreen inherits Rectangle {
                             }
 
                             // ── Devices ──
-                            Card {
+                            if root.active-section == "Devices": Card {
+                                accessible-role: text;
+                                accessible-label: "settings-pane:Devices";
                                 VerticalLayout {
                                     padding: 24px; spacing: 0;
                                     Eyebrow { text: "DEVICES"; }
@@ -215,7 +226,9 @@ export component SettingsScreen inherits Rectangle {
                             }
 
                             // ── Connection ──
-                            Card {
+                            if root.active-section == "Connection": Card {
+                                accessible-role: text;
+                                accessible-label: "settings-pane:Connection";
                                 VerticalLayout {
                                     padding: 24px; spacing: 8px;
                                     HorizontalLayout {
@@ -240,7 +253,9 @@ export component SettingsScreen inherits Rectangle {
                             }
 
                             // ── Appearance ──
-                            Card {
+                            if root.active-section == "Appearance": Card {
+                                accessible-role: text;
+                                accessible-label: "settings-pane:Appearance";
                                 VerticalLayout {
                                     padding: 24px; spacing: 0;
                                     Eyebrow { text: "APPEARANCE"; }
@@ -253,7 +268,9 @@ export component SettingsScreen inherits Rectangle {
                             }
 
                             // ── Automation (dangerous) ──
-                            Card {
+                            if root.active-section == "Automation": Card {
+                                accessible-role: text;
+                                accessible-label: "settings-pane:Automation";
                                 VerticalLayout {
                                     padding: 24px; spacing: 0;
                                     Eyebrow { text: "AGENT AUTOMATION"; }

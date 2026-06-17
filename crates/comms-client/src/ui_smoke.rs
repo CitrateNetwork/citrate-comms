@@ -50,6 +50,21 @@ fn ui_harness_geometry_and_nav_interaction() {
             assert_eq!(app.get_route().to_string(), route, "click '{label}' should route to '{route}'");
         }
 
+        // ── 3b. Settings sub-nav tabs SWITCH the pane (S6.3). At route=settings (the last
+        //       nav click), only the Identity pane is mounted; clicking Devices swaps it. ──
+        let pane_mounted = |label: &str, app: &AppWindow| {
+            st::ElementHandle::find_by_accessible_label(app, label).next().is_some()
+        };
+        assert!(pane_mounted("settings-pane:Identity", &app), "Identity pane shows by default");
+        assert!(!pane_mounted("settings-pane:Devices", &app), "Devices pane hidden until its tab is clicked");
+        st::ElementHandle::find_by_accessible_label(&app, "settings-tab:Devices")
+            .next()
+            .expect("'Devices' settings tab")
+            .single_click(PointerEventButton::Left)
+            .await;
+        assert!(pane_mounted("settings-pane:Devices", &app), "clicking the Devices tab shows the Devices pane");
+        assert!(!pane_mounted("settings-pane:Identity", &app), "Identity pane hidden after switching to Devices");
+
         // ── 4. Every button (nav rail + Btn) has an adequate hit area. ──
         let buttons = st::ElementQuery::from_root(&app)
             .match_descendants()
