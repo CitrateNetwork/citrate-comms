@@ -73,6 +73,13 @@ export component AppWindow inherits Window {
     callback connect();
     // fired from the Invite dialog with a 0x address — create a channel + invite them.
     callback create-channel(string);
+    // ── live-debug instrumentation (CITRATE_COMMS_DEBUG=1; main.rs sets debug-ui) ──
+    in property <bool> debug-ui: false;
+    changed route => { if (root.debug-ui) { debug("[ui] route -> " + root.route); } }
+    changed overlay => { if (root.debug-ui) { debug("[ui] overlay -> " + (root.overlay == "" ? "(closed)" : root.overlay)); } }
+    changed cmdk => { if (root.debug-ui) { debug("[ui] command-palette " + (root.cmdk ? "open" : "closed")); } }
+    changed me-open => { if (root.debug-ui) { debug("[ui] me-menu " + (root.me-open ? "open" : "closed")); } }
+    changed signed-in => { if (root.debug-ui) { debug("[ui] signed-in -> " + (root.signed-in ? "true" : "false")); } }
     property <[Chan]> rail-channels: [
         { name: "deals", unread: 3, active: true },
         { name: "announcements", forum: true },
@@ -166,7 +173,10 @@ export component AppWindow inherits Window {
                     for c[i] in root.rail-channels: RailItem {
                         label: (c.forum ? "≡ " : "# ") + c.name;
                         active: (root.route == "comms" && c.active) || (root.route == "forum" && c.forum);
-                        clicked => { root.route = c.forum ? "forum" : "comms"; }
+                        clicked => {
+                            if (root.debug-ui) { debug("[ui] space-click #" + c.name + " (NOTE: routes to comms/forum, does NOT switch channel — S6.1)"); }
+                            root.route = c.forum ? "forum" : "comms";
+                        }
                     }
                     Rectangle { height: 12px; }
                     RailItem { label: "CRM"; active: root.route == "crm"; clicked => { root.route = "crm"; } }

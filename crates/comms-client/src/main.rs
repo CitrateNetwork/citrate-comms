@@ -162,9 +162,18 @@ fn register_brand_fonts() {
     }
 }
 
+/// Whether the live-debug `[ui]` trace is enabled (CITRATE_COMMS_DEBUG=1).
+fn debug_ui() -> bool {
+    std::env::var("CITRATE_COMMS_DEBUG").is_ok()
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
     register_brand_fonts();
+    if debug_ui() {
+        app.set_debug_ui(true);
+        eprintln!("[ui] CITRATE_COMMS_DEBUG on — logging interactions. Click through every screen.");
+    }
 
     if netdrive::is_enabled() {
         // ── Networked mode: talk to a REMOTE relay over wss:// (two real teammates). ──
@@ -177,13 +186,22 @@ fn main() -> Result<(), slint::PlatformError> {
         app.on_connect(move || {
             if let Some(app) = app_weak.upgrade() {
                 let cmd_tx = netdrive::start(&app);
+                if debug_ui() {
+                    eprintln!("[ui] connect fired → starting networked session");
+                }
                 // Composer Send forwards to the background session.
                 let tx_send = cmd_tx.clone();
                 app.on_send_message(move |text| {
+                    if debug_ui() {
+                        eprintln!("[ui] send-message len={}", text.len());
+                    }
                     let _ = tx_send.send(netdrive::UiCmd::Send(text.to_string()));
                 });
                 // Invite dialog → create a channel and invite the entered 0x address.
                 app.on_create_channel(move |addr| {
+                    if debug_ui() {
+                        eprintln!("[ui] create-channel(\"{addr}\")");
+                    }
                     let _ = cmd_tx.send(netdrive::UiCmd::CreateChannel(addr.to_string()));
                 });
             }
