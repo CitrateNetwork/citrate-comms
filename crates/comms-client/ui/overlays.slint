@@ -212,6 +212,8 @@ export component OffboardDialog inherits Rectangle {
 // ── Invite to the workspace ───────────────────────────────────────────────────
 export component InviteDialog inherits Rectangle {
     callback close();
+    // fired with the entered 0x wallet address when "Send invite" is clicked.
+    callback invite-address(string);
     property <string> role: "Member";
 
     Rectangle {
@@ -258,7 +260,7 @@ export component InviteDialog inherits Rectangle {
                 padding-left: 24px; padding-right: 24px; padding-bottom: 20px;
                 spacing: 18px;
 
-                // identity row
+                // identity row — paste the teammate's wallet address
                 VerticalLayout {
                     spacing: 8px;
                     Eyebrow { text: "IDENTITY"; }
@@ -268,14 +270,21 @@ export component InviteDialog inherits Rectangle {
                         border-width: 1px;
                         border-color: Theme.border-1;
                         background: Theme.paper-pure;
-                        HorizontalLayout {
-                            padding-left: 12px; padding-right: 12px; alignment: start;
-                            Text {
-                                text: "Wallet address (0x…) or generate invite link";
-                                color: Theme.fg-3;
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
+                        clip: true;
+                        addr-input := TextInput {
+                            x: 12px; width: parent.width - 24px; height: parent.height;
+                            text: "";
+                            font-family: Theme.font-mono; font-size: 14px; color: Theme.ink;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => { root.invite-address(self.text); root.close(); }
+                        }
+                        if addr-input.text == "": Text {
+                            x: 12px;
+                            text: "Wallet address (0x…)";
+                            color: Theme.fg-3;
+                            font-size: 14px;
+                            vertical-alignment: center;
                         }
                     }
                 }
@@ -344,7 +353,7 @@ export component InviteDialog inherits Rectangle {
                 HorizontalLayout {
                     padding-left: 24px; padding-right: 24px; spacing: 8px; alignment: end;
                     Btn { text: "Cancel"; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
-                    Btn { text: "Send invite"; primary: true; y: (parent.height - 36px) / 2; clicked => { root.close(); } }
+                    Btn { text: "Send invite"; primary: true; y: (parent.height - 36px) / 2; clicked => { root.invite-address(addr-input.text); root.close(); } }
                 }
             }
         }

@@ -33,6 +33,9 @@ tokio = { workspace = true }
 slint-build = "1.16"
 
 [dev-dependencies]
+# Headless UI test harness: layout geometry (size/position), element queries, and
+# synthetic clicks — no display required (COMMS-S5 UI/UX hardening).
+i-slint-backend-testing = "1.16"
 # The end-to-end COMMS-S0 test runs a real MLS client (comms-core, mls feature on by
 # default) through an in-process server-blind relay. This is the natural home for it:
 # the client legitimately uses both the MLS engine and the relay.

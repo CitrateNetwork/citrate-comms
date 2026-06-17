@@ -28,11 +28,19 @@ use crate::{AppWindow, Msg};
 /// A command from the UI thread to the networked session.
 pub enum UiCmd {
     Send(String),
+    /// Create a channel and invite a peer by their `0x…` wallet address.
+    CreateChannel(String),
 }
 
-/// Whether networked mode is configured (the relay URL is set).
+/// Default production relay — the app talks to this out of the box (override with
+/// `CITRATE_COMMS_RELAY`). Clean launch is networked; the in-process demo is opt-in.
+pub const DEFAULT_RELAY: &str = "wss://comms.citrate.ai";
+pub const DEFAULT_DOMAIN: &str = "comms.citrate.ai";
+
+/// Networked mode is the default. The in-process demo (seeded fixtures) is opt-in via
+/// `CITRATE_COMMS_DEMO=1`.
 pub fn is_enabled() -> bool {
-    std::env::var("CITRATE_COMMS_RELAY").is_ok()
+    std::env::var("CITRATE_COMMS_DEMO").is_err()
 }
 
 /// Spawn the background session thread. Returns the command sender the UI uses to post
@@ -62,8 +70,8 @@ struct Cfg {
 impl Cfg {
     fn from_env() -> Self {
         Self {
-            url: std::env::var("CITRATE_COMMS_RELAY").unwrap_or_default(),
-            domain: std::env::var("CITRATE_COMMS_DOMAIN").unwrap_or_else(|_| "relay.citrate.ai".into()),
+            url: std::env::var("CITRATE_COMMS_RELAY").unwrap_or_else(|_| DEFAULT_RELAY.into()),
+            domain: std::env::var("CITRATE_COMMS_DOMAIN").unwrap_or_else(|_| DEFAULT_DOMAIN.into()),
             peer: std::env::var("CITRATE_COMMS_PEER").ok().filter(|s| !s.is_empty()),
             wallet_account: std::env::var("CITRATE_COMMS_WALLET_ACCOUNT")
                 .unwrap_or_else(|_| "client:default:wallet".into()),
@@ -103,41 +111,14 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
         return;
     }
     eprintln!("citrate-comms: signed in as {me_hex} on {}", cfg.url);
-    system(&weak, &mut log, &format!("Signed in. Your address (share with your teammate): {me_hex}"));
-
-    // Establish the channel: invite a peer, or wait to be invited.
-    if let Some(peer_hex) = &cfg.peer {
-        match WalletAddress::from_hex(peer_hex) {
-            Ok(peer) => {
-                system(&weak, &mut log, &format!("Inviting {peer_hex} to a new channel…"));
-                if let Err(e) = session.create_channel(&[peer]).await {
-                    system(&weak, &mut log, &format!("Couldn't invite them (have them sign in first): {e}"));
-                    status(&weak, "offline", &endpoint, false);
-                    return;
-                }
-                system(&weak, &mut log, "Channel created — waiting for them to join.");
-            }
-            Err(_) => {
-                system(&weak, &mut log, "CITRATE_COMMS_PEER is not a valid 0x address.");
-                status(&weak, "offline", &endpoint, false);
-                return;
-            }
-        }
-    } else {
-        system(&weak, &mut log, "Waiting to be invited to a channel…");
-        if let Err(e) = session.join_next_channel().await {
-            system(&weak, &mut log, &format!("Join failed: {e}"));
-            status(&weak, "offline", &endpoint, false);
-            return;
-        }
-        system(&weak, &mut log, "Joined the channel ✅");
-    }
-    if session.in_channel() {
-        if let Some(gid) = session.channel_id() {
-            eprintln!("citrate-comms: live on channel {}", hex::encode(&gid.0[..6]));
-        }
-    }
     status(&weak, "live", &endpoint, true);
+    system(&weak, &mut log, &format!("Signed in. Your address: {me_hex}"));
+    system(&weak, &mut log, "Share it with a teammate, then use Invite to start a channel — or wait to be invited.");
+
+    // Convenience: if a peer was pre-set via env (CLI / airgap), create the channel now.
+    if let Some(peer_hex) = cfg.peer.clone() {
+        create_channel(&weak, &mut log, &mut session, &peer_hex).await;
+    }
 
     // Pump: drain UI commands, then await the next delivery with a short timeout so we
     // loop back to check commands. (No select! — keeps the &self await and &mut self
@@ -145,29 +126,70 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
     loop {
         loop {
             match cmd_rx.try_recv() {
-                Ok(UiCmd::Send(text)) => match session.send_text(&text).await {
-                    Ok(_) => push(&weak, &mut log, Line::mine(&me_hex, &text)),
-                    Err(e) => system(&weak, &mut log, &format!("Send failed: {e}")),
-                },
+                Ok(UiCmd::Send(text)) => {
+                    if !session.in_channel() {
+                        system(&weak, &mut log, "Create or join a channel first (Invite a teammate by their 0x address).");
+                    } else {
+                        match session.send_text(&text).await {
+                            Ok(_) => push(&weak, &mut log, Line::mine(&me_hex, &text)),
+                            Err(e) => system(&weak, &mut log, &format!("Send failed: {e}")),
+                        }
+                    }
+                }
+                Ok(UiCmd::CreateChannel(addr)) => {
+                    create_channel(&weak, &mut log, &mut session, &addr).await;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return, // UI gone
             }
         }
         match tokio::time::timeout(Duration::from_millis(80), session.next_envelope()).await {
-            Ok(Some(env)) => match session.apply(env) {
-                Ok(Some(Inbound::Message { sender, text, .. })) => {
-                    push(&weak, &mut log, Line::peer(&sender.to_hex(), &text))
+            Ok(Some(env)) => {
+                // A Welcome pushed to us means a teammate invited us — auto-join.
+                if env.kind == comms_proto::EnvelopeKind::Welcome && !session.in_channel() {
+                    match session.join_from_welcome(&env).await {
+                        Ok(_) => system(&weak, &mut log, "Joined the channel ✅"),
+                        Err(e) => system(&weak, &mut log, &format!("Join failed: {e}")),
+                    }
+                    continue;
                 }
-                Ok(Some(Inbound::System { text })) => system(&weak, &mut log, &text),
-                Ok(None) => {}
-                Err(e) => system(&weak, &mut log, &format!("Receive error: {e}")),
-            },
+                match session.apply(env) {
+                    Ok(Some(Inbound::Message { sender, text, .. })) => {
+                        push(&weak, &mut log, Line::peer(&sender.to_hex(), &text))
+                    }
+                    Ok(Some(Inbound::System { text })) => system(&weak, &mut log, &text),
+                    Ok(None) => {}
+                    Err(e) => system(&weak, &mut log, &format!("Receive error: {e}")),
+                }
+            }
             Ok(None) => {
                 status(&weak, "disconnected", &endpoint, false);
                 return;
             }
             Err(_) => {} // timeout tick — re-check commands
         }
+    }
+}
+
+/// Create a channel and invite `addr` (a `0x…` wallet). The peer must have signed in
+/// already (so their KeyPackage is published). Reports progress to the UI.
+async fn create_channel(weak: &Weak<AppWindow>, log: &mut Vec<Line>, session: &mut NetSession, addr: &str) {
+    let addr = addr.trim();
+    let peer = match WalletAddress::from_hex(addr) {
+        Ok(p) => p,
+        Err(_) => {
+            system(weak, log, &format!("\"{addr}\" is not a valid 0x wallet address."));
+            return;
+        }
+    };
+    if session.in_channel() {
+        system(weak, log, "Already in a channel (one channel per session for now).");
+        return;
+    }
+    system(weak, log, &format!("Inviting {addr} to a new channel…"));
+    match session.create_channel(&[peer]).await {
+        Ok(_) => system(weak, log, "Channel created — they'll join automatically when they're online."),
+        Err(e) => system(weak, log, &format!("Couldn't invite them (are they signed in yet?): {e}")),
     }
 }
 

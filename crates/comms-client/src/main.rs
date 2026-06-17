@@ -9,6 +9,8 @@
 mod backend;
 mod net;
 mod netdrive;
+#[cfg(test)]
+mod ui_smoke;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -176,8 +178,13 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(app) = app_weak.upgrade() {
                 let cmd_tx = netdrive::start(&app);
                 // Composer Send forwards to the background session.
+                let tx_send = cmd_tx.clone();
                 app.on_send_message(move |text| {
-                    let _ = cmd_tx.send(netdrive::UiCmd::Send(text.to_string()));
+                    let _ = tx_send.send(netdrive::UiCmd::Send(text.to_string()));
+                });
+                // Invite dialog → create a channel and invite the entered 0x address.
+                app.on_create_channel(move |addr| {
+                    let _ = cmd_tx.send(netdrive::UiCmd::CreateChannel(addr.to_string()));
                 });
             }
         });

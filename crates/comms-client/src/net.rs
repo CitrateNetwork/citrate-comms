@@ -90,6 +90,7 @@ impl NetSession {
     pub fn in_channel(&self) -> bool {
         self.channel.is_some()
     }
+    #[allow(dead_code)]
     pub fn channel_id(&self) -> Option<GroupId> {
         self.channel.as_ref().map(|c| c.gid)
     }
@@ -163,27 +164,36 @@ impl NetSession {
         Ok(gid)
     }
 
-    /// Block until a Welcome is pushed, then join that channel. The inviter is the
-    /// envelope's sender; we seed the roster with them and ourselves (full roster sync is
-    /// a later refinement).
+    /// Join the channel a `Welcome` envelope invites us to (fetches the public ratchet
+    /// tree from the relay, then joins). The inviter is the envelope's sender; we seed the
+    /// roster with them and ourselves (full roster sync is a later refinement).
+    pub async fn join_from_welcome(&mut self, env: &Envelope) -> Result<GroupId, NetError> {
+        if env.kind != EnvelopeKind::Welcome {
+            return Err(NetError::NotInChannel);
+        }
+        let gid = env.group_id;
+        let rt = self
+            .client
+            .ratchet_tree(gid)
+            .await
+            .map_err(NetError::Ws)?
+            .ok_or(NetError::NoRatchetTree)?;
+        let group = self.member.join(&env.ciphertext, &rt).map_err(|e| NetError::Mls(e.to_string()))?;
+        let epoch = group.epoch();
+        let members = vec![self.wallet.address(), env.sender];
+        self.channel = Some(Channel { gid, group, epoch, members });
+        Ok(gid)
+    }
+
+    /// Block until a Welcome is pushed, then join it (convenience over
+    /// [`join_from_welcome`](Self::join_from_welcome); the driver polls instead). Used by tests.
+    #[allow(dead_code)]
     pub async fn join_next_channel(&mut self) -> Result<GroupId, NetError> {
         loop {
             let env = self.client.next_delivered().await.ok_or(NetError::Closed)?;
-            if env.kind != EnvelopeKind::Welcome {
-                continue;
+            if env.kind == EnvelopeKind::Welcome {
+                return self.join_from_welcome(&env).await;
             }
-            let gid = env.group_id;
-            let rt = self
-                .client
-                .ratchet_tree(gid)
-                .await
-                .map_err(NetError::Ws)?
-                .ok_or(NetError::NoRatchetTree)?;
-            let group = self.member.join(&env.ciphertext, &rt).map_err(|e| NetError::Mls(e.to_string()))?;
-            let epoch = group.epoch();
-            let members = vec![self.wallet.address(), env.sender];
-            self.channel = Some(Channel { gid, group, epoch, members });
-            return Ok(gid);
         }
     }
 
