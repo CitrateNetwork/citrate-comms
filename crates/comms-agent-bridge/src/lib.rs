@@ -248,7 +248,10 @@ impl AgentBridge {
                 let recipients: Vec<WalletAddress> =
                     self.members.iter().copied().filter(|a| *a != self.wallet.address()).collect();
                 relay
-                    .submit(
+                    .submit_as(
+                        // The bridge IS this agent's MLS client; bind the envelope sender
+                        // to the agent's own authenticated wallet (FWA-C11-01).
+                        self.wallet.address(),
                         Envelope {
                             group_id: gid,
                             epoch: EpochId(self.epoch),
@@ -369,8 +372,8 @@ mod tests {
         relay.register_group(gid, admin_w.address(), now).unwrap();
         let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
         let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
-        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
-        relay.onboard(gid, admin_w.address(), agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
+        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
+        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
         agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
         assert!(agent.is_member());
 
@@ -387,7 +390,7 @@ mod tests {
         // Admin posts a message; the agent decrypts it as an IPC `message` event.
         let payload = ChatMessage { thread_id: None, parent_id: None, body: "Can you summarize the Northwind thread?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
         let ct = admin_g.send(&admin_m, &payload).unwrap();
-        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
+        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
 
         let inbox = agent.poll(&mut relay);
         assert_eq!(inbox.len(), 1);
@@ -493,8 +496,8 @@ mod tests {
         relay.register_group(gid, admin_w.address(), now).unwrap();
         let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
         let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
-        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
-        relay.onboard(gid, admin_w.address(), agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
+        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
+        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
         agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
         let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
         agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
@@ -502,7 +505,7 @@ mod tests {
         // Admin posts a message into the channel.
         let payload = ChatMessage { thread_id: None, parent_id: None, body: "What's the status of the Northwind deal?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
         let ct = admin_g.send(&admin_m, &payload).unwrap();
-        relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
+        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
 
         // Bind the bearer-gated socket; accept + connect concurrently.
         let dir = tempfile::tempdir().unwrap();
@@ -569,7 +572,7 @@ mod tests {
             let ct = admin_g.send(&admin_m, &payload).unwrap();
             // (a) The wire ciphertext is opaque — the canary is not in it.
             assert!(!contains_subseq(&ct, CANARY), "MLS ciphertext leaked the plaintext");
-            relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![], ciphertext: ct.clone(), group_seq: None }, now).unwrap();
+            relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![], ciphertext: ct.clone(), group_seq: None }, now).unwrap();
             ct
             // relay drops here → RocksDB flushes and closes.
         };

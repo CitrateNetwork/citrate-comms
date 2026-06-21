@@ -13,8 +13,8 @@ description = "citrate-comms domain library — MLS engine, SIWE→MLS identity 
 # MLS module — the server-blind invariant is enforced at the dependency graph (PLANSET/02 §1).
 default = ["mls", "store"]
 mls = ["dep:openmls", "dep:openmls_rust_crypto", "dep:openmls_traits", "dep:openmls_basic_credential", "dep:tls_codec"]
-# `store` gates the RocksDB + AES-256-GCM persistence layer (used by the relay).
-store = ["dep:rocksdb", "dep:aes-gcm", "dep:getrandom"]
+# `store` gates the RocksDB + AES-256-GCM-SIV persistence layer (used by the relay).
+store = ["dep:rocksdb", "dep:aes-gcm-siv", "dep:getrandom"]
 
 [dependencies]
 comms-proto = { path = "../comms-proto" }
@@ -39,7 +39,7 @@ tls_codec = { version = "0.4", optional = true }
 
 # Persistence (feature `store`).
 rocksdb = { workspace = true, optional = true }
-aes-gcm = { workspace = true, optional = true }
+aes-gcm-siv = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -1,0 +1,36 @@
+# FWA-C11-01 TRIPWIRE (Class-A) — sender / client-identity binding for the server-blind relay.
+#
+# Run:  semgrep --config .semgrep/fwa-c11-sender-binding.yml --error
+#
+# Any WebSocket dispatch handler that forwards a client-supplied identity field
+# (Envelope.sender, KeyPackagePublication.wallet, an onboarding admin/joiner) to the
+# delivery service MUST bind it to the connection's authenticated principal (`addr`),
+# i.e. go through `submit_as(addr, …)` / `onboard(group, addr, …)` and never the trusted
+# private `submit(…)`. These rules fail the build if that binding is dropped.
+rules:
+  - id: fwa-c11-ws-unbound-submit
+    languages: [rust]
+    severity: ERROR
+    message: >
+      FWA-C11-01 regression: a WS dispatch path reached the trusted/un-bound `submit(envelope)`
+      with a client-supplied `Envelope.sender`. Use `submit_as(authed_addr, envelope, now)` so the
+      sender is bound to the authenticated connection (no sender spoofing / audit forgery).
+    paths:
+      include:
+        - "crates/comms-relay/src/ws.rs"
+    patterns:
+      # a service `.submit(` call inside the WS layer (the bound entry point is `submit_as`)
+      - pattern-regex: '\.lock\(\)\.await\.submit\('
+
+  - id: fwa-c11-submit-arm-must-bind
+    languages: [rust]
+    severity: ERROR
+    message: >
+      FWA-C11-01: the WS `Submit` arm must call `submit_as(addr, env, now)` (binding the
+      envelope sender to the authenticated session). A bare `service.submit(env, …)` trusts the
+      client-named sender and is a Class-A finding.
+    paths:
+      include:
+        - "crates/comms-relay/src/ws.rs"
+    patterns:
+      - pattern: 'self.service.lock().await.submit($ENV, $NOW)'

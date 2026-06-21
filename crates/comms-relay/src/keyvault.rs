@@ -1,14 +1,14 @@
 //! `keyvault` — the at-rest master key, backed by the OS keyring (COMMS-S1).
 //!
-//! The relay's RocksDB column families are encrypted with AES-256-GCM under a 32-byte
+//! The relay's RocksDB column families are encrypted with AES-256-GCM-SIV under a 32-byte
 //! master key (see `comms-core::store`). This module persists that key in the platform
 //! keystore — macOS Keychain, Windows Credential Manager, or the Linux Secret Service —
 //! generating one on first run, so the operator never has to manage key bytes by hand.
 //!
-//! Mirrors the `citrate-studio` `KeyringTokenStore` pattern. The deeper hardening step —
-//! wrapping the stored key with the chain's PQ-hybrid `HybridKEM` (Kyber-768 + X25519)
-//! before it touches the keystore — slots in at [`master_key_for`] without changing the
-//! daemon's call site.
+//! Mirrors the `citrate-studio` `KeyringTokenStore` pattern. A post-quantum hardening
+//! step — wrapping the stored key with the chain's `HybridKEM` (X25519 + ML-KEM-768)
+//! before it touches the keystore — is **roadmap-only and NOT yet implemented**; it would
+//! slot in at [`master_key_for`] without changing the daemon's call site.
 
 use keyring::Entry;
 

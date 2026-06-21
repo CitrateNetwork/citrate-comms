@@ -53,9 +53,14 @@ The complete design lives in [`PLANSET/`](PLANSET/):
 MLS (RFC 9420) via OpenMLS, ciphersuite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`
 (X25519 KEM · AES-128-GCM · Ed25519 signatures — the strongest standard MLS suite over the chain's
 X25519/Ed25519 curves; the AES-256-GCM "chain grade" is delivered at the at-rest layer, see below).
-At-rest: RocksDB column families encrypted
-with AES-256-GCM, keys wrapped by the chain's PQ-hybrid `HybridKEM` (Kyber-768 + X25519, SHA3-512 combine).
+At-rest: RocksDB column families encrypted with **AES-256-GCM-SIV** (nonce-misuse-resistant, RFC 8452)
+under per-CF keys derived from a master key via a domain-separated BLAKE3 KDF.
 Audit: BLAKE3 hash-chained append-only log, optionally anchored to chain 40204 for tamper-evidence.
+
+> **Roadmap (NOT yet implemented):** post-quantum protection — wrapping the at-rest master key with the
+> chain's `HybridKEM` (X25519 + ML-KEM-768) and, in transport, migrating to a hybrid MLS ciphersuite once
+> one ratifies (the envelope reserves a `ciphersuite_id` for epoch-by-epoch migration). The live suites
+> above are classical; no ML-KEM/Kyber is present in the build today. See `PLANSET/07`.
 
 ## Workspace
 COMMS-S0 built the crypto + transport spine (✅ implemented & tested); the rest fills in per `PLANSET/05`.

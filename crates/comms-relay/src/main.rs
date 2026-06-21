@@ -13,8 +13,9 @@
 //!
 //! The at-rest master key is taken from `CITRATE_COMMS_MASTER_KEY` when set (explicit /
 //! air-gap / CI key management); otherwise it is loaded from the OS keyring, generating
-//! one on first run (`keyvault`). Wrapping it with the chain's PQ-hybrid HybridKEM before
-//! it touches the keystore is the next hardening step (PLANSET/07).
+//! one on first run (`keyvault`). Wrapping it with the chain's `HybridKEM` (X25519 +
+//! ML-KEM-768) before it touches the keystore is a roadmap item — NOT yet implemented
+//! (PLANSET/07); the at-rest key is currently used directly with AES-256-GCM-SIV.
 
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
