@@ -1167,6 +1167,7 @@ dependencies = [
  "hex",
  "keyring",
  "serde",
+ "sha2",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",

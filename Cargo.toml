@@ -35,7 +35,6 @@ subtle = "2"                  # constant-time equality for tokens / auth tags (n
 # crypto grade (matches citrate-chain)
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-aes-gcm = "0.10"
 # Nonce-misuse-resistant AEAD for at-rest CF encryption (FWA-C11-04): under a
 # long-lived per-CF key a random-nonce GCM collision (birthday-bound ~2^32 writes)
 # would leak keystream+GHASH; AES-256-GCM-SIV degrades only to revealing equality.
