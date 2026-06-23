@@ -3,11 +3,24 @@
  * (the locked decision: add-customer → add-deal-under-customer). The pipeline is a
  * kanban by stage. All workspace-scoped; mutations audited at the API layer.
  */
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq, inArray, asc } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { accounts, contacts, deals } from "@/lib/db/schema";
+import {
+  accounts,
+  contacts,
+  deals,
+  agentThreads,
+  documents,
+  crmFieldValues,
+  crmNotes,
+  crmNoteComments,
+  crmActivity,
+  crmRecordTags,
+} from "@/lib/db/schema";
+import { appendAudit } from "@/lib/audit/chain";
 import { DEAL_STAGES, type DealStage } from "./enums";
 import { recordActivity } from "./crm-activity";
+import type { CrmEntity } from "./crm-enums";
 
 export { DEAL_STAGES };
 export type { DealStage };
@@ -305,4 +318,54 @@ export async function createContact(args: {
     .returning({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub });
   await recordActivity({ workspaceId: args.workspaceId, entity: "contact", recordId: row!.id, actorSub: args.ownerSub, input: { kind: "created" } });
   return row!;
+}
+
+// ── Deletes (Owner/Admin only — auditability; CRM-depth sub-data cleaned up) ──
+
+/** Remove a record's CRM-depth sub-data (field values, notes + comments, activity, tags). */
+async function deleteCrmSubData(workspaceId: string, entity: CrmEntity, recordId: string): Promise<void> {
+  const d = db();
+  const noteRows = await d
+    .select({ id: crmNotes.id })
+    .from(crmNotes)
+    .where(and(eq(crmNotes.workspaceId, workspaceId), eq(crmNotes.entity, entity), eq(crmNotes.recordId, recordId)));
+  const noteIds = noteRows.map((n) => n.id);
+  if (noteIds.length > 0) await d.delete(crmNoteComments).where(inArray(crmNoteComments.noteId, noteIds));
+  await d.delete(crmNotes).where(and(eq(crmNotes.workspaceId, workspaceId), eq(crmNotes.entity, entity), eq(crmNotes.recordId, recordId)));
+  await d.delete(crmFieldValues).where(and(eq(crmFieldValues.workspaceId, workspaceId), eq(crmFieldValues.entity, entity), eq(crmFieldValues.recordId, recordId)));
+  await d.delete(crmActivity).where(and(eq(crmActivity.workspaceId, workspaceId), eq(crmActivity.entity, entity), eq(crmActivity.recordId, recordId)));
+  await d.delete(crmRecordTags).where(and(eq(crmRecordTags.workspaceId, workspaceId), eq(crmRecordTags.entity, entity), eq(crmRecordTags.recordId, recordId)));
+}
+
+export async function deleteContact(workspaceId: string, id: string, actorSub: string): Promise<void> {
+  await deleteCrmSubData(workspaceId, "contact", id);
+  await db().delete(contacts).where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.id, id)));
+  await appendAudit({ workspaceId, actorSub, event: "contact_deleted", target: id });
+}
+
+export async function deleteDeal(workspaceId: string, id: string, actorSub: string): Promise<void> {
+  const d = db();
+  // Unlink FK references so the survivor rows (threads, documents) aren't orphaned-deleted.
+  await d.update(agentThreads).set({ dealId: null }).where(and(eq(agentThreads.workspaceId, workspaceId), eq(agentThreads.dealId, id)));
+  await d.update(documents).set({ dealId: null }).where(and(eq(documents.workspaceId, workspaceId), eq(documents.dealId, id)));
+  await deleteCrmSubData(workspaceId, "deal", id);
+  await d.delete(deals).where(and(eq(deals.workspaceId, workspaceId), eq(deals.id, id)));
+  await appendAudit({ workspaceId, actorSub, event: "deal_deleted", target: id });
+}
+
+/** Whether an account still has child deals or contacts (blocks deletion). */
+export async function accountHasChildren(workspaceId: string, id: string): Promise<boolean> {
+  const [deal] = await db().select({ id: deals.id }).from(deals).where(and(eq(deals.workspaceId, workspaceId), eq(deals.accountId, id))).limit(1);
+  if (deal) return true;
+  const [contact] = await db().select({ id: contacts.id }).from(contacts).where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.accountId, id))).limit(1);
+  return Boolean(contact);
+}
+
+export async function deleteAccount(workspaceId: string, id: string, actorSub: string): Promise<void> {
+  const d = db();
+  await d.update(agentThreads).set({ accountId: null }).where(and(eq(agentThreads.workspaceId, workspaceId), eq(agentThreads.accountId, id)));
+  await d.update(documents).set({ accountId: null }).where(and(eq(documents.workspaceId, workspaceId), eq(documents.accountId, id)));
+  await deleteCrmSubData(workspaceId, "account", id);
+  await d.delete(accounts).where(and(eq(accounts.workspaceId, workspaceId), eq(accounts.id, id)));
+  await appendAudit({ workspaceId, actorSub, event: "account_deleted", target: id });
 }

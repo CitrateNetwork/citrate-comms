@@ -30,6 +30,7 @@ export default async function CrmPage({ params }: { params: Promise<{ slug: stri
       workspaceId={ws.id}
       workspaceSlug={slug}
       canEdit={can(ctx.role, Capability.CreateRecord)}
+      canDelete={can(ctx.role, Capability.DeleteRecord)}
       accounts={accounts.map((a) => ({ id: a.id, name: a.name, domain: a.domain }))}
       deals={deals.map((d) => ({
         id: d.id,

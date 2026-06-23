@@ -1,9 +1,36 @@
+.dealCardWrap {
+  position: relative;
+}
 .dealCard {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
   text-decoration: none;
   color: inherit;
+}
+.cardDelete {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-2);
+  background: var(--paper-pure);
+  color: var(--fg-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease, color 0.1s ease;
+}
+.dealCardWrap:hover .cardDelete {
+  opacity: 1;
+}
+.cardDelete:hover {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 .dealName {
   font-weight: 600;
