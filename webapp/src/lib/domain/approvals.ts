@@ -18,13 +18,15 @@ import { addNote } from "./crm-notes";
 import { setFieldValue, listFieldDefs } from "./crm-fields";
 import { updateAccount, updateDeal, updateContact } from "./crm";
 import { recordActivity } from "./crm-activity";
+import { getMemoryStore, neonMemoryStore, type MemoryAnchor, type TrustTier } from "@/lib/memory";
 import type { CrmEntity, CrmNoteType } from "./crm-enums";
 
 /** The executable spec stored (encrypted) on an approval and applied on approve. */
 export type AgentAction =
   | { kind: "crm.note"; entity: CrmEntity; recordId: string; type: CrmNoteType; title?: string; body: string }
   | { kind: "crm.field"; entity: CrmEntity; recordId: string; fieldKey: string; value: string }
-  | { kind: "crm.standard"; entity: CrmEntity; recordId: string; patch: { name?: string; domain?: string; title?: string; valueMinor?: number } };
+  | { kind: "crm.standard"; entity: CrmEntity; recordId: string; patch: { name?: string; domain?: string; title?: string; valueMinor?: number } }
+  | { kind: "memory.assert"; repo: string; nodeKind: string; content: string; anchors?: MemoryAnchor[]; confidence?: number };
 
 export type Risk = "low" | "medium" | "high";
 
@@ -32,6 +34,7 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "crm.note": "low",
   "crm.field": "medium",
   "crm.standard": "medium",
+  "memory.assert": "low",
 };
 
 export interface EnqueueArgs {
@@ -97,6 +100,8 @@ function describe(action: AgentAction): string {
       return `Set ${action.entity} field “${action.fieldKey}” = ${truncate(action.value)}`;
     case "crm.standard":
       return `Update ${action.entity}: ${truncate(JSON.stringify(action.patch))}`;
+    case "memory.assert":
+      return `Assert to knowledge graph (${action.nodeKind}): ${truncate(action.content)}`;
   }
 }
 function truncate(s: string, n = 140): string {
@@ -204,6 +209,22 @@ async function executeAction(
       else await updateContact(workspaceId, action.recordId, { name: action.patch.name, title: action.patch.title }, by.bySub);
       await recordActivity({ workspaceId, entity: action.entity, recordId: action.recordId, actorSub: by.bySub, byAgent: true, input: { kind: "agent_action", tool: "crm.write" } });
       return { updated: true };
+    }
+    case "memory.assert": {
+      const input = {
+        kind: action.nodeKind,
+        content: action.content,
+        anchors: action.anchors,
+        confidence: action.confidence,
+        trustTier: "agent-asserted" as TrustTier,
+      };
+      let node;
+      try {
+        node = await (await getMemoryStore()).assert(action.repo, input, { workspaceId, sub: by.bySub });
+      } catch {
+        node = await neonMemoryStore().assert(action.repo, input, { workspaceId, sub: by.bySub });
+      }
+      return { nodeId: node.id };
     }
   }
 }

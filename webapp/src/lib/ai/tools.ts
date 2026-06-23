@@ -204,6 +204,34 @@ export function citrateCommsTools(ctx: ToolContext) {
       },
     }),
 
+    "memory.assert": tool({
+      description:
+        "Propose asserting a durable finding to the workspace knowledge graph (Asserted plane — signed + " +
+        "trust-tiered). This does NOT apply immediately; it is queued for human approval. Use for facts worth " +
+        "remembering about accounts/deals/contacts (preferences, risks, commitments). Anchor it to the record(s).",
+      inputSchema: z.object({
+        kind: z.string().min(1).max(60).describe("finding kind, e.g. preference | risk | fact | commitment"),
+        content: z.string().min(1).max(4000),
+        anchors: z
+          .array(z.object({ entity: z.string().max(40), id: z.string().max(80) }))
+          .max(10)
+          .optional()
+          .describe("entity anchors this finding is about"),
+        confidence: z.number().int().min(0).max(100).optional(),
+      }),
+      execute: async (a: { kind: string; content: string; anchors?: { entity: string; id: string }[]; confidence?: number }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "memory.assert",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "memory.assert", repo: crmRepo(ctx.workspaceId), nodeKind: a.kind, content: a.content, anchors: a.anchors, confidence: a.confidence },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval before it joins the knowledge graph." };
+      },
+    }),
+
     "memory.recall": tool({
       description:
         "Recall facts from this workspace's knowledge graph. Returns items with their TRUST TIER " +
@@ -253,4 +281,4 @@ export function citrateCommsTools(ctx: ToolContext) {
 }
 
 /** Tool names the registry currently IMPLEMENTS (others are declared but not yet live). */
-export const IMPLEMENTED_TOOLS: ToolName[] = ["crm.read", "memory.recall", "crm.note", "crm.write"];
+export const IMPLEMENTED_TOOLS: ToolName[] = ["crm.read", "memory.recall", "memory.assert", "crm.note", "crm.write"];

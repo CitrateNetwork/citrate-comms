@@ -11,6 +11,9 @@ describe("comms tool registry — single source of truth", () => {
     for (const k of keys) expect(IMPLEMENTED_TOOLS).toContain(k as ToolName);
     expect(keys).toContain("crm.read");
     expect(keys).toContain("memory.recall");
+    expect(keys).toContain("memory.assert");
+    expect(keys).toContain("crm.note");
+    expect(keys).toContain("crm.write");
   });
 
   it("respects the persona allow-list (intersection with implemented)", () => {
