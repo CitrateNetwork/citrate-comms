@@ -1,0 +1,117 @@
+/* =============================================================
+   citrate-comms — tokens.css
+   The EXACT brand tokens from the design brief §4.
+   Every other stylesheet references var(--token) only — no raw hex.
+   Engineering maps var(--x) -> Theme.x mechanically for Slint.
+   ============================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,360..600;1,8..60,360..600&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ---------- BRAND ---------- */
+  --citrate-green:      #8ecc09;
+  --citrate-green-deep: #5a8205;
+  --citrate-green-dark: #2f4502;
+  --citrate-green-tint: #e8f3c6;
+  --citrate-yellow:      #ffbd10;
+  --citrate-yellow-deep: #c89400;
+  --citrate-yellow-dark: #6e5100;
+  --citrate-yellow-tint: #fff1c4;
+
+  /* ---------- INK (warm near-blacks) ---------- */
+  --ink:      #0e0f0c;
+  --ink-2:    #1f221d;
+  --graphite: #3a3d36;
+
+  /* ---------- STONE (warm neutrals) ---------- */
+  --stone-900: #2a2c27;
+  --stone-700: #555851;
+  --stone-500: #84867f;
+  --stone-400: #a5a79f;
+  --stone-300: #c3c4be;
+  --stone-200: #d9dad4;
+  --stone-150: #e3e2dc;
+  --stone-100: #ecebe4;
+  --stone-50:  #f1efe8;
+
+  /* ---------- PAPER (warm surfaces — default app background) ---------- */
+  --paper:      #f4f1ea;
+  --paper-2:    #faf8f3;
+  --paper-pure: #ffffff;
+
+  /* ---------- DEPTH / EVERGREEN ---------- */
+  --deep-evergreen:   #0f2a1a;
+  --deep-evergreen-2: #1a3b27;
+
+  /* ---------- SEMANTIC ---------- */
+  --success: #4f8a05;  --success-bg: #ecf5d4;
+  --warning: #b07b00;  --warning-bg: #fff1c4;
+  --danger:  #a72414;  --danger-bg:  #f6e1de;
+  --info:    #1b4965;  --info-bg:    #dbe7ef;
+
+  /* ---------- FOREGROUND / BORDERS ---------- */
+  --fg-1: #0e0f0c;
+  --fg-2: #555851;
+  --fg-3: #84867f;
+  --fg-accent: #5a8205;
+  --border-1: #d9dad4;
+  --border-2: #c3c4be;
+  --border-strong: #0e0f0c;
+
+  /* ---------- SEALED-LEDGER ZONE (audit vault — dark evergreen) ---------- */
+  --sealed-bg:        #0c2216;
+  --sealed-bg-2:      #0f2a1a;
+  --sealed-surface:   #123524;
+  --sealed-bg-hard:   #07140c;
+  --sealed-border:    #2a3f33;
+  --sealed-border-2:  #36503f;
+  --sealed-fg:        #cde7d6;
+  --sealed-fg-2:      #8fae99;
+  --sealed-fg-3:      #5f7a68;
+  --sealed-hover:     #15311f;
+  --sealed-tint-green:#14361f;
+
+  /* ---------- FOCUS / SHADOW ---------- */
+  --focus-ring:  rgba(142,204,9,.35);
+  --shadow-soft: rgba(14,15,12,.18);
+
+  /* ---------- TYPE FAMILIES ---------- */
+  --font-display:   "Space Grotesk", "Geist", system-ui, sans-serif;
+  --font-sans:      "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:      "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-editorial: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+
+  /* ---------- TYPE SCALE ---------- */
+  --t-3xs: 11px; --t-2xs: 12px; --t-xs: 13px; --t-sm: 14px; --t-md: 16px;
+  --t-lg: 18px;  --t-xl: 22px;  --t-2xl: 28px; --t-3xl: 36px; --t-4xl: 48px;
+
+  /* ---------- SPACING (8pt grid) ---------- */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px;
+  --s-6: 24px; --s-7: 32px; --s-8: 40px; --s-9: 48px; --s-10: 64px;
+
+  /* ---------- RADII ---------- */
+  --r-0: 0px; --r-1: 6px; --r-2: 8px; --r-3: 12px; --r-pill: 999px;
+
+  /* ---------- MOTION ---------- */
+  --dur-fast: 140ms; --dur-base: 220ms; --dur-slow: 420ms; --dur-narrative: 900ms;
+  --ease: cubic-bezier(.32,.72,.32,1);
+
+  /* ---------- DENSITY (driven by tweak; cinematic default) ---------- */
+  --density-pad: var(--s-6);
+  --row-gap: var(--s-5);
+  --msg-gap: 22px;
+}
+
+/* Compact density override */
+[data-density="compact"] {
+  --density-pad: var(--s-4);
+  --row-gap: var(--s-3);
+  --msg-gap: 12px;
+}
+
+/* Reduced motion */
+[data-reduced-motion="true"] * {
+  animation-duration: 0.001ms !important;
+  transition-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+}

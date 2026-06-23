@@ -1,0 +1,15 @@
+.dealCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.dealName {
+  font-weight: 600;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.dealValue {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--citrate-green-deep);
+}

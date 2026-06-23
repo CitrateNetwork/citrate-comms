@@ -1,0 +1,170 @@
+.add {
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--r-1);
+  display: inline-flex;
+}
+.add:hover {
+  background: var(--stone-100);
+  color: var(--fg-1);
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(14, 15, 12, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.dialog {
+  width: min(420px, 92vw);
+  background: var(--paper-pure);
+  border-radius: var(--r-3);
+  padding: var(--s-5);
+  box-shadow: 0 12px 48px var(--shadow-soft);
+}
+.title {
+  font-weight: 600;
+  font-size: var(--t-md);
+  margin-bottom: var(--s-4);
+}
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.kinds {
+  display: flex;
+  gap: var(--s-2);
+}
+.kindBtn {
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-2);
+  cursor: pointer;
+  text-transform: capitalize;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.kindActive {
+  border-color: var(--citrate-green-deep);
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  font-weight: 600;
+}
+.input {
+  height: 40px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  font-size: var(--t-sm);
+  font-family: var(--font-sans);
+  color: var(--fg-1);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+.error {
+  color: var(--danger);
+  font-size: var(--t-xs);
+}
+
+/* ── Participant picker ─────────────────────────────────────────────────── */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.pickerLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.privacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--citrate-green-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  border-radius: var(--r-2);
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  font-size: var(--t-xs);
+}
+.chipX {
+  display: inline-flex;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--citrate-green-dark);
+  padding: 0;
+  opacity: 0.7;
+}
+.chipX:hover {
+  opacity: 1;
+}
+.results {
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+}
+.resultRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg-1);
+  font-size: var(--t-sm);
+}
+.resultRow:hover {
+  background: var(--stone-100);
+}
+.resultName {
+  flex: 1;
+}
+.resultRole {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.noResults {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}

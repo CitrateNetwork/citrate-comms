@@ -1,0 +1,123 @@
+/* Shared screen chrome — header, dialog, fields — for CRM/PM/Agents/Settings. */
+.wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-7);
+  gap: var(--s-5);
+}
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+}
+.eyebrow {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: var(--t-3xs);
+  color: var(--fg-3);
+}
+.title {
+  font-family: var(--font-display);
+  font-size: var(--t-2xl);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 2px 0 0;
+}
+.headActions {
+  display: flex;
+  gap: var(--s-2);
+}
+.tabs {
+  display: flex;
+  gap: var(--s-2);
+  flex: 0 0 auto;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+}
+.tabActive {
+  border-bottom-color: var(--citrate-green-deep);
+  color: var(--fg-1);
+  font-weight: 600;
+}
+
+/* Dialog */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(14, 15, 12, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.dialog {
+  width: min(460px, 92vw);
+  background: var(--paper-pure);
+  border-radius: var(--r-3);
+  padding: var(--s-5);
+  box-shadow: 0 12px 48px var(--shadow-soft);
+}
+.dialogHead {
+  font-weight: 600;
+  font-size: var(--t-md);
+  margin-bottom: var(--s-4);
+}
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.fieldLabel {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.input {
+  height: 40px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  font-size: var(--t-sm);
+  font-family: var(--font-sans);
+  color: var(--fg-1);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.dialogFoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+.error {
+  color: var(--danger);
+  font-size: var(--t-xs);
+}
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--fg-3);
+  font-family: var(--font-editorial);
+  font-style: italic;
+  font-size: var(--t-lg);
+  padding: var(--s-8);
+}

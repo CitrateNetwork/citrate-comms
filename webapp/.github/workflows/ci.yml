@@ -1,0 +1,55 @@
+name: webapp-ci
+
+on:
+  push:
+    paths: ["webapp/**"]
+  pull_request:
+    paths: ["webapp/**"]
+
+defaults:
+  run:
+    working-directory: webapp
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webapp/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm db:generate # schema must generate cleanly
+      - name: build
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_OIDC_ISSUER: http://localhost:3000
+          NEXT_PUBLIC_OIDC_CLIENT_ID: citrate-comms-web
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: webapp/.gitleaks.toml
+
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: semgrep
+        run: semgrep scan --config auto --config webapp/.semgrep --error webapp
