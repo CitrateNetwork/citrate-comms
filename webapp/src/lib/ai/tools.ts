@@ -16,6 +16,9 @@ import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
+import { retrieveChunks } from "@/lib/domain/documents";
+import { listMessages } from "@/lib/domain/messages";
+import { listTasks, listProjects } from "@/lib/domain/pm";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
 import type { CrmEntity } from "@/lib/domain/crm-enums";
 import { getMemoryStore, neonMemoryStore, crmRepo, type TrustTier } from "@/lib/memory";
@@ -275,6 +278,101 @@ export function citrateCommsTools(ctx: ToolContext) {
       ),
     }),
 
+    // ── Documents + notetaker tools (BFF inline reads; writes are HITL-gated; S4) ──
+    "documents.read": tool({
+      description:
+        "Retrieve from the team's uploaded documents (RAG). Returns cited snippets with their source " +
+        "document name. Use to ground answers in real files — cite what you used.",
+      inputSchema: z.object({ query: z.string().min(1).max(400), budget: z.number().int().min(1).max(10).default(6) }),
+      execute: audited("documents.read", Capability.ReadChannel, async (a: { query: string; budget: number }) => {
+        const results = await retrieveChunks(ctx.workspaceId, a.query, { budget: a.budget });
+        return { results: results.map((r) => ({ document: r.name, snippet: r.snippet })) };
+      }),
+    }),
+    "pm.read": tool({
+      description: "Read projects and tasks (the board). Optionally scope to a project. Returns real records.",
+      inputSchema: z.object({ projectId: z.string().uuid().optional() }),
+      execute: audited("pm.read", Capability.ReadChannel, async (a: { projectId?: string }) => {
+        const [projects, tasks] = await Promise.all([listProjects(ctx.workspaceId), listTasks(ctx.workspaceId, a.projectId)]);
+        return { projects, tasks: tasks.map((t) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority, projectId: t.projectId })) };
+      }),
+    }),
+    "thread.summarize": tool({
+      description:
+        "Read a channel's recent messages so you can summarize them and extract action items. Returns the " +
+        "messages (oldest→newest). Use before filing notes/decisions/tasks.",
+      inputSchema: z.object({ channelId: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50) }),
+      execute: audited("thread.summarize", Capability.ReadChannel, async (a: { channelId: string; limit: number }) => {
+        const msgs = await listMessages(ctx.workspaceId, a.channelId, { limit: a.limit });
+        return { messages: msgs.map((m) => ({ author: m.authorSub, body: m.body, at: m.createdAt })) };
+      }),
+    }),
+    "documents.write": tool({
+      description:
+        "Propose creating a document/report (e.g. meeting notes, an analysis writeup) attached to the " +
+        "workspace or a record. HITL: queued for approval, then stored + indexed for RAG.",
+      inputSchema: z.object({
+        name: z.string().min(1).max(160),
+        content: z.string().min(1).max(50000),
+        accountId: z.string().uuid().optional(),
+        dealId: z.string().uuid().optional(),
+        channelId: z.string().uuid().optional(),
+      }),
+      execute: async (a: { name: string; content: string; accountId?: string; dealId?: string; channelId?: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "documents.write",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "documents.write", name: a.name, content: a.content, accountId: a.accountId, dealId: a.dealId, channelId: a.channelId },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
+      },
+    }),
+    "ledger.write": tool({
+      description:
+        "Propose filing a decision/commitment/resolution into the witness Ledger for a channel (the " +
+        "signature audit feature). HITL: queued for human approval.",
+      inputSchema: z.object({
+        channelId: z.string().uuid(),
+        kind: z.enum(["decision", "commitment", "resolved"]),
+        text: z.string().min(1).max(2000),
+        owner: z.string().max(120).optional(),
+        due: z.string().datetime().optional(),
+      }),
+      execute: async (a: { channelId: string; kind: "decision" | "commitment" | "resolved"; text: string; owner?: string; due?: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "ledger.write",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "ledger.write", channelId: a.channelId, ledgerKind: a.kind, text: a.text, owner: a.owner, due: a.due },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
+      },
+    }),
+    "pm.write": tool({
+      description: "Propose creating a task on the board. HITL: queued for human approval.",
+      inputSchema: z.object({
+        title: z.string().min(1).max(200),
+        projectId: z.string().uuid().optional(),
+        priority: z.enum(["low", "medium", "high"]).optional(),
+      }),
+      execute: async (a: { title: string; projectId?: string; priority?: "low" | "medium" | "high" }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "pm.write",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "pm.write", title: a.title, projectId: a.projectId, priority: a.priority },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
+      },
+    }),
+
     // ── Runner tools (delegated to the comms-agent-runner; S3) ──
     // Reads run inline; terminal/code are HITL-gated (propose → approve → run).
     "web.search": tool({
@@ -357,13 +455,19 @@ export function citrateCommsTools(ctx: ToolContext) {
 /** Tool names the registry currently IMPLEMENTS (others are declared but not yet live). */
 export const IMPLEMENTED_TOOLS: ToolName[] = [
   "crm.read",
+  "crm.write",
+  "crm.note",
+  "pm.read",
+  "pm.write",
+  "ledger.write",
+  "thread.summarize",
   "memory.recall",
   "memory.assert",
-  "crm.note",
-  "crm.write",
+  "documents.read",
+  "documents.write",
   "web.search",
   "web.fetch",
-  "chart.render",
   "terminal.exec",
   "code.run",
+  "chart.render",
 ];

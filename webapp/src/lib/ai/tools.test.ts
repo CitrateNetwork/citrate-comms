@@ -20,9 +20,9 @@ describe("comms tool registry — single source of truth", () => {
     const onlyCrm = citrateCommsTools({ ...base, allow: new Set<ToolName>(["crm.read"]) });
     expect(Object.keys(onlyCrm)).toEqual(["crm.read"]);
 
-    // A persona that only declares not-yet-implemented tools gets an empty (safe) set.
-    const future = citrateCommsTools({ ...base, allow: new Set<ToolName>(["pm.read", "ledger.write"]) });
-    expect(Object.keys(future)).toEqual([]);
+    // An empty allow-list yields no tools (the persona can do nothing un-allowed).
+    const none = citrateCommsTools({ ...base, allow: new Set<ToolName>() });
+    expect(Object.keys(none)).toEqual([]);
   });
 
   it("each tool exposes a zod inputSchema + execute (MCP parity contract)", () => {
