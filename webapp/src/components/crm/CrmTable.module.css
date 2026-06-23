@@ -1,0 +1,208 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-height: 0;
+  flex: 1;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.spacer {
+  flex: 1;
+}
+.searchBox {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  padding: 0 var(--s-2);
+  background: var(--paper-pure);
+  color: var(--fg-3);
+}
+.search {
+  border: none;
+  outline: none;
+  background: none;
+  padding: var(--s-2) 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  width: 200px;
+}
+.toolBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.toolBtn:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-dark);
+}
+.colChooser {
+  position: relative;
+}
+.colMenu {
+  position: absolute;
+  top: 110%;
+  left: 0;
+  z-index: 30;
+  background: var(--paper-pure);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  box-shadow: 0 8px 28px var(--shadow-soft);
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  min-width: 200px;
+}
+.colItem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  padding: 3px 6px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+.colItem:hover {
+  background: var(--stone-100);
+}
+.customTag {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--fg-3);
+  text-transform: uppercase;
+}
+.viewSelect {
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  font-size: var(--t-xs);
+  padding: var(--s-2);
+  color: var(--fg-2);
+}
+
+.bulkBar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--citrate-green-tint);
+  border: 1px solid var(--citrate-green);
+  border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--citrate-green-dark);
+}
+.bulkInput {
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-1);
+  padding: 4px 8px;
+  font-size: var(--t-xs);
+  background: var(--paper-pure);
+}
+
+.tableWrap {
+  overflow: auto;
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+.th {
+  text-align: left;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--border-2);
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--paper-2);
+}
+.th:hover {
+  color: var(--fg-1);
+}
+.sortDir {
+  margin-left: 4px;
+  font-size: 9px;
+}
+.tr:hover {
+  background: var(--stone-100);
+}
+.td {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--border-2);
+  cursor: pointer;
+  color: var(--fg-1);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.firstCell {
+  font-weight: 600;
+}
+.dash {
+  color: var(--fg-3);
+}
+.checkCol {
+  width: 36px;
+  text-align: center;
+  padding: var(--s-2);
+  border-bottom: 1px solid var(--border-2);
+}
+.truncated {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.myViews {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.viewChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--stone-100);
+  border-radius: var(--r-1);
+  padding: 2px 7px;
+  color: var(--fg-2);
+}
+.viewX {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--fg-3);
+  padding: 0;
+  display: inline-flex;
+}
+.viewX:hover {
+  color: var(--danger);
+}

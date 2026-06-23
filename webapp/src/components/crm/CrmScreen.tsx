@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Btn, DataChip } from "@/components/primitives";
 import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
+import { CrmTable } from "./CrmTable";
 import type { DealStage } from "@/lib/domain/enums";
 import s from "@/components/common/screen.module.css";
 import styles from "./CrmScreen.module.css";
@@ -34,7 +35,7 @@ export interface UiContact {
   accountName: string | null;
 }
 
-type CrmView = "pipeline" | "accounts" | "contacts";
+type CrmView = "pipeline" | "accounts" | "deals" | "contacts";
 
 const COLUMNS: KanbanColumn[] = [
   { key: "Lead", label: "Lead", accent: "var(--stone-400)" },
@@ -81,6 +82,7 @@ export function CrmScreen({
   const VIEWS: { key: CrmView; label: string; count: number }[] = [
     { key: "pipeline", label: "Pipeline", count: dealList.length },
     { key: "accounts", label: "Accounts", count: accounts.length },
+    { key: "deals", label: "Deals", count: dealList.length },
     { key: "contacts", label: "Contacts", count: contacts.length },
   ];
 
@@ -129,28 +131,13 @@ export function CrmScreen({
             </Link>
           )}
         />
-      ) : view === "accounts" ? (
-        <div className={styles.recordGrid}>
-          {accounts.map((a) => (
-            <Link key={a.id} href={`/w/${workspaceSlug}/crm/accounts/${a.id}`} className={styles.recordCard}>
-              <div className={styles.recordName}>{a.name}</div>
-              {a.domain && <div className={styles.recordMeta}>{a.domain}</div>}
-            </Link>
-          ))}
-        </div>
-      ) : contacts.length === 0 ? (
-        <div className={s.empty}>No contacts yet.</div>
       ) : (
-        <div className={styles.recordGrid}>
-          {contacts.map((c) => (
-            <Link key={c.id} href={`/w/${workspaceSlug}/crm/contacts/${c.id}`} className={styles.recordCard}>
-              <div className={styles.recordName}>{c.name}</div>
-              <div className={styles.recordMeta}>
-                {[c.title, c.accountName].filter(Boolean).join(" · ") || "—"}
-              </div>
-            </Link>
-          ))}
-        </div>
+        <CrmTable
+          workspaceId={workspaceId}
+          slug={workspaceSlug}
+          entity={view === "accounts" ? "account" : view === "deals" ? "deal" : "contact"}
+          canEdit={canEdit}
+        />
       )}
 
       {newAccount && (

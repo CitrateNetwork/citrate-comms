@@ -825,3 +825,20 @@ export const crmRecordTags = pgTable(
   },
   (t) => [primaryKey({ columns: [t.entity, t.recordId, t.tagId] }), index("crm_record_tags_ws").on(t.workspaceId)],
 );
+
+/** Saved table views (column choice + sort + search) per entity. (COMMS-CRM-DEPTH D4)
+ *  config_json holds non-PII view config (column keys, sort dir, the user's own search). */
+export const crmViews = pgTable(
+  "crm_views",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    entity: text("entity").notNull(),
+    name: text("name").notNull(),
+    ownerSub: text("owner_sub").notNull(),
+    configJson: jsonb("config_json").notNull(),
+    shared: boolean("shared").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("crm_views_ws_entity").on(t.workspaceId, t.entity)],
+);

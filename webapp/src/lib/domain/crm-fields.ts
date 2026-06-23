@@ -183,6 +183,22 @@ function decodeValue(workspaceId: string, enc: string | null): string | null {
   }
 }
 
+/** Human display for a decrypted canonical value, per field type (option keys→labels,
+ *  booleans→Yes/No, dates formatted). Used by record files + table cells. */
+export function formatFieldDisplay(def: FieldDef, raw: string | null): string {
+  if (raw == null || raw === "") return "";
+  if (def.type === "boolean") return raw === "true" ? "Yes" : "No";
+  if (def.type === "select") return def.options.find((o) => o.key === raw)?.label ?? raw;
+  if (def.type === "multiselect") {
+    return raw.split(",").map((k) => def.options.find((o) => o.key === k.trim())?.label ?? k.trim()).join(", ");
+  }
+  if (def.type === "date") {
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : raw;
+  }
+  return raw;
+}
+
 /** Enabled custom field keys per entity — for the agents' dynamic crm.write schema. */
 export async function loadFieldDefsByEntity(
   workspaceId: string,

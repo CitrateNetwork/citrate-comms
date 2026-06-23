@@ -125,6 +125,24 @@ export const approvalDecisionSchema = z.object({
   decision: z.enum(["approved", "rejected"]),
 });
 
+// --- CRM views + bulk actions (D4) ---
+export const crmViewSaveSchema = z.object({
+  entity: z.enum(["account", "deal", "contact"]),
+  name: z.string().trim().min(1).max(80),
+  shared: z.boolean().optional(),
+  config: z.object({
+    columns: z.array(z.string().max(60)).max(60),
+    sort: z.object({ key: z.string().max(60), dir: z.enum(["asc", "desc"]) }).optional(),
+    search: z.string().max(200).optional(),
+  }),
+});
+export const crmViewDeleteSchema = z.object({ viewId: z.string().uuid() });
+export const crmBulkTagSchema = z.object({
+  recordIds: z.array(z.string().uuid()).min(1).max(500),
+  tagId: z.string().uuid().optional(),
+  label: z.string().trim().min(1).max(40).optional(),
+});
+
 // --- Settings ---
 export const updateSettingsSchema = z.object({
   notifications: z.record(z.string(), z.enum(["all", "mentions", "mute"])).optional(),

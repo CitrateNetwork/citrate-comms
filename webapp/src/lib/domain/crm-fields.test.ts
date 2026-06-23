@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { encodeValue, type FieldDef } from "./crm-fields";
+import { encodeValue, formatFieldDisplay, type FieldDef } from "./crm-fields";
 import { decryptField } from "@/lib/security/crypto";
 import { defaultSensitive } from "./crm-enums";
 
@@ -67,5 +67,21 @@ describe("custom-field value encoding (encrypt canonical, index controlled forms
     expect(defaultSensitive("select")).toBe(false);
     expect(defaultSensitive("number")).toBe(false);
     expect(defaultSensitive("url")).toBe(false);
+  });
+});
+
+describe("formatFieldDisplay (table + record cells)", () => {
+  const withOptions = (type: FieldDef["type"], options: { key: string; label: string }[] = []) => def({ type, options });
+  it("maps select/multiselect keys to labels", () => {
+    const d = withOptions("select", [{ key: "customer", label: "Customer" }]);
+    expect(formatFieldDisplay(d, "customer")).toBe("Customer");
+    const m = withOptions("multiselect", [{ key: "a", label: "Alpha" }, { key: "b", label: "Beta" }]);
+    expect(formatFieldDisplay(m, "a,b")).toBe("Alpha, Beta");
+  });
+  it("formats booleans and dates, passes through text, blanks empty", () => {
+    expect(formatFieldDisplay(withOptions("boolean"), "true")).toBe("Yes");
+    expect(formatFieldDisplay(withOptions("date"), "2026-01-02T00:00:00Z")).toBe("2026-01-02");
+    expect(formatFieldDisplay(withOptions("text"), "hello")).toBe("hello");
+    expect(formatFieldDisplay(withOptions("text"), null)).toBe("");
   });
 });

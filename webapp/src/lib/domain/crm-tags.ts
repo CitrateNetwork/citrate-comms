@@ -75,6 +75,37 @@ export async function tagRecord(args: {
   });
 }
 
+/** Apply one tag to many records at once (D4 bulk action). */
+export async function bulkTagRecords(args: {
+  workspaceId: string;
+  entity: CrmEntity;
+  recordIds: string[];
+  tagId: string;
+  actorSub: string;
+}): Promise<number> {
+  if (args.recordIds.length === 0) return 0;
+  await db()
+    .insert(crmRecordTags)
+    .values(args.recordIds.map((recordId) => ({ workspaceId: args.workspaceId, entity: args.entity, recordId, tagId: args.tagId })))
+    .onConflictDoNothing();
+  const [tag] = await db()
+    .select({ label: crmTags.label })
+    .from(crmTags)
+    .where(and(eq(crmTags.workspaceId, args.workspaceId), eq(crmTags.id, args.tagId)))
+    .limit(1);
+  for (const recordId of args.recordIds) {
+    await recordActivity({
+      workspaceId: args.workspaceId,
+      entity: args.entity,
+      recordId,
+      actorSub: args.actorSub,
+      input: { kind: "tagged", tag: tag?.label ?? "tag" },
+      meta: { tagId: args.tagId },
+    });
+  }
+  return args.recordIds.length;
+}
+
 export async function untagRecord(workspaceId: string, entity: CrmEntity, recordId: string, tagId: string): Promise<void> {
   await db()
     .delete(crmRecordTags)
