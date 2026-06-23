@@ -21,7 +21,7 @@ describe("comms tool registry — single source of truth", () => {
     expect(Object.keys(onlyCrm)).toEqual(["crm.read"]);
 
     // A persona that only declares not-yet-implemented tools gets an empty (safe) set.
-    const future = citrateCommsTools({ ...base, allow: new Set<ToolName>(["web.search", "terminal.exec"]) });
+    const future = citrateCommsTools({ ...base, allow: new Set<ToolName>(["pm.read", "ledger.write"]) });
     expect(Object.keys(future)).toEqual([]);
   });
 

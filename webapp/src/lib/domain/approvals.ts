@@ -19,6 +19,7 @@ import { setFieldValue, listFieldDefs } from "./crm-fields";
 import { updateAccount, updateDeal, updateContact } from "./crm";
 import { recordActivity } from "./crm-activity";
 import { getMemoryStore, neonMemoryStore, type MemoryAnchor, type TrustTier } from "@/lib/memory";
+import { terminalExec, codeRun } from "@/lib/ai/runner";
 import type { CrmEntity, CrmNoteType } from "./crm-enums";
 
 /** The executable spec stored (encrypted) on an approval and applied on approve. */
@@ -26,7 +27,9 @@ export type AgentAction =
   | { kind: "crm.note"; entity: CrmEntity; recordId: string; type: CrmNoteType; title?: string; body: string }
   | { kind: "crm.field"; entity: CrmEntity; recordId: string; fieldKey: string; value: string }
   | { kind: "crm.standard"; entity: CrmEntity; recordId: string; patch: { name?: string; domain?: string; title?: string; valueMinor?: number } }
-  | { kind: "memory.assert"; repo: string; nodeKind: string; content: string; anchors?: MemoryAnchor[]; confidence?: number };
+  | { kind: "memory.assert"; repo: string; nodeKind: string; content: string; anchors?: MemoryAnchor[]; confidence?: number }
+  | { kind: "runner.terminal"; cmd: string; cwd?: string }
+  | { kind: "runner.code"; lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] };
 
 export type Risk = "low" | "medium" | "high";
 
@@ -35,6 +38,8 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "crm.field": "medium",
   "crm.standard": "medium",
   "memory.assert": "low",
+  "runner.terminal": "high",
+  "runner.code": "high",
 };
 
 export interface EnqueueArgs {
@@ -102,6 +107,10 @@ function describe(action: AgentAction): string {
       return `Update ${action.entity}: ${truncate(JSON.stringify(action.patch))}`;
     case "memory.assert":
       return `Assert to knowledge graph (${action.nodeKind}): ${truncate(action.content)}`;
+    case "runner.terminal":
+      return `Run in sandbox: ${truncate(action.cmd)}`;
+    case "runner.code":
+      return `Run ${action.lang} in sandbox: ${truncate(action.source)}`;
   }
 }
 function truncate(s: string, n = 140): string {
@@ -168,7 +177,13 @@ export async function decideApproval(
   } catch {
     return { ok: false, error: "bad_payload" };
   }
-  const result = await executeAction(workspaceId, action, { bySub: appr.requestedBySub, personaId: appr.personaId });
+  let result: unknown;
+  try {
+    result = await executeAction(workspaceId, action, { bySub: appr.requestedBySub, personaId: appr.personaId });
+  } catch {
+    // Execution failed (e.g. runner unreachable) — keep it pending so it can be retried.
+    return { ok: false, error: "execution_failed" };
+  }
   await db().update(agentApprovals).set({ status: "approved", decidedBySub: decidedBy, decidedAt: new Date() }).where(eq(agentApprovals.id, approvalId));
   await db().update(agentToolCalls).set({ approvalStatus: "approved" }).where(eq(agentToolCalls.id, appr.toolCallId));
   await finishToolCall(appr.toolCallId, result);
@@ -226,5 +241,9 @@ async function executeAction(
       }
       return { nodeId: node.id };
     }
+    case "runner.terminal":
+      return terminalExec(action.cmd, action.cwd);
+    case "runner.code":
+      return codeRun(action.lang, action.source, action.files);
   }
 }
