@@ -11,9 +11,10 @@
  */
 import { blake3 } from "@noble/hashes/blake3";
 import { bytesToHex } from "@noble/hashes/utils";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull, cosineDistance } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { memoryNodes, memoryEdges } from "@/lib/db/schema";
+import { embedOne } from "@/lib/ai/embeddings";
 import { encryptField, decryptField, signWorkspace, verifyWorkspaceSig } from "@/lib/security/crypto";
 import {
   type MemoryStore,
@@ -67,6 +68,41 @@ export class NeonMemoryStore implements MemoryStore {
 
   async recall(repo: string, q: RecallQuery): Promise<RecallResult> {
     const workspaceId = repoWorkspace(repo);
+    const budget = Math.min(Math.max(q.budget ?? 6, 1), 50);
+
+    // Prefer semantic recall (pgvector) when the query embeds; else lexical fallback.
+    const qVec = q.query ? await embedOne(q.query).catch(() => null) : null;
+
+    if (qVec) {
+      const rows = await db()
+        .select()
+        .from(memoryNodes)
+        .where(
+          and(
+            eq(memoryNodes.workspaceId, workspaceId),
+            eq(memoryNodes.repo, repo),
+            eq(memoryNodes.status, "active"),
+            isNotNull(memoryNodes.embedding),
+          ),
+        )
+        .orderBy(cosineDistance(memoryNodes.embedding, qVec)) // closest first
+        .limit(Math.min(budget * 4, RECALL_WINDOW));
+      const items = rows
+        .map((r, rank) => {
+          const content = safeDecrypt(workspaceId, r.contentEnc);
+          const anchors = (r.anchorsJson as MemoryAnchor[] | null) ?? [];
+          const tier = r.trustTier as TrustTier;
+          return { node: toNode(r, content, anchors, tier), tier, anchored: anchorMatch(q.anchors, anchors), rank };
+        })
+        .filter((s) => meetsTrustFloor(s.tier, q.trustFloor))
+        // Keep similarity order; lift anchor-matching items to the front (stable).
+        .sort((a, b) => b.anchored - a.anchored || a.rank - b.rank)
+        .slice(0, budget)
+        .map((s) => s.node);
+      if (items.length > 0) return { items, source: "neon" };
+      // fall through to lexical if the vector window had nothing usable
+    }
+
     const rows = await db()
       .select()
       .from(memoryNodes)
@@ -75,8 +111,6 @@ export class NeonMemoryStore implements MemoryStore {
       .limit(RECALL_WINDOW);
 
     const qTokens = tokens(q.query ?? "");
-    const budget = Math.min(Math.max(q.budget ?? 6, 1), 50);
-
     const scored = rows
       .map((r) => {
         const content = safeDecrypt(workspaceId, r.contentEnc);
@@ -114,6 +148,8 @@ export class NeonMemoryStore implements MemoryStore {
     const signature = signWorkspace(workspaceId, hash);
     const anchors = node.anchors ?? [];
     const tier: TrustTier = node.trustTier ?? "agent-asserted";
+    // Best-effort embedding for semantic recall; null until the gateway serves bge.
+    const embedding = await embedOne(node.content).catch(() => null);
     const [r] = await db()
       .insert(memoryNodes)
       .values({
@@ -127,6 +163,7 @@ export class NeonMemoryStore implements MemoryStore {
         confidence: clampPct(node.confidence ?? 50),
         signature,
         contentHash: hash,
+        embedding,
         createdBySub: by.sub,
       })
       .returning();
