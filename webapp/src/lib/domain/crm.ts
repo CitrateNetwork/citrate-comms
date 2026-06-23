@@ -7,6 +7,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { accounts, contacts, deals } from "@/lib/db/schema";
 import { DEAL_STAGES, type DealStage } from "./enums";
+import { recordActivity } from "./crm-activity";
 
 export { DEAL_STAGES };
 export type { DealStage };
@@ -42,7 +43,18 @@ export async function createAccount(workspaceId: string, name: string, domain: s
     .insert(accounts)
     .values({ workspaceId, name: name.trim(), domain: domain?.trim() || null, ownerSub })
     .returning({ id: accounts.id, name: accounts.name, domain: accounts.domain, ownerSub: accounts.ownerSub });
+  await recordActivity({ workspaceId, entity: "account", recordId: row!.id, actorSub: ownerSub, input: { kind: "created" } });
   return row!;
+}
+
+/** A single account in a workspace, or null. */
+export async function getAccount(workspaceId: string, id: string): Promise<AccountRow | null> {
+  const [row] = await db()
+    .select({ id: accounts.id, name: accounts.name, domain: accounts.domain, ownerSub: accounts.ownerSub })
+    .from(accounts)
+    .where(and(eq(accounts.workspaceId, workspaceId), eq(accounts.id, id)))
+    .limit(1);
+  return row ?? null;
 }
 
 export async function listDeals(workspaceId: string): Promise<DealRow[]> {
@@ -83,6 +95,7 @@ export async function createDeal(args: {
     })
     .returning();
   const [acct] = await db().select({ name: accounts.name }).from(accounts).where(eq(accounts.id, args.accountId)).limit(1);
+  await recordActivity({ workspaceId: args.workspaceId, entity: "deal", recordId: row!.id, actorSub: args.ownerSub, input: { kind: "created" } });
   return {
     id: row!.id,
     accountId: row!.accountId,
@@ -95,12 +108,66 @@ export async function createDeal(args: {
   };
 }
 
-/** Move a deal to a new pipeline stage. */
-export async function moveDealStage(workspaceId: string, dealId: string, stage: DealStage): Promise<void> {
+/** A single deal (with its account name), or null. */
+export async function getDeal(workspaceId: string, id: string): Promise<DealRow | null> {
+  const [row] = await db()
+    .select({
+      id: deals.id,
+      accountId: deals.accountId,
+      accountName: accounts.name,
+      name: deals.name,
+      valueMinor: deals.valueMinor,
+      stage: deals.stage,
+      ownerSub: deals.ownerSub,
+      linkedChannelId: deals.linkedChannelId,
+    })
+    .from(deals)
+    .leftJoin(accounts, eq(deals.accountId, accounts.id))
+    .where(and(eq(deals.workspaceId, workspaceId), eq(deals.id, id)))
+    .limit(1);
+  return row ? { ...row, stage: row.stage as DealStage } : null;
+}
+
+/** Deals under a given account. */
+export async function listDealsForAccount(workspaceId: string, accountId: string): Promise<DealRow[]> {
+  const rows = await db()
+    .select({
+      id: deals.id,
+      accountId: deals.accountId,
+      accountName: accounts.name,
+      name: deals.name,
+      valueMinor: deals.valueMinor,
+      stage: deals.stage,
+      ownerSub: deals.ownerSub,
+      linkedChannelId: deals.linkedChannelId,
+    })
+    .from(deals)
+    .leftJoin(accounts, eq(deals.accountId, accounts.id))
+    .where(and(eq(deals.workspaceId, workspaceId), eq(deals.accountId, accountId)))
+    .orderBy(asc(deals.createdAt));
+  return rows.map((r) => ({ ...r, stage: r.stage as DealStage }));
+}
+
+/** Move a deal to a new pipeline stage (records a value-free activity entry). */
+export async function moveDealStage(workspaceId: string, dealId: string, stage: DealStage, actorSub?: string): Promise<void> {
+  const [prev] = await db()
+    .select({ stage: deals.stage })
+    .from(deals)
+    .where(and(eq(deals.workspaceId, workspaceId), eq(deals.id, dealId)))
+    .limit(1);
   await db()
     .update(deals)
     .set({ stage })
     .where(and(eq(deals.workspaceId, workspaceId), eq(deals.id, dealId)));
+  if (prev && prev.stage !== stage) {
+    await recordActivity({
+      workspaceId,
+      entity: "deal",
+      recordId: dealId,
+      actorSub: actorSub ?? null,
+      input: { kind: "stage_changed", from: prev.stage, to: stage },
+    });
+  }
 }
 
 export interface ContactRow {
@@ -108,16 +175,52 @@ export interface ContactRow {
   name: string;
   title: string | null;
   accountId: string | null;
+  accountName?: string | null;
   ownerSub: string | null;
 }
 
 export async function listContacts(workspaceId: string): Promise<ContactRow[]> {
   const rows = await db()
-    .select({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub })
+    .select({
+      id: contacts.id,
+      name: contacts.name,
+      title: contacts.title,
+      accountId: contacts.accountId,
+      accountName: accounts.name,
+      ownerSub: contacts.ownerSub,
+    })
     .from(contacts)
+    .leftJoin(accounts, eq(contacts.accountId, accounts.id))
     .where(eq(contacts.workspaceId, workspaceId))
     .orderBy(asc(contacts.name));
   return rows;
+}
+
+/** A single contact (with its account name), or null. */
+export async function getContact(workspaceId: string, id: string): Promise<ContactRow | null> {
+  const [row] = await db()
+    .select({
+      id: contacts.id,
+      name: contacts.name,
+      title: contacts.title,
+      accountId: contacts.accountId,
+      accountName: accounts.name,
+      ownerSub: contacts.ownerSub,
+    })
+    .from(contacts)
+    .leftJoin(accounts, eq(contacts.accountId, accounts.id))
+    .where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.id, id)))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Contacts under a given account. */
+export async function listContactsForAccount(workspaceId: string, accountId: string): Promise<ContactRow[]> {
+  return db()
+    .select({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub })
+    .from(contacts)
+    .where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.accountId, accountId)))
+    .orderBy(asc(contacts.name));
 }
 
 export async function createContact(args: {
@@ -137,5 +240,6 @@ export async function createContact(args: {
       ownerSub: args.ownerSub,
     })
     .returning({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub });
+  await recordActivity({ workspaceId: args.workspaceId, entity: "contact", recordId: row!.id, actorSub: args.ownerSub, input: { kind: "created" } });
   return row!;
 }

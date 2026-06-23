@@ -44,7 +44,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const ctx = await requireCapability(req, id, Capability.CreateRecord);
     const parsed = moveDealSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
-    await moveDealStage(id, parsed.data.dealId, parsed.data.stage);
+    await moveDealStage(id, parsed.data.dealId, parsed.data.stage, ctx.sub);
     await appendAudit({ workspaceId: id, actorSub: ctx.sub, event: "deal_stage_changed", target: `${parsed.data.dealId}:${parsed.data.stage}` });
     return NextResponse.json({ ok: true });
   } catch (e) {

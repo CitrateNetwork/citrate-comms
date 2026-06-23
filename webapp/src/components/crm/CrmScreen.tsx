@@ -6,6 +6,7 @@
  * stages to advance it (persisted + audited).
  */
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Btn, DataChip } from "@/components/primitives";
 import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
@@ -26,6 +27,14 @@ export interface UiDeal {
   name: string;
   valueMinor: number;
 }
+export interface UiContact {
+  id: string;
+  name: string;
+  title: string | null;
+  accountName: string | null;
+}
+
+type CrmView = "pipeline" | "accounts" | "contacts";
 
 const COLUMNS: KanbanColumn[] = [
   { key: "Lead", label: "Lead", accent: "var(--stone-400)" },
@@ -41,19 +50,24 @@ function money(minor: number): string {
 
 export function CrmScreen({
   workspaceId,
+  workspaceSlug,
   canEdit,
   accounts,
   deals,
+  contacts = [],
 }: {
   workspaceId: string;
+  workspaceSlug: string;
   canEdit: boolean;
   accounts: UiAccount[];
   deals: UiDeal[];
+  contacts?: UiContact[];
 }) {
   const router = useRouter();
   const [dealList, setDealList] = useState<UiDeal[]>(deals);
   const [newAccount, setNewAccount] = useState(false);
   const [newDeal, setNewDeal] = useState(false);
+  const [view, setView] = useState<CrmView>("pipeline");
 
   async function move(dealId: string, toStage: string) {
     setDealList((prev) => prev.map((d) => (d.id === dealId ? { ...d, column: toStage } : d)));
@@ -63,6 +77,12 @@ export function CrmScreen({
       body: JSON.stringify({ dealId, stage: toStage as DealStage }),
     }).catch(() => router.refresh());
   }
+
+  const VIEWS: { key: CrmView; label: string; count: number }[] = [
+    { key: "pipeline", label: "Pipeline", count: dealList.length },
+    { key: "accounts", label: "Accounts", count: accounts.length },
+    { key: "contacts", label: "Contacts", count: contacts.length },
+  ];
 
   return (
     <div className={s.wrap}>
@@ -83,24 +103,54 @@ export function CrmScreen({
         )}
       </header>
 
+      <div className={styles.viewTabs}>
+        {VIEWS.map((v) => (
+          <button key={v.key} className={`${styles.viewTab} ${view === v.key ? styles.viewActive : ""}`} onClick={() => setView(v.key)}>
+            {v.label} <span className={styles.viewCount}>{v.count}</span>
+          </button>
+        ))}
+      </div>
+
       {accounts.length === 0 ? (
         <div className={s.empty}>
           No accounts yet. {canEdit ? "Create an account, then add deals under it." : "An admin will add accounts."}
         </div>
-      ) : (
+      ) : view === "pipeline" ? (
         <Kanban
           columns={COLUMNS}
           items={dealList}
           emptyHint="No deals"
           onMove={canEdit ? move : () => {}}
           renderCard={(d) => (
-            <div className={styles.dealCard}>
+            <Link href={`/w/${workspaceSlug}/crm/deals/${d.id}`} className={styles.dealCard}>
               <div className={styles.dealName}>{d.name}</div>
               {d.accountName && <DataChip>{d.accountName}</DataChip>}
               <div className={styles.dealValue}>{money(d.valueMinor)}</div>
-            </div>
+            </Link>
           )}
         />
+      ) : view === "accounts" ? (
+        <div className={styles.recordGrid}>
+          {accounts.map((a) => (
+            <Link key={a.id} href={`/w/${workspaceSlug}/crm/accounts/${a.id}`} className={styles.recordCard}>
+              <div className={styles.recordName}>{a.name}</div>
+              {a.domain && <div className={styles.recordMeta}>{a.domain}</div>}
+            </Link>
+          ))}
+        </div>
+      ) : contacts.length === 0 ? (
+        <div className={s.empty}>No contacts yet.</div>
+      ) : (
+        <div className={styles.recordGrid}>
+          {contacts.map((c) => (
+            <Link key={c.id} href={`/w/${workspaceSlug}/crm/contacts/${c.id}`} className={styles.recordCard}>
+              <div className={styles.recordName}>{c.name}</div>
+              <div className={styles.recordMeta}>
+                {[c.title, c.accountName].filter(Boolean).join(" · ") || "—"}
+              </div>
+            </Link>
+          ))}
+        </div>
       )}
 
       {newAccount && (

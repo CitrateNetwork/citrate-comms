@@ -2,7 +2,8 @@ import { redirect, notFound } from "next/navigation";
 import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
-import { listAccounts, listDeals } from "@/lib/domain/crm";
+import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
+import { seedDefaultCrmFields } from "@/lib/domain/crm-fields";
 import { can, Capability } from "@/lib/rbac/matrix";
 import { CrmScreen } from "@/components/crm/CrmScreen";
 
@@ -18,11 +19,16 @@ export default async function CrmPage({ params }: { params: Promise<{ slug: stri
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
 
-  const [accounts, deals] = await Promise.all([listAccounts(ws.id), listDeals(ws.id)]);
+  // Seed the default custom-field defs on first visit (idempotent), so records are rich
+  // out of the box. Best-effort — never block the screen.
+  await seedDefaultCrmFields(ws.id, sub).catch(() => {});
+
+  const [accounts, deals, contacts] = await Promise.all([listAccounts(ws.id), listDeals(ws.id), listContacts(ws.id)]);
 
   return (
     <CrmScreen
       workspaceId={ws.id}
+      workspaceSlug={slug}
       canEdit={can(ctx.role, Capability.CreateRecord)}
       accounts={accounts.map((a) => ({ id: a.id, name: a.name, domain: a.domain }))}
       deals={deals.map((d) => ({
@@ -33,6 +39,7 @@ export default async function CrmPage({ params }: { params: Promise<{ slug: stri
         name: d.name,
         valueMinor: d.valueMinor,
       }))}
+      contacts={contacts.map((c) => ({ id: c.id, name: c.name, title: c.title, accountName: c.accountName ?? null }))}
     />
   );
 }

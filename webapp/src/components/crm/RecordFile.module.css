@@ -1,0 +1,293 @@
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--border-2);
+}
+.headTop {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.back,
+.askLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-decoration: none;
+}
+.back:hover,
+.askLink:hover {
+  color: var(--citrate-green-dark);
+}
+.headMain {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+}
+.headText {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.title {
+  font-size: var(--t-xl);
+  font-weight: 700;
+  margin: 0;
+}
+.subtitle {
+  color: var(--fg-3);
+  font-size: var(--t-sm);
+}
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-top: 2px;
+}
+.tag {
+  font-size: var(--t-xs);
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  border-radius: var(--r-1);
+  padding: 1px 7px;
+}
+.stats {
+  display: flex;
+  gap: var(--s-5);
+  flex-wrap: wrap;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+}
+.statLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+.statValue {
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+
+.tabs {
+  display: flex;
+  gap: var(--s-1);
+  border-bottom: 1px solid var(--border-2);
+  overflow-x: auto;
+  margin-top: var(--s-3);
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  padding: var(--s-3) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.tab:hover {
+  color: var(--fg-1);
+}
+.tabActive {
+  color: var(--citrate-green-dark);
+  border-bottom-color: var(--citrate-green-deep);
+  font-weight: 600;
+}
+.tabCount {
+  font-size: 10px;
+  background: var(--stone-100);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--fg-2);
+}
+
+.body {
+  padding: var(--s-4) 0;
+  overflow-y: auto;
+}
+
+/* Overview fields */
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s-3);
+}
+.fieldRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-3);
+  background: var(--paper-pure);
+}
+.fieldLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+.fieldValue {
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  word-break: break-word;
+}
+
+/* Notes */
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.note {
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-3);
+  background: var(--paper-pure);
+}
+.noteHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+}
+.noteWhen,
+.actWhen {
+  margin-left: auto;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.noteTitle {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.noteBody {
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  white-space: pre-wrap;
+}
+
+/* Activity */
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.act {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) 0;
+  font-size: var(--t-sm);
+  border-bottom: 1px dashed var(--border-2);
+}
+.actDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--citrate-green-deep);
+  flex: 0 0 auto;
+}
+.actSummary {
+  color: var(--fg-1);
+}
+
+/* Related */
+.related {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.relLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  margin-bottom: var(--s-2);
+}
+.relItem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  text-decoration: none;
+  color: var(--fg-1);
+  margin-bottom: var(--s-1);
+  background: var(--paper-pure);
+}
+.relItem:hover {
+  border-color: var(--citrate-green-deep);
+}
+.relName {
+  flex: 1;
+  font-size: var(--t-sm);
+}
+.relEmpty {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+
+/* Documents */
+.docs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.doc {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  text-decoration: none;
+  color: var(--fg-1);
+  font-size: var(--t-sm);
+}
+.docName {
+  flex: 1;
+}
+.docMime {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+
+/* Memories */
+.mems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.mem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+}
+.memBody {
+  flex: 1;
+  font-size: var(--t-sm);
+}
+.memTier {
+  font-size: 10px;
+  color: var(--citrate-green-dark);
+  background: var(--citrate-green-tint);
+  border-radius: var(--r-1);
+  padding: 1px 6px;
+  white-space: nowrap;
+}

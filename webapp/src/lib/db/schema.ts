@@ -691,3 +691,134 @@ export const agentKeys = pgTable(
   },
   (t) => [uniqueIndex("agent_keys_ws_persona_purpose").on(t.workspaceId, t.personaId, t.purpose)],
 );
+
+// ── CRM depth (COMMS-CRM-DEPTH) ──────────────────────────────────────────────
+//
+// Each account/deal/contact becomes a deep, clickable FILE: a full admin-defined
+// custom-field engine + a typed notes/journal timeline + an automatic, value-free
+// activity feed + tags. Free-text/PII columns are `_enc` (per-workspace AES-256-GCM);
+// only controlled/derived values (option keys, numbers, dates, non-PII activity
+// summaries) are cleartext so they stay queryable without decrypting.
+// `crm_entity` ∈ {account, deal, contact}.
+
+/** Admin-defined custom field DEFINITIONS, per workspace + entity. Drive the dynamic
+ *  forms, the L0 column chooser, AND the agents' dynamic tool input schemas. */
+export const crmFieldDefs = pgTable(
+  "crm_field_defs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    entity: text("entity").notNull(), // account|deal|contact
+    key: text("key").notNull(), // stable machine key, e.g. industry
+    label: text("label").notNull(),
+    type: text("type").notNull(), // text|longtext|number|currency|date|select|multiselect|boolean|url|email|phone|user
+    optionsJson: jsonb("options_json"), // [{key,label}] for select/multiselect
+    required: boolean("required").notNull().default(false),
+    sensitive: boolean("sensitive").notNull().default(true), // encrypt-only; false ⇒ also index value_key/value_num
+    ord: integer("ord").notNull().default(0),
+    enabled: boolean("enabled").notNull().default(true),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("crm_field_defs_ws_entity_key").on(t.workspaceId, t.entity, t.key)],
+);
+
+/** Custom field VALUES. `value_enc` always holds the canonical (encrypted) value;
+ *  `value_key`/`value_num` hold controlled/numeric/date forms for query+sort. */
+export const crmFieldValues = pgTable(
+  "crm_field_values",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    entity: text("entity").notNull(),
+    recordId: uuid("record_id").notNull(),
+    fieldId: uuid("field_id").notNull().references(() => crmFieldDefs.id),
+    valueEnc: text("value_enc"), // ciphertext (free-text/PII; canonical value)
+    valueKey: text("value_key"), // option key(s) for select/multiselect (non-PII, queryable)
+    valueNum: bigint("value_num", { mode: "number" }), // number/currency (×100) or date epoch-ms
+    updatedBySub: text("updated_by_sub").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("crm_field_values_record_field").on(t.workspaceId, t.recordId, t.fieldId),
+    index("crm_field_values_ws_entity").on(t.workspaceId, t.entity, t.recordId),
+  ],
+);
+
+/** Typed journal/notes timeline per record (encrypted free-text). */
+export const crmNotes = pgTable(
+  "crm_notes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    entity: text("entity").notNull(),
+    recordId: uuid("record_id").notNull(),
+    type: text("type").notNull(), // note|journal|call|meeting|email
+    titleEnc: text("title_enc"),
+    bodyEnc: text("body_enc").notNull(),
+    authorSub: text("author_sub").notNull(),
+    byAgent: boolean("by_agent").notNull().default(false),
+    personaId: uuid("persona_id").references(() => agentPersonas.id),
+    pinned: boolean("pinned").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("crm_notes_ws_record").on(t.workspaceId, t.entity, t.recordId)],
+);
+
+/** Threaded comments on a note (the deepest drill level). */
+export const crmNoteComments = pgTable(
+  "crm_note_comments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    noteId: uuid("note_id").notNull().references(() => crmNotes.id),
+    bodyEnc: text("body_enc").notNull(),
+    authorSub: text("author_sub").notNull(),
+    byAgent: boolean("by_agent").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("crm_note_comments_note").on(t.noteId)],
+);
+
+/** Automatic, VALUE-FREE activity feed (built from controlled templates — never raw
+ *  values). `meta_json` holds ids/hashes only. */
+export const crmActivity = pgTable(
+  "crm_activity",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    entity: text("entity").notNull(),
+    recordId: uuid("record_id").notNull(),
+    kind: text("kind").notNull(), // created|field_changed|stage_changed|note_added|document_added|contact_linked|tagged|agent_action
+    actorSub: text("actor_sub"),
+    byAgent: boolean("by_agent").notNull().default(false),
+    summary: text("summary").notNull(), // SHORT + VALUE-FREE (e.g. "Stage Lead→Qualified")
+    metaJson: jsonb("meta_json"), // ids/hashes only, never raw values
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("crm_activity_ws_record").on(t.workspaceId, t.entity, t.recordId, t.createdAt)],
+);
+
+/** Tags (categorical labels) for cross-record filtering. */
+export const crmTags = pgTable(
+  "crm_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    label: text("label").notNull(),
+    color: text("color"),
+  },
+  (t) => [uniqueIndex("crm_tags_ws_label").on(t.workspaceId, t.label)],
+);
+
+export const crmRecordTags = pgTable(
+  "crm_record_tags",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    entity: text("entity").notNull(),
+    recordId: uuid("record_id").notNull(),
+    tagId: uuid("tag_id").notNull().references(() => crmTags.id),
+  },
+  (t) => [primaryKey({ columns: [t.entity, t.recordId, t.tagId] }), index("crm_record_tags_ws").on(t.workspaceId)],
+);
