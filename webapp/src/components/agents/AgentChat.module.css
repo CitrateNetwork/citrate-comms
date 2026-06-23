@@ -30,6 +30,27 @@
   font-size: var(--t-xs);
   color: var(--fg-3);
 }
+.headRight {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.capsBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.capsBtn:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-dark);
+}
 .picker {
   height: 32px;
   border: 1px solid var(--border-2);
@@ -38,6 +59,32 @@
   font-size: var(--t-sm);
   color: var(--fg-1);
   padding: 0 var(--s-2);
+}
+.caps {
+  border-bottom: 1px solid var(--border-2);
+  background: var(--paper-2);
+  padding: var(--s-3) var(--s-4);
+}
+.capsTitle {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  margin-bottom: var(--s-2);
+}
+.capsList {
+  margin: 0 0 var(--s-2);
+  padding-left: var(--s-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 2px var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.capsNote {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  line-height: 1.5;
 }
 
 .scroll {
