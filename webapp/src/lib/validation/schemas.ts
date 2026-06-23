@@ -137,6 +137,40 @@ export const approvalDecisionSchema = z.object({
   decision: z.enum(["approved", "rejected"]),
 });
 
+// --- Persona customization (S5) ---
+const personaModelSchema = z.object({
+  gateway: z.string().max(120),
+  frontier: z.string().max(120).optional(),
+  preferFrontier: z.boolean().optional(),
+});
+export const personaUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  model: personaModelSchema.optional(),
+  tools: z.array(z.string().max(40)).max(40).optional(),
+  maxSteps: z.number().int().min(1).max(20).optional(),
+  temperature: z.number().min(0).max(1).optional(),
+  enabled: z.boolean().optional(),
+});
+export const personaPromptSchema = z.object({
+  layer: z.number().int().min(1).max(4),
+  content: z.string().max(20000),
+});
+export const personaSkillSchema = z.object({
+  skillKey: z.string().max(60),
+  enabled: z.boolean(),
+});
+export const personaCloneSchema = z.object({ name: z.string().trim().min(1).max(80) });
+export const personaImportSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  baseTemplate: z.string().max(60).optional(),
+  model: personaModelSchema.optional(),
+  tools: z.array(z.string().max(40)).max(40).optional(),
+  maxSteps: z.number().int().min(1).max(20).optional(),
+  temperature: z.number().min(0).max(1).optional(),
+  layers: z.array(z.object({ layer: z.number().int().min(1).max(4), content: z.string().max(20000) })).max(4).optional(),
+  skills: z.array(z.object({ key: z.string().max(60), enabled: z.boolean() })).max(40).optional(),
+});
+
 // --- CRM views + bulk actions (D4) ---
 export const crmViewSaveSchema = z.object({
   entity: z.enum(["account", "deal", "contact"]),

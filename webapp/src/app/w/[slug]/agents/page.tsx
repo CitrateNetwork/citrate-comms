@@ -39,6 +39,7 @@ export default async function AgentsPage({ params }: { params: Promise<{ slug: s
       workspaceId={ws.id}
       workspaceSlug={slug}
       canManage={can(ctx.role, Capability.AddAgent)}
+      canCustomize={can(ctx.role, Capability.ManageWorkspace)}
       personas={personas.map((p) => ({ id: p.id, name: p.name, key: p.key, baseTemplate: p.baseTemplate, toolCount: p.tools.length }))}
       agents={agents.map((a) => ({
         id: a.id,
