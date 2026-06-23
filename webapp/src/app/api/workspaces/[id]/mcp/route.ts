@@ -14,6 +14,7 @@ import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
 import { citrateCommsTools } from "@/lib/ai/tools";
 import { IMPLEMENTED_TOOLS } from "@/lib/ai/tools";
+import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 
 export const runtime = "nodejs";
 
@@ -27,12 +28,13 @@ interface McpTool {
 }
 type Json = Record<string, unknown>;
 
-function buildTools(workspaceId: string, sub: string) {
+async function buildTools(workspaceId: string, sub: string) {
   return citrateCommsTools({
     workspaceId,
     invokedBySub: sub,
     agentRole: "Agent",
     allow: new Set(IMPLEMENTED_TOOLS),
+    fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   }) as unknown as Record<string, McpTool>;
 }
 
@@ -107,7 +109,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   try {
     const { id } = await params;
     const ctx = await requireMember(req, id);
-    const tools = buildTools(id, ctx.sub);
+    const tools = await buildTools(id, ctx.sub);
     return Response.json({
       name: SERVER_INFO.name,
       version: SERVER_INFO.version,
@@ -141,7 +143,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return Response.json(rpcErr(null, -32000, "Rate limit exceeded"), { status: 429 });
   }
 
-  const tools = buildTools(workspaceId, sub);
+  const tools = await buildTools(workspaceId, sub);
 
   let bodyJson: unknown;
   try {

@@ -22,6 +22,7 @@ import { getInferenceModel } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { citrateCommsTools } from "@/lib/ai/tools";
 import { resolvePersona } from "@/lib/domain/personas";
+import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 import { getOrCreateThread, appendAgentMessage } from "@/lib/domain/agent-threads";
 
 export const runtime = "nodejs";
@@ -107,6 +108,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     threadId,
     agentRole: "Agent",
     allow: new Set(persona.tools),
+    fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   });
 
   const result = streamText({

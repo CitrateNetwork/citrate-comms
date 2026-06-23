@@ -14,6 +14,9 @@ import { tool } from "ai";
 import { z } from "zod";
 import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
+import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
+import { enqueueApproval } from "@/lib/domain/approvals";
+import type { CrmEntity } from "@/lib/domain/crm-enums";
 import { getMemoryStore, neonMemoryStore, crmRepo, type TrustTier } from "@/lib/memory";
 import { logToolCall, finishToolCall, type ToolAuditCtx } from "./audit";
 import type { ToolName } from "./personas";
@@ -27,6 +30,26 @@ export interface ToolContext {
   agentRole: Role;
   /** The persona's tool allow-list. Omitted ⇒ all IMPLEMENTED tools (e.g. MCP). */
   allow?: Set<ToolName>;
+  /** Custom field keys per entity — injected so crm.write advertises valid keys (dynamic schema). */
+  fieldDefsByEntity?: Partial<Record<CrmEntity, { key: string; label: string; type: string }[]>>;
+}
+
+const entitySchema = z.enum(["account", "deal", "contact"]);
+
+/** Compact a full record file for the model (drop heavy doc/memory blobs). */
+function compactFile(file: RecordFile) {
+  return {
+    entity: file.entity,
+    id: file.recordId,
+    title: file.title,
+    subtitle: file.subtitle,
+    stats: file.headerStats,
+    fields: file.fields.filter((f) => f.value != null && f.value !== "").map((f) => ({ label: f.def.label, key: f.def.key, value: f.value })),
+    tags: file.tags.map((t) => t.label),
+    recentNotes: file.notes.slice(0, 5).map((n) => ({ type: n.type, title: n.title, body: n.body, at: n.createdAt })),
+    recentActivity: file.activity.slice(0, 8).map((a) => a.summary),
+    related: file.related.map((g) => ({ label: g.label, items: g.items.map((i) => ({ id: i.id, name: i.name, entity: i.entity })) })),
+  };
 }
 
 class ToolDenied extends Error {}
@@ -67,29 +90,118 @@ export function citrateCommsTools(ctx: ToolContext) {
   const all = {
     "crm.read": tool({
       description:
-        "Read CRM records (accounts, deals, or contacts) in this workspace. Filter by id or a " +
-        "case-insensitive name query. Returns real records — never invent CRM data.",
+        "Read CRM records. With an `id`, returns that record's FULL FILE (standard + custom fields, " +
+        "recent notes/journal, recent activity, tags, related records). Without an `id`, lists records " +
+        "(filter by name `query`). Returns real records — never invent CRM data.",
       inputSchema: z.object({
-        entity: z.enum(["account", "deal", "contact"]).describe("which CRM entity to read"),
-        id: z.string().uuid().optional().describe("a specific record id"),
-        query: z.string().max(200).optional().describe("case-insensitive substring match on name"),
+        entity: entitySchema.describe("which CRM entity to read"),
+        id: z.string().uuid().optional().describe("a specific record id → returns its full file"),
+        query: z.string().max(200).optional().describe("case-insensitive substring match on name (list mode)"),
         limit: z.number().int().min(1).max(50).default(20),
       }),
       execute: audited(
         "crm.read",
         Capability.ReadChannel,
-        async (a: { entity: "account" | "deal" | "contact"; id?: string; query?: string; limit: number }) => {
+        async (a: { entity: CrmEntity; id?: string; query?: string; limit: number }) => {
+          if (a.id) {
+            const file =
+              a.entity === "account"
+                ? await getAccountFile(ctx.workspaceId, a.id)
+                : a.entity === "deal"
+                  ? await getDealFile(ctx.workspaceId, a.id)
+                  : await getContactFile(ctx.workspaceId, a.id);
+            return file ? { record: compactFile(file) } : { error: "record not found" };
+          }
           const q = a.query?.toLowerCase();
           const match = <T extends { id: string; name: string }>(rows: T[]) =>
-            rows
-              .filter((r) => (a.id ? r.id === a.id : true))
-              .filter((r) => (q ? r.name.toLowerCase().includes(q) : true))
-              .slice(0, a.limit);
+            rows.filter((r) => (q ? r.name.toLowerCase().includes(q) : true)).slice(0, a.limit);
           if (a.entity === "account") return { accounts: match(await listAccounts(ctx.workspaceId)) };
           if (a.entity === "deal") return { deals: match(await listDeals(ctx.workspaceId)) };
           return { contacts: match(await listContacts(ctx.workspaceId)) };
         },
       ),
+    }),
+
+    // ── Mutating CRM tools — PROPOSE only; queued for human approval (HITL) ──
+    "crm.note": tool({
+      description:
+        "Propose adding a note/journal/call/meeting/email entry to a CRM record. This does NOT apply " +
+        "immediately — it is queued for a human to approve. Use to log meeting summaries, call notes, and " +
+        "follow-ups onto the record's file.",
+      inputSchema: z.object({
+        entity: entitySchema,
+        recordId: z.string().uuid(),
+        type: z.enum(["note", "journal", "call", "meeting", "email"]).default("note"),
+        title: z.string().max(200).optional(),
+        body: z.string().min(1).max(8000),
+      }),
+      execute: async (a: { entity: CrmEntity; recordId: string; type: "note" | "journal" | "call" | "meeting" | "email"; title?: string; body: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "crm.note",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "crm.note", entity: a.entity, recordId: a.recordId, type: a.type, title: a.title, body: a.body },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval — it will be applied once an admin approves." };
+      },
+    }),
+
+    "crm.write": tool({
+      description:
+        "Propose setting fields on a CRM record (queued for human approval — NOT applied immediately). " +
+        "Provide `standard` (name; domain for account; value in USD for deal; title for contact) and/or " +
+        "`fields` (custom field key/value pairs). Available custom field keys — " +
+        `account: [${(ctx.fieldDefsByEntity?.account ?? []).map((d) => d.key).join(", ") || "none"}]; ` +
+        `deal: [${(ctx.fieldDefsByEntity?.deal ?? []).map((d) => d.key).join(", ") || "none"}]; ` +
+        `contact: [${(ctx.fieldDefsByEntity?.contact ?? []).map((d) => d.key).join(", ") || "none"}].`,
+      inputSchema: z.object({
+        entity: entitySchema,
+        recordId: z.string().uuid(),
+        standard: z
+          .object({
+            name: z.string().max(160).optional(),
+            domain: z.string().max(160).optional(),
+            title: z.string().max(160).optional(),
+            value: z.number().min(0).optional(),
+          })
+          .optional(),
+        fields: z.array(z.object({ key: z.string().max(60), value: z.string().max(8000) })).max(30).optional(),
+      }),
+      execute: async (a: { entity: CrmEntity; recordId: string; standard?: { name?: string; domain?: string; title?: string; value?: number }; fields?: { key: string; value: string }[] }) => {
+        const approvalIds: string[] = [];
+        if (a.standard && Object.values(a.standard).some((v) => v !== undefined)) {
+          const patch = {
+            name: a.standard.name,
+            domain: a.standard.domain,
+            title: a.standard.title,
+            valueMinor: a.standard.value != null ? Math.round(a.standard.value * 100) : undefined,
+          };
+          const { approvalId } = await enqueueApproval({
+            workspaceId: ctx.workspaceId,
+            tool: "crm.write",
+            requestedBySub: ctx.invokedBySub,
+            personaId: ctx.personaId,
+            threadId: ctx.threadId,
+            action: { kind: "crm.standard", entity: a.entity, recordId: a.recordId, patch },
+          });
+          approvalIds.push(approvalId);
+        }
+        for (const f of a.fields ?? []) {
+          const { approvalId } = await enqueueApproval({
+            workspaceId: ctx.workspaceId,
+            tool: "crm.write",
+            requestedBySub: ctx.invokedBySub,
+            personaId: ctx.personaId,
+            threadId: ctx.threadId,
+            action: { kind: "crm.field", entity: a.entity, recordId: a.recordId, fieldKey: f.key, value: f.value },
+          });
+          approvalIds.push(approvalId);
+        }
+        if (approvalIds.length === 0) return { status: "noop", message: "Nothing to change." };
+        return { status: "pending_approval", queued: approvalIds.length, approvalIds, message: "Queued for human approval." };
+      },
     }),
 
     "memory.recall": tool({
@@ -141,4 +253,4 @@ export function citrateCommsTools(ctx: ToolContext) {
 }
 
 /** Tool names the registry currently IMPLEMENTS (others are declared but not yet live). */
-export const IMPLEMENTED_TOOLS: ToolName[] = ["crm.read", "memory.recall"];
+export const IMPLEMENTED_TOOLS: ToolName[] = ["crm.read", "memory.recall", "crm.note", "crm.write"];

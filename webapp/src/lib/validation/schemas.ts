@@ -77,6 +77,54 @@ export const addAgentSchema = z.object({
   purpose: z.string().trim().max(280).optional(),
 });
 
+// --- CRM depth (D2) ---
+const fieldOption = z.object({ key: z.string().min(1).max(60), label: z.string().min(1).max(80) });
+export const crmFieldDefCreateSchema = z.object({
+  entity: z.enum(["account", "deal", "contact"]),
+  key: z.string().trim().min(1).max(60).regex(/^[a-z0-9_]+$/, "lowercase letters, numbers, underscores"),
+  label: z.string().trim().min(1).max(80),
+  type: z.enum(["text", "longtext", "number", "currency", "date", "select", "multiselect", "boolean", "url", "email", "phone", "user"]),
+  options: z.array(fieldOption).max(50).optional(),
+  required: z.boolean().optional(),
+  sensitive: z.boolean().optional(),
+  ord: z.number().int().min(0).max(1000).optional(),
+});
+export const crmFieldDefUpdateSchema = z.object({
+  label: z.string().trim().min(1).max(80).optional(),
+  options: z.array(fieldOption).max(50).optional(),
+  required: z.boolean().optional(),
+  sensitive: z.boolean().optional(),
+  ord: z.number().int().min(0).max(1000).optional(),
+  enabled: z.boolean().optional(),
+});
+export const crmFieldValueSchema = z.object({
+  fieldId: z.string().uuid(),
+  value: z.string().max(20000),
+});
+export const crmNoteSchema = z.object({
+  type: z.enum(["note", "journal", "call", "meeting", "email"]),
+  title: z.string().trim().max(200).optional(),
+  body: z.string().trim().min(1).max(20000),
+});
+export const crmNotePinSchema = z.object({ noteId: z.string().uuid(), pinned: z.boolean() });
+export const crmTagAddSchema = z.object({
+  tagId: z.string().uuid().optional(),
+  label: z.string().trim().min(1).max(40).optional(),
+});
+export const crmTagRemoveSchema = z.object({ tagId: z.string().uuid() });
+export const crmRecordUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  domain: z.string().trim().max(160).optional(),
+  title: z.string().trim().max(160).optional(),
+  valueMinor: z.number().int().min(0).max(1_000_000_000_000).optional(),
+});
+
+// --- Approvals (D3 HITL) ---
+export const approvalDecisionSchema = z.object({
+  approvalId: z.string().uuid(),
+  decision: z.enum(["approved", "rejected"]),
+});
+
 // --- Settings ---
 export const updateSettingsSchema = z.object({
   notifications: z.record(z.string(), z.enum(["all", "mentions", "mute"])).optional(),

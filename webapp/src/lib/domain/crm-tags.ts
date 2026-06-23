@@ -60,7 +60,11 @@ export async function tagRecord(args: {
     .insert(crmRecordTags)
     .values({ workspaceId: args.workspaceId, entity: args.entity, recordId: args.recordId, tagId: args.tagId })
     .onConflictDoNothing();
-  const [tag] = await db().select({ label: crmTags.label }).from(crmTags).where(eq(crmTags.id, args.tagId)).limit(1);
+  const [tag] = await db()
+    .select({ label: crmTags.label })
+    .from(crmTags)
+    .where(and(eq(crmTags.workspaceId, args.workspaceId), eq(crmTags.id, args.tagId)))
+    .limit(1);
   await recordActivity({
     workspaceId: args.workspaceId,
     entity: args.entity,

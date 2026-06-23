@@ -10,7 +10,8 @@ import { db } from "@/lib/db/client";
 import { crmFieldDefs, crmFieldValues } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
-import { type CrmEntity, type CrmFieldType, defaultSensitive } from "./crm-enums";
+import { recordActivity } from "./crm-activity";
+import { CRM_ENTITIES, type CrmEntity, type CrmFieldType, defaultSensitive } from "./crm-enums";
 
 export interface FieldOption {
   key: string;
@@ -95,6 +96,35 @@ export async function createFieldDef(input: CreateFieldDefInput): Promise<FieldD
   return toDef(row!);
 }
 
+export interface UpdateFieldDefPatch {
+  label?: string;
+  options?: FieldOption[];
+  required?: boolean;
+  sensitive?: boolean;
+  ord?: number;
+  enabled?: boolean;
+}
+
+export async function updateFieldDef(workspaceId: string, fieldId: string, patch: UpdateFieldDefPatch, by: string): Promise<void> {
+  const set: Record<string, unknown> = {};
+  if (patch.label !== undefined) set.label = patch.label;
+  if (patch.options !== undefined) set.optionsJson = patch.options;
+  if (patch.required !== undefined) set.required = patch.required;
+  if (patch.sensitive !== undefined) set.sensitive = patch.sensitive;
+  if (patch.ord !== undefined) set.ord = patch.ord;
+  if (patch.enabled !== undefined) set.enabled = patch.enabled;
+  if (Object.keys(set).length === 0) return;
+  await db().update(crmFieldDefs).set(set).where(and(eq(crmFieldDefs.workspaceId, workspaceId), eq(crmFieldDefs.id, fieldId)));
+  await appendAudit({ workspaceId, actorSub: by, event: "crm_field_updated", target: fieldId });
+}
+
+/** Hard-delete a field def AND its stored values (the explicit "drop values" path). */
+export async function deleteFieldDef(workspaceId: string, fieldId: string, by: string): Promise<void> {
+  await db().delete(crmFieldValues).where(and(eq(crmFieldValues.workspaceId, workspaceId), eq(crmFieldValues.fieldId, fieldId)));
+  await db().delete(crmFieldDefs).where(and(eq(crmFieldDefs.workspaceId, workspaceId), eq(crmFieldDefs.id, fieldId)));
+  await appendAudit({ workspaceId, actorSub: by, event: "crm_field_deleted", target: fieldId });
+}
+
 // ── value encode / decode ────────────────────────────────────────────────────
 
 interface EncodedValue {
@@ -153,6 +183,18 @@ function decodeValue(workspaceId: string, enc: string | null): string | null {
   }
 }
 
+/** Enabled custom field keys per entity — for the agents' dynamic crm.write schema. */
+export async function loadFieldDefsByEntity(
+  workspaceId: string,
+): Promise<Partial<Record<CrmEntity, { key: string; label: string; type: string }[]>>> {
+  const out: Partial<Record<CrmEntity, { key: string; label: string; type: string }[]>> = {};
+  for (const e of CRM_ENTITIES) {
+    const defs = await listFieldDefs(workspaceId, e);
+    out[e] = defs.map((d) => ({ key: d.key, label: d.label, type: d.type }));
+  }
+  return out;
+}
+
 /** All enabled fields for a record, joined with their (decrypted) values, ordered. */
 export async function getFieldsForRecord(
   workspaceId: string,
@@ -169,7 +211,7 @@ export async function getFieldsForRecord(
   return defs.map((def) => ({ def, value: decodeValue(workspaceId, byField.get(def.id) ?? null) }));
 }
 
-/** Upsert one field value (encode + index), audited. Returns the decrypted value. */
+/** Upsert one field value (encode + index), audited + value-free activity. */
 export async function setFieldValue(args: {
   workspaceId: string;
   entity: CrmEntity;
@@ -177,6 +219,7 @@ export async function setFieldValue(args: {
   fieldId: string;
   raw: string;
   bySub: string;
+  byAgent?: boolean;
 }): Promise<void> {
   const [defRow] = await db()
     .select()
@@ -202,6 +245,15 @@ export async function setFieldValue(args: {
       target: [crmFieldValues.workspaceId, crmFieldValues.recordId, crmFieldValues.fieldId],
       set: { valueEnc: enc.valueEnc, valueKey: enc.valueKey, valueNum: enc.valueNum, updatedBySub: args.bySub, updatedAt: new Date() },
     });
+  await recordActivity({
+    workspaceId: args.workspaceId,
+    entity: args.entity,
+    recordId: args.recordId,
+    actorSub: args.bySub,
+    byAgent: args.byAgent ?? false,
+    input: { kind: "field_changed", fieldLabel: def.label }, // LABEL only, never the value
+    meta: { fieldId: args.fieldId },
+  });
 }
 
 // ── default field-def seeding (rich out of the box) ──────────────────────────

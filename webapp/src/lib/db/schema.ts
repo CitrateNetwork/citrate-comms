@@ -571,8 +571,11 @@ export const agentApprovals = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
     toolCallId: uuid("tool_call_id").notNull().references(() => agentToolCalls.id),
+    tool: text("tool").notNull(), // denormalized for the inbox listing
     risk: text("risk").notNull(), // low|medium|high
+    payloadEnc: text("payload_enc"), // the executable action (encrypted) — applied on approval
     requestedBySub: text("requested_by_sub").notNull(),
+    personaId: uuid("persona_id").references(() => agentPersonas.id),
     decidedBySub: text("decided_by_sub"),
     status: text("status").notNull().default("pending"), // pending|approved|rejected|auto
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

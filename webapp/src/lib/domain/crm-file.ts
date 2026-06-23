@@ -28,11 +28,19 @@ export interface MemoryCitation {
   confidence: number;
 }
 
+export interface EditableStandard {
+  name: string;
+  domain?: string | null; // account
+  valueMinor?: number; // deal (cents)
+  title?: string | null; // contact
+}
+
 export interface RecordFile {
   entity: CrmEntity;
   recordId: string;
   title: string;
   subtitle: string | null;
+  editable: EditableStandard;
   headerStats: { label: string; value: string }[];
   fields: FieldWithValue[];
   tags: TagRow[];
@@ -75,6 +83,7 @@ export async function getAccountFile(workspaceId: string, id: string): Promise<R
     recordId: id,
     title: account.name,
     subtitle: account.domain,
+    editable: { name: account.name, domain: account.domain },
     headerStats: [
       { label: "Domain", value: account.domain ?? "—" },
       { label: "Open deals", value: String(deals.filter((d) => d.stage !== "Won" && d.stage !== "Lost").length) },
@@ -109,6 +118,7 @@ export async function getDealFile(workspaceId: string, id: string): Promise<Reco
     recordId: id,
     title: deal.name,
     subtitle: deal.accountName,
+    editable: { name: deal.name, valueMinor: deal.valueMinor },
     headerStats: [
       { label: "Stage", value: deal.stage },
       { label: "Value", value: money(deal.valueMinor) },
@@ -141,6 +151,7 @@ export async function getContactFile(workspaceId: string, id: string): Promise<R
     recordId: id,
     title: contact.name,
     subtitle: contact.title,
+    editable: { name: contact.name, title: contact.title },
     headerStats: [
       { label: "Title", value: contact.title ?? "—" },
       { label: "Account", value: contact.accountName ?? "—" },

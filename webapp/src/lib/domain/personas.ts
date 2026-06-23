@@ -99,6 +99,15 @@ export async function seedDefaultPersonas(workspaceId: string, createdBy: string
     }
     seeded++;
   }
+  // Top up the default personas' tool allow-lists to the current templates, so
+  // workspaces seeded before new tools shipped (e.g. crm.note/crm.write) gain them.
+  // Safe today: there is no persona tool-customization UI to clobber.
+  for (const t of DEFAULT_PERSONA_LIST) {
+    await db()
+      .update(agentPersonas)
+      .set({ toolsJson: t.tools, maxSteps: t.maxSteps })
+      .where(and(eq(agentPersonas.workspaceId, workspaceId), eq(agentPersonas.key, t.key), eq(agentPersonas.isTemplate, true)));
+  }
   if (seeded > 0) {
     await appendAudit({ workspaceId, actorSub: createdBy, event: "personas_seeded", target: String(seeded) });
   }

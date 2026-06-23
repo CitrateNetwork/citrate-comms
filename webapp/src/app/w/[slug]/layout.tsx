@@ -3,6 +3,7 @@ import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
 import { channelsForMember } from "@/lib/domain/channels";
+import { countPendingApprovals } from "@/lib/domain/approvals";
 import { can, Capability } from "@/lib/rbac/matrix";
 import { AppShell, type SpaceLink } from "@/components/shell/AppShell";
 
@@ -33,6 +34,9 @@ export default async function WorkspaceLayout({
   const channels = await channelsForMember(ws.id, sub);
   const spaces: SpaceLink[] = channels.map((c) => ({ id: c.id, name: c.name, kind: c.kind, hasAgent: c.hasAgent }));
 
+  const canApprove = can(ctx.role, Capability.CreateRecord);
+  const approvalsCount = canApprove ? await countPendingApprovals(ws.id) : 0;
+
   return (
     <AppShell
       workspaceId={ws.id}
@@ -42,6 +46,8 @@ export default async function WorkspaceLayout({
       meSub={sub}
       canCreateChannel={can(ctx.role, Capability.CreateChannel)}
       canCreateDm={can(ctx.role, Capability.CreateDirectMessage)}
+      canApprove={canApprove}
+      approvalsCount={approvalsCount}
       spaces={spaces}
     >
       {children}

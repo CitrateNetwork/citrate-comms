@@ -291,3 +291,125 @@
   padding: 1px 6px;
   white-space: nowrap;
 }
+
+/* ── Editing / inputs ────────────────────────────────────────────────────── */
+.overviewBar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.manageLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-decoration: none;
+  margin-right: auto;
+}
+.manageLink:hover {
+  color: var(--citrate-green-dark);
+}
+.editActions {
+  display: inline-flex;
+  gap: var(--s-2);
+}
+.lockIc {
+  margin-left: 5px;
+  color: var(--fg-3);
+  vertical-align: middle;
+}
+.input {
+  width: 100%;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  padding: var(--s-2);
+  font-size: var(--t-sm);
+  font-family: var(--font-sans);
+  background: var(--paper-pure);
+  color: var(--fg-1);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+
+/* Notes composer */
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+  background: var(--paper-2);
+}
+.composerRow {
+  display: flex;
+  gap: var(--s-2);
+}
+.composerRow select {
+  flex: 0 0 120px;
+}
+.composerActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Tags */
+.tagX {
+  display: inline-flex;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--citrate-green-dark);
+  opacity: 0.6;
+  padding: 0;
+  margin-left: 3px;
+}
+.tagX:hover {
+  opacity: 1;
+}
+.tagAdd {
+  display: inline-flex;
+}
+.tagInput {
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-1);
+  padding: 1px 6px;
+  font-size: var(--t-xs);
+  width: 80px;
+  background: var(--paper-pure);
+}
+.tagAddBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px dashed var(--border-2);
+  background: none;
+  border-radius: var(--r-1);
+  padding: 1px 7px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  cursor: pointer;
+}
+.tagAddBtn:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-dark);
+}

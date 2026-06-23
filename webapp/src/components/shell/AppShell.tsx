@@ -31,6 +31,8 @@ export interface ShellProps {
   meSub?: string;
   canCreateChannel?: boolean;
   canCreateDm?: boolean;
+  canApprove?: boolean;
+  approvalsCount?: number;
   spaces?: SpaceLink[];
   children: React.ReactNode;
 }
@@ -39,6 +41,7 @@ const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: "crm", label: "CRM", icon: "crm" },
   { key: "pm", label: "Projects", icon: "projects" },
   { key: "agents", label: "Agents", icon: "agents" },
+  { key: "approvals", label: "Approvals", icon: "bell" },
   { key: "members", label: "Members", icon: "user" },
   { key: "audit", label: "Audit", icon: "audit" },
   { key: "settings", label: "Settings", icon: "settings" },
@@ -52,13 +55,16 @@ export function AppShell({
   meSub,
   canCreateChannel = false,
   canCreateDm = false,
+  canApprove = false,
+  approvalsCount = 0,
   spaces = [],
   children,
 }: ShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const pathname = usePathname() ?? "";
   const base = `/w/${workspaceSlug}`;
-  const active = NAV.find((n) => pathname.startsWith(`${base}/${n.key}`))?.key ?? "comms";
+  const nav = NAV.filter((n) => n.key !== "approvals" || canApprove);
+  const active = nav.find((n) => pathname.startsWith(`${base}/${n.key}`))?.key ?? "comms";
 
   return (
     <div className={styles.win}>
@@ -119,7 +125,7 @@ export function AppShell({
 
           <div className={styles.railSection}>
             <div className={styles.railHead}>Workspace</div>
-            {NAV.map((n) => (
+            {nav.map((n) => (
               <Link
                 key={n.key}
                 href={`${base}/${n.key}`}
@@ -128,6 +134,7 @@ export function AppShell({
               >
                 <Icon name={n.icon} size={15} />
                 <span className={styles.railLabel}>{n.label}</span>
+                {n.key === "approvals" && approvalsCount > 0 ? <span className={styles.unread}>{approvalsCount}</span> : null}
               </Link>
             ))}
           </div>

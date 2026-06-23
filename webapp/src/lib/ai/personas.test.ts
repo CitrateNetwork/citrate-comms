@@ -10,7 +10,7 @@ import {
 } from "./personas";
 
 const ALL_TOOLS: ToolName[] = [
-  "crm.read", "crm.write", "pm.read", "pm.write", "ledger.write", "thread.summarize",
+  "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
   "memory.recall", "memory.assert", "documents.read", "documents.write",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
 ];
@@ -43,6 +43,7 @@ describe("default personas", () => {
 
   it("HITL tools are mutating/terminal, runner tools are privileged", () => {
     expect(HITL_TOOLS.has("crm.write")).toBe(true);
+    expect(HITL_TOOLS.has("crm.note")).toBe(true); // agent-added notes are approval-gated
     expect(HITL_TOOLS.has("terminal.exec")).toBe(true);
     expect(HITL_TOOLS.has("crm.read")).toBe(false); // reads are not gated
     expect(RUNNER_TOOLS.has("web.search")).toBe(true);

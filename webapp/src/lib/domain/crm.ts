@@ -47,6 +47,69 @@ export async function createAccount(workspaceId: string, name: string, domain: s
   return row!;
 }
 
+/** Confirm a record exists within the workspace (tenant-safety before sub-writes). */
+export async function recordExists(workspaceId: string, entity: "account" | "deal" | "contact", id: string): Promise<boolean> {
+  if (entity === "account") return (await getAccount(workspaceId, id)) !== null;
+  if (entity === "deal") return (await getDeal(workspaceId, id)) !== null;
+  return (await getContact(workspaceId, id)) !== null;
+}
+
+/** Update an account's standard fields (records value-free activity per changed field). */
+export async function updateAccount(
+  workspaceId: string,
+  id: string,
+  patch: { name?: string; domain?: string | null },
+  actorSub: string,
+): Promise<void> {
+  const set: Record<string, unknown> = {};
+  if (patch.name !== undefined) set.name = patch.name.trim();
+  if (patch.domain !== undefined) set.domain = patch.domain?.trim() || null;
+  if (Object.keys(set).length === 0) return;
+  await db().update(accounts).set(set).where(and(eq(accounts.workspaceId, workspaceId), eq(accounts.id, id)));
+  for (const label of fieldLabels(patch, { name: "Name", domain: "Domain" })) {
+    await recordActivity({ workspaceId, entity: "account", recordId: id, actorSub, input: { kind: "field_changed", fieldLabel: label } });
+  }
+}
+
+/** Update a deal's standard fields. */
+export async function updateDeal(
+  workspaceId: string,
+  id: string,
+  patch: { name?: string; valueMinor?: number },
+  actorSub: string,
+): Promise<void> {
+  const set: Record<string, unknown> = {};
+  if (patch.name !== undefined) set.name = patch.name.trim();
+  if (patch.valueMinor !== undefined) set.valueMinor = patch.valueMinor;
+  if (Object.keys(set).length === 0) return;
+  await db().update(deals).set(set).where(and(eq(deals.workspaceId, workspaceId), eq(deals.id, id)));
+  for (const label of fieldLabels(patch, { name: "Name", valueMinor: "Value" })) {
+    await recordActivity({ workspaceId, entity: "deal", recordId: id, actorSub, input: { kind: "field_changed", fieldLabel: label } });
+  }
+}
+
+/** Update a contact's standard fields. */
+export async function updateContact(
+  workspaceId: string,
+  id: string,
+  patch: { name?: string; title?: string | null },
+  actorSub: string,
+): Promise<void> {
+  const set: Record<string, unknown> = {};
+  if (patch.name !== undefined) set.name = patch.name.trim();
+  if (patch.title !== undefined) set.title = patch.title?.trim() || null;
+  if (Object.keys(set).length === 0) return;
+  await db().update(contacts).set(set).where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.id, id)));
+  for (const label of fieldLabels(patch, { name: "Name", title: "Title" })) {
+    await recordActivity({ workspaceId, entity: "contact", recordId: id, actorSub, input: { kind: "field_changed", fieldLabel: label } });
+  }
+}
+
+/** Map the keys present in a patch to their human labels (for value-free activity). */
+function fieldLabels<T extends object>(patch: T, labels: Partial<Record<keyof T, string>>): string[] {
+  return (Object.keys(patch) as (keyof T)[]).filter((k) => patch[k] !== undefined && labels[k]).map((k) => labels[k]!);
+}
+
 /** A single account in a workspace, or null. */
 export async function getAccount(workspaceId: string, id: string): Promise<AccountRow | null> {
   const [row] = await db()
