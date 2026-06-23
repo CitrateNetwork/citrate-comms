@@ -1,0 +1,193 @@
+/* Responsive shell. Desktop: fixed 248px rail. Mobile (<880px): rail → drawer. */
+.win {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--paper);
+  color: var(--fg-1);
+}
+.titlebar {
+  height: 52px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--s-4);
+  background: var(--paper-2);
+  border-bottom: 1px solid var(--border-1);
+}
+.tbLeft,
+.tbRight {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.burger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--fg-2);
+  cursor: pointer;
+  padding: var(--s-2);
+}
+.brand {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--t-md);
+  color: var(--fg-1);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.wsName {
+  letter-spacing: -0.01em;
+}
+.conn {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.meForm {
+  display: inline-flex;
+}
+.me {
+  color: var(--fg-2);
+  padding: var(--s-2);
+  border-radius: var(--r-1);
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.me:hover {
+  background: var(--stone-100);
+}
+.body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.rail {
+  flex: 0 0 248px;
+  width: 248px;
+  background: var(--paper-2);
+  border-right: 1px solid var(--border-1);
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-4) var(--s-3);
+  gap: var(--s-5);
+  overflow-y: auto;
+}
+.railSection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.railHead {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: var(--t-3xs);
+  color: var(--fg-3);
+  padding: var(--s-2) var(--s-3);
+}
+.railHeadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: var(--s-2);
+}
+.railEmpty {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  padding: var(--s-2) var(--s-3);
+  font-style: italic;
+}
+.railItem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  height: 34px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-1);
+  color: var(--fg-2);
+  text-decoration: none;
+  font-size: var(--t-sm);
+}
+.railItem:hover {
+  background: var(--stone-100);
+  color: var(--fg-1);
+}
+.railActive {
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  font-weight: 600;
+}
+.railLabel {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.unread {
+  font-family: var(--font-mono);
+  font-size: var(--t-3xs);
+  background: var(--citrate-green-deep);
+  color: var(--paper-pure);
+  border-radius: var(--r-pill);
+  padding: 1px 6px;
+}
+.railFoot {
+  margin-top: auto;
+  padding: var(--s-3);
+}
+.roleTag {
+  font-family: var(--font-mono);
+  font-size: var(--t-3xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+}
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.scrim {
+  display: none;
+}
+
+@media (max-width: 880px) {
+  .burger {
+    display: inline-flex;
+  }
+  .conn {
+    display: none;
+  }
+  .rail {
+    position: fixed;
+    top: 52px;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform var(--dur-base) var(--ease);
+    box-shadow: 0 8px 32px var(--shadow-soft);
+  }
+  .railOpen {
+    transform: translateX(0);
+  }
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 52px 0 0 0;
+    z-index: 30;
+    background: rgba(14, 15, 12, 0.32);
+  }
+}

@@ -1,0 +1,19 @@
+# gitleaks config for citrate-comms/webapp (Tier-1). Mirrors the repo-root discipline.
+# Run: gitleaks detect --config .gitleaks.toml --no-banner
+title = "citrate-comms-web gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Template/example placeholders that are not real secrets"
+paths = [
+  '''\.env\.example$''',
+  '''src/lib/db/migrations/.*\.sql$''',
+]
+regexes = [
+  # the example master-key line in .env.example is intentionally empty
+  '''COMMS_ENC_KEY=\s*$''',
+  # 0x EVM addresses (40 hex) are public identifiers, not secrets (root allowlist parity)
+  '''0x[a-fA-F0-9]{40}\b''',
+]

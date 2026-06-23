@@ -352,12 +352,25 @@ impl DeliveryService {
         &mut self,
         group_id: GroupId,
         admin: WalletAddress,
+        admin_assertion: Option<&RoleAssertion>,
         joiner: WalletAddress,
         welcome: Envelope,
         ratchet_tree: Vec<u8>,
         now_ms: u64,
     ) -> Result<(), RelayError> {
         self.require_session(&admin)?;
+        // RBAC (FWA-C11-03): adding a member is a membership-mutating op. Mirror
+        // `offboard` — the owner is the trust anchor; anyone else must present an
+        // owner-signed assertion whose role carries `AddMember`. Without this any
+        // member could insert an arbitrary joiner into the routing roster and
+        // overwrite the stored public ratchet tree served to future joiners.
+        if admin != self.owner {
+            let a = admin_assertion.ok_or(RelayError::NotAuthorized)?;
+            rbac::verify_grant_chain(a, admin, self.owner, now_ms).map_err(RelayError::Rbac)?;
+            if !rbac::can(a.role, Capability::AddMember) {
+                return Err(RelayError::NotAuthorized);
+            }
+        }
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) {
@@ -366,8 +379,9 @@ impl DeliveryService {
         }
         debug_assert_eq!(welcome.kind, EnvelopeKind::Welcome);
         // Deliver the Welcome on the durable ordered path (stored + audited + fanned
-        // to the joiner's mailbox).
-        self.submit(welcome, now_ms)?;
+        // to the joiner's mailbox). Bind its sender to the authenticated admin so an
+        // admin cannot post a Welcome attributed to another member (FWA-C11-01).
+        self.submit_as(admin, welcome, now_ms)?;
         // Update the roster + public ratchet tree, persist, and audit the membership change.
         let epoch = {
             let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
@@ -414,8 +428,9 @@ impl DeliveryService {
         }
         debug_assert_eq!(remove_commit.kind, EnvelopeKind::Commit);
         // Apply the Remove commit on the ordered path (first-writer-wins, receipt
-        // audit, fan-out to the REMAINING members).
-        let seq = self.submit(remove_commit, now_ms)?;
+        // audit, fan-out to the REMAINING members). Bind its sender to the
+        // authenticated admin (FWA-C11-01).
+        let seq = self.submit_as(admin, remove_commit, now_ms)?;
         // Atomic with the commit: drop from the roster, refresh the public ratchet
         // tree, and record the offboard as a single logical event pair.
         let epoch = {
@@ -435,10 +450,40 @@ impl DeliveryService {
 
     // ─────────────────────── submit / deliver ───────────────────────
 
+    /// Accept an envelope **from an authenticated connection**, binding the
+    /// envelope's `sender` to the session principal `authed` (FWA-C11-01).
+    ///
+    /// The relay does NOT trust the client-supplied `envelope.sender`: it must
+    /// equal the wallet that authenticated this connection. A member therefore
+    /// cannot forge another member's sender to mis-attribute the audit receipt
+    /// or control another member's recipient set. This is the ONLY public
+    /// entry point for client-originated submissions; internal trusted callers
+    /// (`onboard`/`offboard`) use [`submit`](Self::submit) with the connection's
+    /// already-authenticated wallet.
+    pub fn submit_as(
+        &mut self,
+        authed: WalletAddress,
+        envelope: Envelope,
+        now_ms: u64,
+    ) -> Result<u64, RelayError> {
+        // Bind sender to the authenticated principal. Reject (do not silently
+        // overwrite) a mismatched client-supplied sender so the spoof is visible
+        // and fail-closed.
+        if envelope.sender != authed {
+            return Err(RelayError::SenderMismatch);
+        }
+        self.submit(envelope, now_ms)
+    }
+
     /// Accept an envelope: assign its `group_seq`, enforce Commit ordering, store
     /// the ciphertext, audit the receipt, and fan out to recipient mailboxes.
     /// Returns the assigned sequence number.
-    pub fn submit(&mut self, mut envelope: Envelope, now_ms: u64) -> Result<u64, RelayError> {
+    ///
+    /// **Trusted internal path.** The caller guarantees `envelope.sender` is the
+    /// authenticated principal (the WS layer routes client submits through
+    /// [`submit_as`](Self::submit_as), which binds it; `onboard`/`offboard` pass
+    /// envelopes whose sender is the connection's authenticated `admin`).
+    fn submit(&mut self, mut envelope: Envelope, now_ms: u64) -> Result<u64, RelayError> {
         self.require_session(&envelope.sender)?;
         let ciphertext_hash = *blake3::hash(&envelope.ciphertext).as_bytes();
         let size = envelope.ciphertext.len() as u64;
@@ -543,6 +588,8 @@ pub enum RelayError {
     GroupExists,
     #[error("sender is not a member of the group")]
     NotAMember,
+    #[error("envelope sender does not match the authenticated session principal")]
+    SenderMismatch,
     #[error("epoch {epoch} already has a different accepted commit (first-writer-wins)")]
     EpochAlreadyCommitted { epoch: u64 },
     #[error("no key package available for wallet")]
@@ -604,13 +651,13 @@ mod tests {
 
         let gid = GroupId([7; 32]);
         relay.register_group(gid, alice.address(), 12).unwrap();
-        relay.onboard(gid, alice.address(), bob.address(),
+        relay.onboard(gid, alice.address(), None, bob.address(),
             envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome-ct", &[bob.address()]),
             b"ratchet-tree".to_vec(), 13).unwrap();
 
         let secret_plaintext = b"this is a secret message";
         let ct = b"OPAQUE-CIPHERTEXT-BLOB"; // stand-in ciphertext for the relay-only test
-        relay.submit(envelope(gid, alice.address(), EnvelopeKind::Application, 1, ct, &[bob.address()]), 14).unwrap();
+        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Application, 1, ct, &[bob.address()]), 14).unwrap();
 
         // The relay's durable store contains ciphertext only — never the plaintext.
         // The log holds the Welcome (durable) + the application envelope.
@@ -637,12 +684,12 @@ mod tests {
         relay.register_group(gid, alice.address(), 2).unwrap();
 
         // First commit for epoch 1 is accepted.
-        relay.submit(envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 3).unwrap();
+        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 3).unwrap();
         // A DIFFERENT commit for the same epoch is rejected (no fork).
-        let err = relay.submit(envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-B", &[]), 4).unwrap_err();
+        let err = relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-B", &[]), 4).unwrap_err();
         assert!(matches!(err, RelayError::EpochAlreadyCommitted { epoch: 1 }));
         // Re-submitting the IDENTICAL commit is idempotent (no error).
-        relay.submit(envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 5).unwrap();
+        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 5).unwrap();
     }
 
     #[test]
@@ -671,13 +718,13 @@ mod tests {
             relay.register_group(gid, alice.address(), 12).unwrap();
             relay
                 .onboard(
-                    gid, alice.address(), bob.address(),
+                    gid, alice.address(), None, bob.address(),
                     envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome-ct", &[bob.address()]),
                     b"ratchet-tree".to_vec(), 13,
                 )
                 .unwrap();
             relay
-                .submit(envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"CIPHERTEXT-BLOB", &[bob.address()]), 14)
+                .submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"CIPHERTEXT-BLOB", &[bob.address()]), 14)
                 .unwrap();
             assert_eq!(relay.group_log(&gid).unwrap().len(), 2); // welcome + application
         }
@@ -712,8 +759,113 @@ mod tests {
         relay.register_group(gid, alice.address(), 3).unwrap();
         // Mallory is authenticated but not a member.
         let err = relay
-            .submit(envelope(gid, mallory.address(), EnvelopeKind::Application, 0, b"x", &[]), 4)
+            .submit_as(mallory.address(), envelope(gid, mallory.address(), EnvelopeKind::Application, 0, b"x", &[]), 4)
             .unwrap_err();
         assert!(matches!(err, RelayError::NotAMember));
+    }
+
+    /// FWA-C11-01 (HIGH) red test — sender spoofing. Mallory and Alice are BOTH
+    /// authenticated members of group G. Mallory submits an envelope whose
+    /// `sender` field names *Alice*. The relay MUST bind the sender to the
+    /// authenticated principal (Mallory) and reject the spoof — otherwise the
+    /// audit receipt + fan-out would be attributed to Alice for a message
+    /// Mallory authored, and Mallory would control Alice's recipient set.
+    ///
+    /// Mirrors `evidence/fwa_c11_sender_spoof.rs`. Before the fix this passed
+    /// `require_session(Alice)` + `members.contains(Alice)` and was accepted &
+    /// audited under Alice's identity. After the fix it is rejected.
+    #[test]
+    fn submit_binds_sender_to_authenticated_session() {
+        let alice = EthWallet::generate();
+        let mallory = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
+        login(&mut relay, &alice, 1);
+        login(&mut relay, &mallory, 2);
+        let gid = GroupId([9; 32]);
+        relay.register_group(gid, alice.address(), 3).unwrap();
+        // Onboard Mallory so she is a genuine member (so the rejection is on the
+        // sender-binding, not on membership).
+        relay
+            .onboard(
+                gid, alice.address(), None, mallory.address(),
+                envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome", &[mallory.address()]),
+                b"rt".to_vec(), 4,
+            )
+            .unwrap();
+
+        let audit_len_before = relay.audit().len();
+
+        // Mallory (authed) tries to submit AS Alice (spoofed sender).
+        let spoof = envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"FORGED", &[mallory.address()]);
+        let err = relay.submit_as(mallory.address(), spoof, 5).unwrap_err();
+        assert!(matches!(err, RelayError::SenderMismatch), "spoofed sender must be rejected, got {err:?}");
+
+        // Nothing was recorded under Alice's identity: no new audit receipt, no
+        // forged envelope in the log.
+        assert_eq!(relay.audit().len(), audit_len_before, "spoofed submit must not write an audit receipt");
+        let alice_forged = relay
+            .group_log(&gid)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == b"FORGED");
+        assert!(!alice_forged, "forged envelope must not enter the durable log");
+
+        // And the honest path still works: Mallory submits as herself.
+        let ok = envelope(gid, mallory.address(), EnvelopeKind::Application, 1, b"HONEST", &[alice.address()]);
+        relay.submit_as(mallory.address(), ok, 6).unwrap();
+    }
+
+    /// FWA-C11-03 (MED) red test — `onboard` must enforce RBAC. A plain member
+    /// (here Mallory, a `Member` with no `AddMember` capability and no owner-signed
+    /// grant) must NOT be able to drive `onboard` to insert an arbitrary joiner into
+    /// the routing roster / overwrite the public ratchet tree. Owner-driven onboard
+    /// (and onboard with a valid owner-signed `AddMember` grant) still works.
+    #[test]
+    fn onboard_requires_add_member_authorization() {
+        use comms_proto::Role;
+        let owner = EthWallet::generate(); // workspace owner / trust anchor
+        let mallory = EthWallet::generate(); // a plain member
+        let victim = EthWallet::generate(); // wallet Mallory tries to inject
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 1);
+        login(&mut relay, &mallory, 2);
+        let gid = GroupId([3; 32]);
+        relay.register_group(gid, owner.address(), 3).unwrap();
+        // Owner onboards Mallory (legitimately).
+        relay
+            .onboard(
+                gid, owner.address(), None, mallory.address(),
+                envelope(gid, owner.address(), EnvelopeKind::Welcome, 1, b"w1", &[mallory.address()]),
+                b"rt1".to_vec(), 4,
+            )
+            .unwrap();
+
+        // Mallory (a Member, no grant) tries to onboard the victim → rejected.
+        let err = relay
+            .onboard(
+                gid, mallory.address(), None, victim.address(),
+                envelope(gid, mallory.address(), EnvelopeKind::Welcome, 1, b"w2", &[victim.address()]),
+                b"rt2".to_vec(), 5,
+            )
+            .unwrap_err();
+        assert!(matches!(err, RelayError::NotAuthorized), "non-owner without AddMember grant must be rejected, got {err:?}");
+        assert!(
+            !relay.group_members(&gid).unwrap().contains(&victim.address()),
+            "victim must NOT have entered the roster"
+        );
+
+        // With an owner-signed Admin grant (Admin holds AddMember), Mallory CAN onboard.
+        let grant = rbac::sign_role_assertion(
+            &owner, Role::Owner, mallory.address(), Role::Admin, None, None,
+        )
+        .unwrap();
+        relay
+            .onboard(
+                gid, mallory.address(), Some(&grant), victim.address(),
+                envelope(gid, mallory.address(), EnvelopeKind::Welcome, 1, b"w3", &[victim.address()]),
+                b"rt3".to_vec(), 6,
+            )
+            .unwrap();
+        assert!(relay.group_members(&gid).unwrap().contains(&victim.address()));
     }
 }

@@ -39,7 +39,15 @@ pub enum ClientFrame {
     PublishKeyPackage(KeyPackagePublication),
     TakeKeyPackage { wallet: WalletAddress },
     RegisterGroup { group_id: GroupId },
-    Onboard { group_id: GroupId, joiner: WalletAddress, welcome: Envelope, ratchet_tree: Vec<u8> },
+    Onboard {
+        group_id: GroupId,
+        joiner: WalletAddress,
+        /// `None` if the caller IS the workspace owner; otherwise an owner-signed
+        /// grant whose role carries `AddMember` (FWA-C11-03).
+        admin_assertion: Option<RoleAssertion>,
+        welcome: Envelope,
+        ratchet_tree: Vec<u8>,
+    },
     Submit(Envelope),
     RatchetTree { group_id: GroupId },
     Offboard {
@@ -215,6 +223,15 @@ impl RelayServer {
                 }
             }
             ClientFrame::PublishKeyPackage(pubn) => {
+                // FWA-C11-01 (sweep): bind the publication's `wallet` to THIS
+                // connection's authenticated principal. The wallet-binding attestation
+                // already cryptographically proves control of `pubn.wallet`, but we also
+                // refuse a session publishing under any identity other than its own — no
+                // WS handler may write a client-named identity that differs from `authed`.
+                let Some(addr) = *authed else { return send_err(out_tx, "not authenticated") };
+                if pubn.wallet != addr {
+                    return send_err(out_tx, "key package wallet does not match the authenticated session");
+                }
                 let r = { self.service.lock().await.publish_key_package(pubn, now) };
                 match r {
                     Ok(_) => ack(out_tx, None),
@@ -233,9 +250,13 @@ impl RelayServer {
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
             }
-            ClientFrame::Onboard { group_id, joiner, welcome, ratchet_tree } => {
+            ClientFrame::Onboard { group_id, joiner, admin_assertion, welcome, ratchet_tree } => {
                 let Some(addr) = *authed else { return send_err(out_tx, "not authenticated") };
-                let r = { self.service.lock().await.onboard(group_id, addr, joiner, welcome, ratchet_tree, now) };
+                let r = {
+                    self.service.lock().await.onboard(
+                        group_id, addr, admin_assertion.as_ref(), joiner, welcome, ratchet_tree, now,
+                    )
+                };
                 match r {
                     Ok(_) => {
                         ack(out_tx, None);
@@ -245,7 +266,10 @@ impl RelayServer {
                 }
             }
             ClientFrame::Submit(env) => {
-                let r = { self.service.lock().await.submit(env, now) };
+                // FWA-C11-01: bind the envelope's sender to THIS connection's
+                // authenticated principal — never trust the frame's sender field.
+                let Some(addr) = *authed else { return send_err(out_tx, "not authenticated") };
+                let r = { self.service.lock().await.submit_as(addr, env, now) };
                 match r {
                     Ok(seq) => {
                         ack(out_tx, Some(seq));
@@ -427,8 +451,17 @@ impl RelayClient {
         self.expect_ack(ClientFrame::RegisterGroup { group_id }).await.map(|_| ())
     }
 
-    pub async fn onboard(&self, group_id: GroupId, joiner: WalletAddress, welcome: Envelope, ratchet_tree: Vec<u8>) -> Result<(), WsError> {
-        self.expect_ack(ClientFrame::Onboard { group_id, joiner, welcome, ratchet_tree }).await.map(|_| ())
+    pub async fn onboard(
+        &self,
+        group_id: GroupId,
+        joiner: WalletAddress,
+        admin_assertion: Option<RoleAssertion>,
+        welcome: Envelope,
+        ratchet_tree: Vec<u8>,
+    ) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::Onboard { group_id, joiner, admin_assertion, welcome, ratchet_tree })
+            .await
+            .map(|_| ())
     }
 
     pub async fn submit(&self, envelope: Envelope) -> Result<u64, WsError> {
@@ -475,6 +508,42 @@ mod tests {
         // wss:// is permitted by the guard (then fails on the dial, not the policy).
         let dial = RelayClient::connect("wss://127.0.0.1:1").await.err();
         assert!(!matches!(dial, Some(WsError::InsecureEndpoint(_))), "wss must pass the guard");
+    }
+
+    /// FWA-C11-01 **TRIPWIRE (Class-A)** — static guard over this file's own source.
+    ///
+    /// Every WS dispatch arm that hands a client frame to the delivery service MUST bind
+    /// the principal to the connection's authenticated `addr` (`submit_as(addr, …)` /
+    /// `onboard(group, addr, …)`), NEVER the trusted private `submit(…)`/un-bound path.
+    /// This test fails if a future edit reintroduces an un-bound `service…submit(` or
+    /// forwards `Submit`/`PublishKeyPackage` without the session-binding check — so the
+    /// FWA-C11-01 sender-spoofing fix cannot silently regress.
+    #[test]
+    fn tripwire_ws_dispatch_binds_every_client_identity_to_session() {
+        let src = include_str!("ws.rs");
+        // Isolate the dispatch function body (where frames are handled).
+        let dispatch = src
+            .split("async fn dispatch(")
+            .nth(1)
+            .and_then(|s| s.split("\n    async fn deliver_pending").next())
+            .expect("dispatch fn present");
+
+        // Class-A: the un-bound private `submit` must NEVER be reached from the WS layer.
+        assert!(
+            !dispatch.contains(".submit("),
+            "TRIPWIRE: WS dispatch reached the un-bound `submit(` — client `sender` must be bound \
+             via `submit_as(addr, …)` (FWA-C11-01 regression)"
+        );
+        // The Submit arm must route through the sender-binding entry point.
+        assert!(
+            dispatch.contains("submit_as(addr, env, now)"),
+            "TRIPWIRE: the Submit arm must call `submit_as(addr, env, now)` to bind the sender"
+        );
+        // The KeyPackage publication must be checked against the authenticated session.
+        assert!(
+            dispatch.contains("pubn.wallet != addr"),
+            "TRIPWIRE: PublishKeyPackage must reject a wallet != the authenticated session"
+        );
     }
 }
 

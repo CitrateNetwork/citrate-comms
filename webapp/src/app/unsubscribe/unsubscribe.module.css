@@ -1,0 +1,48 @@
+.screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper);
+  padding: var(--s-6);
+}
+.card {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  background: var(--paper-pure);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-3);
+  padding: var(--s-8);
+  text-align: center;
+}
+.mark {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--t-lg);
+  color: var(--fg-1);
+}
+.title {
+  font-family: var(--font-display);
+  font-size: var(--t-2xl);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.sub {
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  margin: 0;
+}
+.fine {
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  margin: 0;
+}
+.link {
+  color: var(--citrate-green-deep);
+}

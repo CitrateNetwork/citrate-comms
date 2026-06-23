@@ -87,7 +87,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
         group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
         sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit.clone(), group_seq: None,
     };
-    relay.submit(commit_env, 14).unwrap();
+    relay.submit_as(alice_wallet.address(), commit_env, 14).unwrap();
 
     // Onboard Bob: roster update + Welcome delivered to his mailbox + public ratchet tree.
     let welcome_env = Envelope {
@@ -95,7 +95,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
         sender: alice_wallet.address(), recipients: vec![bob_wallet.address()],
         ciphertext: add.welcome.clone(), group_seq: None,
     };
-    relay.onboard(gid, alice_wallet.address(), bob_wallet.address(), welcome_env, add.ratchet_tree.clone(), 15).unwrap();
+    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome_env, add.ratchet_tree.clone(), 15).unwrap();
 
     // ── 5. Bob joins from his Welcome + the relay's public ratchet tree. ──
     let inbox = relay.fetch(&bob_wallet.address());
@@ -113,7 +113,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
         sender: alice_wallet.address(), recipients: vec![bob_wallet.address()],
         ciphertext: ciphertext.clone(), group_seq: None,
     };
-    let seq = relay.submit(app_env, 16).unwrap();
+    let seq = relay.submit_as(alice_wallet.address(), app_env, 16).unwrap();
     // Order so far: Commit(0), Welcome(1, via onboard), Application(2).
     assert_eq!(seq, 2, "third accepted envelope in the group gets group_seq 2");
 
@@ -182,7 +182,7 @@ fn offboard_atomically_revokes_role_and_future_access() {
     let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
     let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
     relay
-        .submit(
+        .submit_as(alice_wallet.address(), 
             Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
                 sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None },
             14,
@@ -190,7 +190,7 @@ fn offboard_atomically_revokes_role_and_future_access() {
         .unwrap();
     let welcome_env = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
         sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
-    relay.onboard(gid, alice_wallet.address(), bob_wallet.address(), welcome_env, add.ratchet_tree, 15).unwrap();
+    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome_env, add.ratchet_tree, 15).unwrap();
     let inbox = relay.fetch(&bob_wallet.address());
     let welcome = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
     let ratchet_tree = relay.ratchet_tree(&gid).unwrap().to_vec();
@@ -274,9 +274,9 @@ fn domain_record_replicates_e2e_over_relay() {
     relay.register_group(gid, alice_wallet.address(), 13).unwrap();
     let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
     let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
-    relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, 14).unwrap();
+    relay.submit_as(alice_wallet.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, 14).unwrap();
     let welcome = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
-    relay.onboard(gid, alice_wallet.address(), bob_wallet.address(), welcome, add.ratchet_tree.clone(), 15).unwrap();
+    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome, add.ratchet_tree.clone(), 15).unwrap();
     let inbox = relay.fetch(&bob_wallet.address());
     let w = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
     let mut bob_group = bob_member.join(&w.ciphertext, relay.ratchet_tree(&gid).unwrap()).unwrap();
@@ -296,7 +296,7 @@ fn domain_record_replicates_e2e_over_relay() {
     );
     let payload = ev.encode().unwrap();
     let ciphertext = alice_group.send(&alice_member, &payload).unwrap();
-    relay.submit(Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext, group_seq: None }, 16).unwrap();
+    relay.submit_as(alice_wallet.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext, group_seq: None }, 16).unwrap();
 
     let mut alice_store = DomainStore::new();
     alice_store.apply(&ev);

@@ -1,0 +1,26 @@
+# Tenant-isolation static guard (the compile-time half of lib/tenant/guard.ts).
+#
+# The web tier's #1 isolation control is: every query against a workspace-scoped
+# table is predicated on workspace_id AFTER requireMembership confirms the caller.
+# This rule flags a `.where(...)` on a domain repository that forgets the workspace
+# predicate. It is intentionally conservative (warns, to be triaged) — the runtime
+# guard is the hard stop; this catches mistakes in review.
+rules:
+  - id: query-missing-workspace-predicate
+    languages: [typescript]
+    severity: WARNING
+    message: >
+      Drizzle query in a domain repository should be predicated on workspaceId
+      (tenant isolation). Confirm requireMembership() ran and the where() includes
+      eq(<table>.workspaceId, ...). If this is a deliberately global/admin query,
+      add a // nosemgrep: query-missing-workspace-predicate note with the reason.
+    paths:
+      include:
+        - "src/lib/domain/**"
+        - "src/app/api/**"
+    patterns:
+      - pattern: $D.select(...).from($T).where($W)
+      - pattern-not: $D.select(...).from($T).where(<... workspaceId ...>)
+      - pattern-not-inside: |
+          // nosemgrep: query-missing-workspace-predicate
+          ...

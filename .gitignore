@@ -11,3 +11,7 @@ Cargo.lock.orig
 *.slint.rs
 # Vendored deps for airgap builds are committed deliberately; do not ignore vendor/
 /dist
+
+# cargo-mutants scratch output
+mutants.out/
+mutants.out.old/

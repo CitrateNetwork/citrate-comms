@@ -1,0 +1,102 @@
+/**
+ * Project-management repository — projects and tasks. The board is a status kanban
+ * (Backlog → Todo → InProgress → InReview → Done); `ord` keeps within-column order.
+ * Tasks can link to a conversation (linkedChannelId) — the cross-surface thread.
+ */
+import { and, asc, eq } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { projects, tasks } from "@/lib/db/schema";
+import { TASK_STATUSES, type TaskStatus } from "./enums";
+
+export { TASK_STATUSES };
+export type { TaskStatus };
+
+export interface ProjectRow {
+  id: string;
+  name: string;
+  status: string;
+}
+export interface TaskRow {
+  id: string;
+  projectId: string | null;
+  title: string;
+  description: string | null;
+  assigneeSub: string | null;
+  status: TaskStatus;
+  priority: string | null;
+  ord: number;
+  linkedChannelId: string | null;
+}
+
+export async function listProjects(workspaceId: string): Promise<ProjectRow[]> {
+  return db()
+    .select({ id: projects.id, name: projects.name, status: projects.status })
+    .from(projects)
+    .where(eq(projects.workspaceId, workspaceId))
+    .orderBy(asc(projects.createdAt));
+}
+
+export async function createProject(workspaceId: string, name: string): Promise<ProjectRow> {
+  const [row] = await db()
+    .insert(projects)
+    .values({ workspaceId, name: name.trim(), status: "active" })
+    .returning({ id: projects.id, name: projects.name, status: projects.status });
+  return row!;
+}
+
+export async function listTasks(workspaceId: string, projectId?: string): Promise<TaskRow[]> {
+  const where = projectId
+    ? and(eq(tasks.workspaceId, workspaceId), eq(tasks.projectId, projectId))
+    : eq(tasks.workspaceId, workspaceId);
+  const rows = await db().select().from(tasks).where(where).orderBy(asc(tasks.ord), asc(tasks.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    projectId: r.projectId,
+    title: r.title,
+    description: r.description,
+    assigneeSub: r.assigneeSub,
+    status: r.status as TaskStatus,
+    priority: r.priority,
+    ord: r.ord,
+    linkedChannelId: r.linkedChannelId,
+  }));
+}
+
+export async function createTask(args: {
+  workspaceId: string;
+  projectId: string | null;
+  title: string;
+  assigneeSub?: string | null;
+  priority?: string | null;
+}): Promise<TaskRow> {
+  const [row] = await db()
+    .insert(tasks)
+    .values({
+      workspaceId: args.workspaceId,
+      projectId: args.projectId,
+      title: args.title.trim(),
+      status: "Backlog",
+      assigneeSub: args.assigneeSub ?? null,
+      priority: args.priority ?? null,
+    })
+    .returning();
+  return {
+    id: row!.id,
+    projectId: row!.projectId,
+    title: row!.title,
+    description: row!.description,
+    assigneeSub: row!.assigneeSub,
+    status: row!.status as TaskStatus,
+    priority: row!.priority,
+    ord: row!.ord,
+    linkedChannelId: row!.linkedChannelId,
+  };
+}
+
+/** Move a task to a new status column. */
+export async function moveTask(workspaceId: string, taskId: string, status: TaskStatus): Promise<void> {
+  await db()
+    .update(tasks)
+    .set({ status })
+    .where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
+}

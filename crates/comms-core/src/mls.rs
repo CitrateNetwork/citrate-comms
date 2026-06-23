@@ -17,9 +17,12 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 /// The live transport ciphersuite: X25519 KEM · AES-128-GCM · SHA-256 · Ed25519.
-/// Strongest standard MLS suite over the chain's X25519/Ed25519 curves. The
-/// 256-bit-AEAD roadmap is the future ratified X25519+Kyber768 PQ-hybrid suite
-/// (the envelope reserves a `ciphersuite_id` for the migration).
+/// Strongest standard MLS suite over the chain's X25519/Ed25519 curves — fully
+/// **classical**. There is NO post-quantum protection of message content today:
+/// no ML-KEM/Kyber is present in the build. A future ratified X25519+ML-KEM-768
+/// hybrid MLS suite is roadmap-only (the envelope reserves a `ciphersuite_id` so
+/// groups can migrate epoch-by-epoch when one exists). Do NOT describe the live
+/// transport as post-quantum.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// A member's MLS keys + credential + its own crypto provider (keystore).

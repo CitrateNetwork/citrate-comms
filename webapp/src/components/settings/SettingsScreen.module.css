@@ -1,0 +1,169 @@
+.layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: var(--s-6);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.subnavItem {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-1);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+  text-decoration: none;
+}
+.subnavItem:hover {
+  background: var(--stone-100);
+  color: var(--fg-1);
+}
+.subnavActive {
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  font-weight: 600;
+}
+.pane {
+  overflow-y: auto;
+}
+.section {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.h2 {
+  font-family: var(--font-display);
+  font-size: var(--t-lg);
+  font-weight: 500;
+  margin: 0;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  padding: var(--s-3) 0;
+  border-bottom: 1px solid var(--border-1);
+}
+.rowLabel {
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+}
+.rowVal {
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.inline {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+}
+.dim {
+  color: var(--fg-3);
+  font-size: var(--t-sm);
+}
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}
+.segBtn {
+  background: var(--paper-pure);
+  border: none;
+  padding: 6px 12px;
+  font-size: var(--t-xs);
+  text-transform: capitalize;
+  color: var(--fg-2);
+  cursor: pointer;
+  border-right: 1px solid var(--border-1);
+}
+.segBtn:last-child {
+  border-right: none;
+}
+.segBtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.segActive {
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  font-weight: 600;
+}
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+.toggleLabel {
+  font-weight: 600;
+  font-size: var(--t-sm);
+}
+.switch {
+  width: 44px;
+  height: 26px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-2);
+  background: var(--stone-200);
+  position: relative;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background var(--dur-fast) var(--ease);
+}
+.switch:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.switchOn {
+  background: var(--citrate-green);
+  border-color: var(--citrate-green-deep);
+}
+.knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--paper-pure);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.switchOn .knob {
+  transform: translateX(18px);
+}
+.trustCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  background: var(--paper-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+}
+.trustRow {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+@media (max-width: 720px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .subnav {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+}

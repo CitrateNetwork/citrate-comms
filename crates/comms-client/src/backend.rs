@@ -219,7 +219,7 @@ impl Workspace {
         // ── Seed the conversation through real encryption; Saul decrypts each. ──
         let post = |relay: &mut DeliveryService, w: &EthWallet, g: &mut GroupHandle, m: &MlsMember, p: WirePayload| -> Result<(), String> {
             let ct = g.send(m, &canonical::to_vec(&p).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            relay.submit(Envelope { group_id: gid, epoch: EpochId(3), kind: EnvelopeKind::Application, sender: w.address(), recipients: everyone(w.address()), ciphertext: ct, group_seq: None }, now).map_err(|e| e.to_string())?;
+            relay.submit_as(w.address(), Envelope { group_id: gid, epoch: EpochId(3), kind: EnvelopeKind::Application, sender: w.address(), recipients: everyone(w.address()), ciphertext: ct, group_seq: None }, now).map_err(|e| e.to_string())?;
             Ok(())
         };
 
@@ -289,7 +289,7 @@ impl Workspace {
         if let Ok(bytes) = canonical::to_vec(&msg) {
             if let Ok(ct) = self.me_group.send(&self.me_mls, &bytes) {
                 let recipients: Vec<WalletAddress> = self.by_wallet.keys().copied().filter(|a| *a != self.me_wallet.address()).collect();
-                let _ = self.relay.submit(Envelope { group_id: self.gid, epoch: EpochId(3), kind: EnvelopeKind::Application, sender: self.me_wallet.address(), recipients, ciphertext: ct, group_seq: None }, self.now);
+                let _ = self.relay.submit_as(self.me_wallet.address(), Envelope { group_id: self.gid, epoch: EpochId(3), kind: EnvelopeKind::Application, sender: self.me_wallet.address(), recipients, ciphertext: ct, group_seq: None }, self.now);
             }
         }
         self.messages.push(UiMessage {
@@ -338,12 +338,12 @@ fn chat(_ts: &str, body: &str, clock: &mut LamportClock) -> WirePayload {
 }
 
 fn submit_commit(relay: &mut DeliveryService, gid: GroupId, admin: &EthWallet, epoch: u64, commit: Vec<u8>, recipients: Vec<WalletAddress>, now: u64) -> Result<(), String> {
-    relay.submit(Envelope { group_id: gid, epoch: EpochId(epoch), kind: EnvelopeKind::Commit, sender: admin.address(), recipients, ciphertext: commit, group_seq: None }, now).map(|_| ()).map_err(|e| e.to_string())
+    relay.submit_as(admin.address(), Envelope { group_id: gid, epoch: EpochId(epoch), kind: EnvelopeKind::Commit, sender: admin.address(), recipients, ciphertext: commit, group_seq: None }, now).map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn onboard(relay: &mut DeliveryService, gid: GroupId, admin: &EthWallet, joiner: WalletAddress, epoch: u64, welcome: Vec<u8>, tree: Vec<u8>, now: u64) -> Result<(), String> {
-    relay.onboard(gid, admin.address(), joiner, Envelope { group_id: gid, epoch: EpochId(epoch), kind: EnvelopeKind::Welcome, sender: admin.address(), recipients: vec![joiner], ciphertext: welcome, group_seq: None }, tree, now).map_err(|e| e.to_string())
+    relay.onboard(gid, admin.address(), None, joiner, Envelope { group_id: gid, epoch: EpochId(epoch), kind: EnvelopeKind::Welcome, sender: admin.address(), recipients: vec![joiner], ciphertext: welcome, group_seq: None }, tree, now).map_err(|e| e.to_string())
 }
 
 /// Drain Saul's mailbox, decrypt each application message, fold domain events into the
@@ -418,7 +418,7 @@ fn audit_rows(chain: &AuditChain) -> Vec<UiAudit> {
             AuditEvent::MemberRemoved { .. } => ("MemberRemoved".into(), "Member offboarded".into(), "Saul".into()),
             AuditEvent::AgentAdded { .. } => ("AgentAdded".into(), "@crm-agent added to #deals".into(), "Saul".into()),
             AuditEvent::AgentRemoved { .. } => ("AgentRemoved".into(), "Agent removed".into(), "Saul".into()),
-            AuditEvent::KeyPackagePublished { .. } => ("KeyPackagePublished".into(), "Device key published · ML-KEM-768".into(), "member".into()),
+            AuditEvent::KeyPackagePublished { .. } => ("KeyPackagePublished".into(), "Device key published · X25519/Ed25519".into(), "member".into()),
             AuditEvent::EnvelopeReceipt { size, kind, .. } => ("EnvelopeReceipt".into(), format!("Envelope delivered · {} B · {:?}", size, kind), "member".into()),
             AuditEvent::RoleAsserted { .. } => ("RoleAsserted".into(), "Role asserted".into(), "Saul".into()),
             AuditEvent::RoleRevoked { .. } => ("RoleRevoked".into(), "Role revoked".into(), "system".into()),

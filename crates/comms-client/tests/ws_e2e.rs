@@ -96,6 +96,7 @@ async fn two_clients_exchange_a_message_over_websocket() {
         .onboard(
             gid,
             bob_w.address(),
+            None,
             Envelope {
                 group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
                 sender: alice_w.address(), recipients: vec![bob_w.address()], ciphertext: add.welcome, group_seq: None,

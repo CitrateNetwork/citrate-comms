@@ -17,6 +17,8 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 hex = "0.4"
+# FWA-C11-07: SHA-256 for the non-reversible admin-token log fingerprint.
+sha2 = { workspace = true }
 # WebSocket transport.
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

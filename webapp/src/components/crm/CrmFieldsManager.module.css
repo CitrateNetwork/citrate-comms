@@ -1,0 +1,132 @@
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-decoration: none;
+}
+.back:hover {
+  color: var(--citrate-green-dark);
+}
+.note {
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.5;
+  max-width: 720px;
+}
+.section {
+  margin-top: var(--s-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+  background: var(--paper-pure);
+}
+.sectionHead {
+  font-weight: 600;
+  font-size: var(--t-md);
+  margin-bottom: var(--s-3);
+}
+.list {
+  display: flex;
+  flex-direction: column;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px dashed var(--border-2);
+  font-size: var(--t-sm);
+}
+.disabled {
+  opacity: 0.5;
+}
+.fLabel {
+  font-weight: 600;
+  min-width: 140px;
+}
+.fKey {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.fType {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  background: var(--stone-100);
+  border-radius: var(--r-1);
+  padding: 1px 7px;
+}
+.fLock {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--fg-3);
+}
+.rowActions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--s-3);
+}
+.linkBtn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--t-xs);
+  color: var(--citrate-green-dark);
+  padding: 0;
+}
+.linkBtn:hover {
+  text-decoration: underline;
+}
+.danger {
+  color: var(--danger);
+}
+.empty {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  padding: var(--s-2) 0;
+}
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: var(--s-3);
+  border: 1px dashed var(--border-2);
+  background: none;
+  border-radius: var(--r-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.addBtn:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-dark);
+}
+.addForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+.input {
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  padding: var(--s-2);
+  font-size: var(--t-sm);
+  background: var(--paper-pure);
+  color: var(--fg-1);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.err {
+  color: var(--danger);
+  font-size: var(--t-xs);
+}

@@ -1,0 +1,118 @@
+.note {
+  background: var(--citrate-green-tint);
+  border: 1px solid var(--citrate-green);
+  border-radius: var(--r-2);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--t-sm);
+  color: var(--citrate-green-dark);
+  line-height: 1.5;
+  flex: 0 0 auto;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--s-4);
+  overflow-y: auto;
+}
+.card {
+  background: var(--paper-pure);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.name {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-transform: capitalize;
+}
+.purpose {
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  font-style: italic;
+  margin: 0;
+}
+.sponsor {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin-top: auto;
+}
+.addToChan {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.chanSelect {
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-1);
+  padding: 4px 8px;
+  font-size: var(--t-xs);
+  background: var(--paper-pure);
+}
+.noChan {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+/* ── Personas (the agent brains) ────────────────────────────────────────── */
+.personas {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.personasHead {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-3);
+}
+.personaCard {
+  background: var(--paper-pure);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.personaCard:hover {
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 4px 16px var(--shadow-soft);
+}
+.chatCta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-weight: 600;
+  font-size: var(--t-sm);
+  color: var(--citrate-green-dark);
+  margin-top: auto;
+}

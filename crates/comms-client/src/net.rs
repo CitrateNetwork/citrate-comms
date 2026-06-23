@@ -157,6 +157,9 @@ impl NetSession {
                 .onboard(
                     gid,
                     peer,
+                    // We are the channel registrar (workspace owner / trust anchor),
+                    // so no owner-signed AddMember grant is required (FWA-C11-03).
+                    None,
                     Envelope {
                         group_id: gid,
                         epoch: EpochId(epoch),
