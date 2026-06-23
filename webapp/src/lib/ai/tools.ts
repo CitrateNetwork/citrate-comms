@@ -16,6 +16,7 @@ import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
+import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
 import type { CrmEntity } from "@/lib/domain/crm-enums";
 import { getMemoryStore, neonMemoryStore, crmRepo, type TrustTier } from "@/lib/memory";
 import { logToolCall, finishToolCall, type ToolAuditCtx } from "./audit";
@@ -273,6 +274,79 @@ export function citrateCommsTools(ctx: ToolContext) {
         },
       ),
     }),
+
+    // ── Runner tools (delegated to the comms-agent-runner; S3) ──
+    // Reads run inline; terminal/code are HITL-gated (propose → approve → run).
+    "web.search": tool({
+      description: "Search the live web via the agent runner. Returns cited results (title, url, snippet). Use for company/market research; cite every external claim.",
+      inputSchema: z.object({ query: z.string().min(1).max(400), k: z.number().int().min(1).max(10).default(5) }),
+      execute: audited("web.search", Capability.ReadChannel, async (a: { query: string; k: number }) => {
+        try {
+          return await webSearch(a.query, a.k);
+        } catch (e) {
+          if (e instanceof RunnerUnavailableError) return { results: [], available: false, note: "Web search is unavailable (agent runner not configured)." };
+          throw e;
+        }
+      }),
+    }),
+    "web.fetch": tool({
+      description: "Fetch and extract the readable text of a web page via the runner. Use after web.search to read a source.",
+      inputSchema: z.object({ url: z.string().url() }),
+      execute: audited("web.fetch", Capability.ReadChannel, async (a: { url: string }) => {
+        try {
+          return await webFetch(a.url);
+        } catch (e) {
+          if (e instanceof RunnerUnavailableError) return { text: "", available: false, note: "Web fetch is unavailable (agent runner not configured)." };
+          throw e;
+        }
+      }),
+    }),
+    "chart.render": tool({
+      description: "Render a chart artifact from a spec via the runner; returns a URL to embed in a report.",
+      inputSchema: z.object({ spec: z.record(z.string(), z.unknown()).describe("a chart spec (e.g. vega-lite-ish)") }),
+      execute: audited("chart.render", Capability.ReadChannel, async (a: { spec: Record<string, unknown> }) => {
+        try {
+          return await chartRender(a.spec);
+        } catch (e) {
+          if (e instanceof RunnerUnavailableError) return { url: null, available: false, note: "Chart rendering is unavailable (agent runner not configured)." };
+          throw e;
+        }
+      }),
+    }),
+    "terminal.exec": tool({
+      description: "Propose running an allow-listed shell command in the runner's capsule sandbox. HITL: queued for human approval, then executed in the sandbox. Use for read-only inspection of exported data.",
+      inputSchema: z.object({ cmd: z.string().min(1).max(2000), cwd: z.string().max(400).optional() }),
+      execute: async (a: { cmd: string; cwd?: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "terminal.exec",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "runner.terminal", cmd: a.cmd, cwd: a.cwd },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval before it runs in the sandbox." };
+      },
+    }),
+    "code.run": tool({
+      description: "Propose running code over exported CRM data in the runner's sandbox. HITL: queued for human approval, then executed; returns stdout + artifacts. Prefer reproducible analyses.",
+      inputSchema: z.object({
+        lang: z.enum(["python", "node", "bash"]),
+        source: z.string().min(1).max(20000),
+        files: z.array(z.object({ name: z.string().max(120), content: z.string().max(100000) })).max(10).optional(),
+      }),
+      execute: async (a: { lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "code.run",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "runner.code", lang: a.lang, source: a.source, files: a.files },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval before it runs in the sandbox." };
+      },
+    }),
   };
 
   // Filter to the persona allow-list (if provided) — implemented tools only.
@@ -281,4 +355,15 @@ export function citrateCommsTools(ctx: ToolContext) {
 }
 
 /** Tool names the registry currently IMPLEMENTS (others are declared but not yet live). */
-export const IMPLEMENTED_TOOLS: ToolName[] = ["crm.read", "memory.recall", "memory.assert", "crm.note", "crm.write"];
+export const IMPLEMENTED_TOOLS: ToolName[] = [
+  "crm.read",
+  "memory.recall",
+  "memory.assert",
+  "crm.note",
+  "crm.write",
+  "web.search",
+  "web.fetch",
+  "chart.render",
+  "terminal.exec",
+  "code.run",
+];
