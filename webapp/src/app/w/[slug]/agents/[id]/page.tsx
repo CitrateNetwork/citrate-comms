@@ -33,7 +33,7 @@ export default async function AgentChatPage({ params }: { params: Promise<{ slug
     <AgentChat
       workspaceId={ws.id}
       slug={slug}
-      persona={{ id: persona.id, name: persona.name, key: persona.key }}
+      persona={{ id: persona.id, name: persona.name, key: persona.key, tools: persona.tools }}
       personas={personas.map((p) => ({ id: p.id, name: p.name, key: p.key }))}
     />
   );

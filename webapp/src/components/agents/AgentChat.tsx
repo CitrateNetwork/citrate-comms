@@ -19,7 +19,28 @@ export interface PersonaOpt {
   id: string;
   name: string;
   key: string;
+  tools?: string[];
 }
+
+/** Plain-English, honest descriptions of what each tool lets the agent do. */
+const TOOL_LABEL: Record<string, string> = {
+  "crm.read": "Read your CRM records",
+  "crm.write": "Propose CRM edits (you approve)",
+  "crm.note": "Propose notes on records (you approve)",
+  "pm.read": "Read projects & tasks",
+  "pm.write": "Propose tasks (you approve)",
+  "ledger.write": "Propose witness-Ledger entries (you approve)",
+  "thread.summarize": "Read a channel to summarize it",
+  "memory.recall": "Recall from the knowledge graph",
+  "memory.assert": "Propose graph findings (you approve)",
+  "documents.read": "Search uploaded documents",
+  "documents.write": "Propose new documents (you approve)",
+  "web.search": "Search the live web",
+  "web.fetch": "Read a web page",
+  "terminal.exec": "Run sandboxed commands (you approve)",
+  "code.run": "Run sandboxed code (you approve)",
+  "chart.render": "Render charts",
+};
 
 interface ChatMessage {
   id: string;
@@ -117,6 +138,7 @@ export function AgentChat({
 
   const { messages, sendMessage, status, error } = useChat({ transport });
   const busy = status === "submitted" || status === "streaming";
+  const [showCaps, setShowCaps] = useState(false);
   const list = messages as unknown as ChatMessage[];
   const lastId = list[list.length - 1]?.id;
 
@@ -139,21 +161,45 @@ export function AgentChat({
             <div className={styles.sub}>Audited · reads tools before it answers · writes are approval-gated</div>
           </div>
         </div>
-        {personas.length > 1 && (
-          <select
-            className={styles.picker}
-            value={persona.id}
-            onChange={(e) => router.push(`/w/${slug}/agents/${e.target.value}`)}
-            aria-label="Switch persona"
-          >
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        )}
+        <div className={styles.headRight}>
+          <button className={styles.capsBtn} onClick={() => setShowCaps((v) => !v)} aria-expanded={showCaps}>
+            <Icon name="shield" size={12} /> What can it do?
+          </button>
+          {personas.length > 1 && (
+            <select
+              className={styles.picker}
+              value={persona.id}
+              onChange={(e) => router.push(`/w/${slug}/agents/${e.target.value}`)}
+              aria-label="Switch persona"
+            >
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
       </header>
+
+      {showCaps && (
+        <div className={styles.caps}>
+          <div className={styles.capsTitle}>What {persona.name} can do</div>
+          {(persona.tools ?? []).length > 0 ? (
+            <ul className={styles.capsList}>
+              {(persona.tools ?? []).map((t) => (
+                <li key={t}>{TOOL_LABEL[t] ?? t}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className={styles.capsNote}>This persona has no tools enabled yet.</div>
+          )}
+          <div className={styles.capsNote}>
+            Every action is written to the audit trail. It reads with tools before it answers, and any write or
+            sandbox action is queued for your approval — it can’t change records or membership on its own.
+          </div>
+        </div>
+      )}
 
       <div className={styles.scroll}>
         {list.length === 0 && (

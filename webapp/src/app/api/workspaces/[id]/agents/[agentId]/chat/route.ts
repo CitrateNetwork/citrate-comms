@@ -92,8 +92,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (threadId && lastUser) await appendAgentMessage({ workspaceId, threadId, role: "user", content: lastUser });
   await appendAudit({ workspaceId, actorSub: sub, event: "agent_invoked", target: `${persona.key}:${threadId ?? ""}` });
 
-  const historyTurns = Number(process.env.CITRATE_HISTORY_TURNS ?? 8);
-  const maxOutputTokens = Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 1024);
+  // Budget ceilings (S6 hardening): hard caps so a mis-set/customized persona can't run
+  // away — clamped regardless of the persona's configured values.
+  const historyTurns = Math.min(Number(process.env.CITRATE_HISTORY_TURNS ?? 8), 20);
+  const maxOutputTokens = Math.min(Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 1024), 4096);
+  const stepCeiling = Number(process.env.COMMS_AGENT_MAX_STEPS ?? 16);
+  const maxSteps = Math.max(1, Math.min(persona.maxSteps, stepCeiling));
 
   const system = buildSystemPrompt({
     persona: { name: persona.name, mission: persona.mission, tools: persona.tools, skills: persona.skills },
@@ -116,7 +120,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     system,
     messages: await convertToModelMessages(messages.slice(-historyTurns)),
     tools,
-    stopWhen: stepCountIs(persona.maxSteps),
+    stopWhen: stepCountIs(maxSteps),
     temperature: persona.temperature,
     maxOutputTokens,
     onFinish: async ({ text }) => {
