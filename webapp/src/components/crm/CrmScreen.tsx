@@ -8,7 +8,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Btn, DataChip } from "@/components/primitives";
+import { Btn, DataChip, Icon } from "@/components/primitives";
 import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
 import { CrmTable } from "./CrmTable";
 import type { DealStage } from "@/lib/domain/enums";
@@ -53,6 +53,7 @@ export function CrmScreen({
   workspaceId,
   workspaceSlug,
   canEdit,
+  canDelete = false,
   accounts,
   deals,
   contacts = [],
@@ -60,12 +61,24 @@ export function CrmScreen({
   workspaceId: string;
   workspaceSlug: string;
   canEdit: boolean;
+  canDelete?: boolean;
   accounts: UiAccount[];
   deals: UiDeal[];
   contacts?: UiContact[];
 }) {
   const router = useRouter();
   const [dealList, setDealList] = useState<UiDeal[]>(deals);
+
+  async function delDeal(dealId: string) {
+    if (!confirm("Delete this deal? This can't be undone.")) return;
+    const prev = dealList;
+    setDealList((p) => p.filter((d) => d.id !== dealId));
+    const r = await fetch(`/api/workspaces/${workspaceId}/crm/deal/${dealId}`, { method: "DELETE" });
+    if (!r.ok) {
+      setDealList(prev); // restore on failure
+      router.refresh();
+    }
+  }
   const [newAccount, setNewAccount] = useState(false);
   const [newDeal, setNewDeal] = useState(false);
   const [view, setView] = useState<CrmView>("pipeline");
@@ -124,11 +137,27 @@ export function CrmScreen({
           emptyHint="No deals"
           onMove={canEdit ? move : () => {}}
           renderCard={(d) => (
-            <Link href={`/w/${workspaceSlug}/crm/deals/${d.id}`} className={styles.dealCard}>
-              <div className={styles.dealName}>{d.name}</div>
-              {d.accountName && <DataChip>{d.accountName}</DataChip>}
-              <div className={styles.dealValue}>{money(d.valueMinor)}</div>
-            </Link>
+            <div className={styles.dealCardWrap}>
+              <Link href={`/w/${workspaceSlug}/crm/deals/${d.id}`} className={styles.dealCard}>
+                <div className={styles.dealName}>{d.name}</div>
+                {d.accountName && <DataChip>{d.accountName}</DataChip>}
+                <div className={styles.dealValue}>{money(d.valueMinor)}</div>
+              </Link>
+              {canDelete && (
+                <button
+                  className={styles.cardDelete}
+                  title="Delete deal"
+                  aria-label="Delete deal"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void delDeal(d.id);
+                  }}
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              )}
+            </div>
           )}
         />
       ) : (

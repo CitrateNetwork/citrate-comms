@@ -23,6 +23,27 @@
 .askLink:hover {
   color: var(--citrate-green-dark);
 }
+.headActions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.deleteBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border-2);
+  background: var(--paper-pure);
+  border-radius: var(--r-2);
+  padding: 4px 10px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  cursor: pointer;
+}
+.deleteBtn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
 .headMain {
   display: flex;
   align-items: center;

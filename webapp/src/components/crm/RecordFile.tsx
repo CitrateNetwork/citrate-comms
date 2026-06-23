@@ -47,6 +47,7 @@ export function RecordFile({
   backHref,
   canEdit = false,
   canManageFields = false,
+  canDelete = false,
 }: {
   file: RecordFileData;
   slug: string;
@@ -54,10 +55,26 @@ export function RecordFile({
   backHref: string;
   canEdit?: boolean;
   canManageFields?: boolean;
+  canDelete?: boolean;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("overview");
+  const [deleting, setDeleting] = useState(false);
   const base = `/api/workspaces/${workspaceId}/crm/${file.entity}/${file.recordId}`;
+
+  async function deleteRecord() {
+    if (!confirm(`Delete this ${file.entity}? This can't be undone.`)) return;
+    setDeleting(true);
+    const r = await fetch(base, { method: "DELETE" });
+    if (r.ok) {
+      router.push(backHref);
+      router.refresh();
+      return;
+    }
+    setDeleting(false);
+    const data = (await r.json().catch(() => ({}))) as { error?: string; message?: string };
+    alert(data.message ?? (data.error === "account_has_children" ? "Delete its deals and contacts first." : "Couldn't delete this record."));
+  }
 
   const tabs: { key: Tab; label: string; count?: number }[] = [
     { key: "overview", label: "Overview" },
@@ -75,9 +92,16 @@ export function RecordFile({
           <Link href={backHref} className={styles.back}>
             <Icon name="anchor" size={13} /> Back to CRM
           </Link>
-          <Link href={`/w/${slug}/agents`} className={styles.askLink}>
-            <Icon name="agents" size={13} /> Ask an agent about this {file.entity}
-          </Link>
+          <div className={styles.headActions}>
+            <Link href={`/w/${slug}/agents`} className={styles.askLink}>
+              <Icon name="agents" size={13} /> Ask an agent about this {file.entity}
+            </Link>
+            {canDelete && (
+              <button className={styles.deleteBtn} onClick={deleteRecord} disabled={deleting}>
+                <Icon name="x" size={12} /> {deleting ? "Deleting…" : "Delete"}
+              </button>
+            )}
+          </div>
         </div>
         <div className={styles.headMain}>
           <Avatar name={file.title} size="lg" />

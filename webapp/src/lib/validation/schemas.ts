@@ -78,6 +78,10 @@ export const moveTaskSchema = z.object({
   taskId: z.string().uuid(),
   status: z.enum(["Backlog", "Todo", "InProgress", "InReview", "Done"]),
 });
+export const editTaskSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  priority: z.enum(["low", "medium", "high"]).nullable().optional(),
+});
 
 // --- Agents ---
 export const addAgentSchema = z.object({

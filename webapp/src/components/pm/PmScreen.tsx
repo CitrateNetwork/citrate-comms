@@ -7,7 +7,7 @@
  */
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Avatar, Btn, RiskBadge } from "@/components/primitives";
+import { Avatar, Btn, Icon, RiskBadge } from "@/components/primitives";
 import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
 import type { TaskStatus } from "@/lib/domain/enums";
 import s from "@/components/common/screen.module.css";
@@ -25,6 +25,19 @@ export interface UiTask {
   assigneeName: string | null;
 }
 
+const CARD_BTN: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 20,
+  height: 20,
+  borderRadius: 4,
+  border: "1px solid var(--border-2)",
+  background: "var(--paper-pure)",
+  color: "var(--fg-3)",
+  cursor: "pointer",
+};
+
 const COLUMNS: KanbanColumn[] = [
   { key: "Backlog", label: "Backlog", accent: "var(--stone-400)" },
   { key: "Todo", label: "To do", accent: "var(--info)" },
@@ -36,11 +49,13 @@ const COLUMNS: KanbanColumn[] = [
 export function PmScreen({
   workspaceId,
   canEdit,
+  canDelete = false,
   projects,
   tasks,
 }: {
   workspaceId: string;
   canEdit: boolean;
+  canDelete?: boolean;
   projects: UiProject[];
   tasks: UiTask[];
 }) {
@@ -49,6 +64,7 @@ export function PmScreen({
   const [filter, setFilter] = useState<string>("all");
   const [newProject, setNewProject] = useState(false);
   const [newTask, setNewTask] = useState(false);
+  const [editTask, setEditTask] = useState<UiTask | null>(null);
 
   const visible = useMemo(
     () => (filter === "all" ? taskList : taskList.filter((t) => t.projectId === filter)),
@@ -62,6 +78,26 @@ export function PmScreen({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ taskId, status: toStatus as TaskStatus }),
     }).catch(() => router.refresh());
+  }
+
+  async function delTask(taskId: string) {
+    if (!confirm("Delete this task? This can't be undone.")) return;
+    const prev = taskList;
+    setTaskList((p) => p.filter((t) => t.id !== taskId));
+    const r = await fetch(`/api/workspaces/${workspaceId}/tasks/${taskId}`, { method: "DELETE" });
+    if (!r.ok) {
+      setTaskList(prev);
+      router.refresh();
+    }
+  }
+
+  async function delProject(projectId: string) {
+    if (!confirm("Delete this project? Its tasks are kept (unassigned). This can't be undone.")) return;
+    const r = await fetch(`/api/workspaces/${workspaceId}/projects/${projectId}`, { method: "DELETE" });
+    if (r.ok) {
+      setFilter("all");
+      router.refresh();
+    }
   }
 
   return (
@@ -82,6 +118,11 @@ export function PmScreen({
               ))}
             </select>
           )}
+          {canDelete && filter !== "all" && (
+            <Btn variant="ghost" size="sm" icon="x" onClick={() => delProject(filter)}>
+              Delete project
+            </Btn>
+          )}
           {canEdit && (
             <>
               <Btn variant="ghost" icon="plus" onClick={() => setNewProject(true)}>
@@ -101,12 +142,36 @@ export function PmScreen({
         emptyHint="No tasks"
         onMove={canEdit ? move : () => {}}
         renderCard={(t) => (
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
-            <div style={{ fontWeight: 600, fontSize: "var(--t-sm)" }}>{t.title}</div>
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+            <div style={{ fontWeight: 600, fontSize: "var(--t-sm)", paddingRight: canEdit || canDelete ? 40 : 0 }}>{t.title}</div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               {t.priority ? <RiskBadge level={t.priority as "low" | "medium" | "high"} /> : <span />}
               {t.assigneeName && <Avatar name={t.assigneeName} size="sm" />}
             </div>
+            {(canEdit || canDelete) && (
+              <div style={{ position: "absolute", top: 0, right: 0, display: "flex", gap: 4 }}>
+                {canEdit && (
+                  <button
+                    style={CARD_BTN}
+                    title="Edit task"
+                    aria-label="Edit task"
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditTask(t); }}
+                  >
+                    <Icon name="settings" size={12} />
+                  </button>
+                )}
+                {canDelete && (
+                  <button
+                    style={CARD_BTN}
+                    title="Delete task"
+                    aria-label="Delete task"
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); void delTask(t.id); }}
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       />
@@ -138,6 +203,78 @@ export function PmScreen({
           }}
         />
       )}
+      {editTask && (
+        <TaskEditDialog
+          workspaceId={workspaceId}
+          task={editTask}
+          onClose={() => setEditTask(null)}
+          onSaved={(patch) => {
+            setTaskList((prev) => prev.map((t) => (t.id === editTask.id ? { ...t, ...patch } : t)));
+            setEditTask(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function TaskEditDialog({
+  workspaceId,
+  task,
+  onClose,
+  onSaved,
+}: {
+  workspaceId: string;
+  task: UiTask;
+  onClose: () => void;
+  onSaved: (patch: { title: string; priority: string | null }) => void;
+}) {
+  const [title, setTitle] = useState(task.title);
+  const [priority, setPriority] = useState<string>(task.priority ?? "");
+  const [busy, setBusy] = useState(false);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (!title.trim() || busy) return;
+    setBusy(true);
+    const body = { title: title.trim(), priority: priority || null };
+    const r = await fetch(`/api/workspaces/${workspaceId}/tasks/${task.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setBusy(false);
+    if (r.ok) onSaved(body);
+  }
+
+  return (
+    <div className={s.scrim} onClick={onClose}>
+      <div className={s.dialog} onClick={(e) => e.stopPropagation()}>
+        <div className={s.dialogHead}>Edit task</div>
+        <form className={s.form} onSubmit={save}>
+          <label className={s.field}>
+            <span className={s.fieldLabel}>Title</span>
+            <input className={s.input} value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+          </label>
+          <label className={s.field}>
+            <span className={s.fieldLabel}>Priority</span>
+            <select className={s.input} value={priority} onChange={(e) => setPriority(e.target.value)}>
+              <option value="">None</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <div className={s.dialogFoot}>
+            <Btn variant="quiet" type="button" onClick={onClose}>
+              Cancel
+            </Btn>
+            <Btn variant="primary" type="submit" disabled={busy || !title.trim()}>
+              {busy ? "Saving…" : "Save"}
+            </Btn>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

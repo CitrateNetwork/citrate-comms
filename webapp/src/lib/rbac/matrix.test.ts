@@ -33,6 +33,17 @@ describe("capability_matrix (parity with rbac.rs)", () => {
     expect(can("Partner", Capability.CreateChannel)).toBe(false);
   });
 
+  it("delete cards: Owner/Admin only; Members edit but never delete", () => {
+    expect(can("Owner", Capability.DeleteRecord)).toBe(true);
+    expect(can("Admin", Capability.DeleteRecord)).toBe(true);
+    expect(can("Member", Capability.DeleteRecord)).toBe(false);
+    expect(can("Partner", Capability.DeleteRecord)).toBe(false);
+    expect(can("Guest", Capability.DeleteRecord)).toBe(false);
+    expect(can("Agent", Capability.DeleteRecord)).toBe(false);
+    // Members can still create + edit (CreateRecord).
+    expect(can("Member", Capability.CreateRecord)).toBe(true);
+  });
+
   it("enforces the agent guardrail: read + post, never membership mutation", () => {
     expect(can("Agent", Capability.PostMessage)).toBe(true);
     expect(can("Agent", Capability.ReadChannel)).toBe(true);

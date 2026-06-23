@@ -27,6 +27,7 @@ export default async function AccountFilePage({ params }: { params: Promise<{ sl
       backHref={`/w/${slug}/crm`}
       canEdit={can(ctx.role, Capability.CreateRecord)}
       canManageFields={can(ctx.role, Capability.ManageWorkspace)}
+      canDelete={can(ctx.role, Capability.DeleteRecord)}
     />
   );
 }

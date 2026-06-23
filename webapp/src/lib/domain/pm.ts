@@ -3,9 +3,9 @@
  * (Backlog → Todo → InProgress → InReview → Done); `ord` keeps within-column order.
  * Tasks can link to a conversation (linkedChannelId) — the cross-surface thread.
  */
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { projects, tasks } from "@/lib/db/schema";
+import { projects, tasks, boards, boardColumns } from "@/lib/db/schema";
 import { TASK_STATUSES, type TaskStatus } from "./enums";
 
 export { TASK_STATUSES };
@@ -99,4 +99,34 @@ export async function moveTask(workspaceId: string, taskId: string, status: Task
     .update(tasks)
     .set({ status })
     .where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
+}
+
+/** Edit a task's content (Member+). */
+export async function updateTask(
+  workspaceId: string,
+  taskId: string,
+  patch: { title?: string; priority?: string | null },
+): Promise<void> {
+  const set: Record<string, unknown> = {};
+  if (patch.title !== undefined) set.title = patch.title.trim();
+  if (patch.priority !== undefined) set.priority = patch.priority || null;
+  if (Object.keys(set).length === 0) return;
+  await db().update(tasks).set(set).where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
+}
+
+/** Delete a task (Owner/Admin). */
+export async function deleteTask(workspaceId: string, taskId: string): Promise<void> {
+  await db().delete(tasks).where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
+}
+
+/** Delete (kill) a project (Owner/Admin). Its tasks survive, unassigned; its board
+ *  scaffolding is removed. */
+export async function deleteProject(workspaceId: string, projectId: string): Promise<void> {
+  const d = db();
+  await d.update(tasks).set({ projectId: null }).where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.projectId, projectId)));
+  const boardRows = await d.select({ id: boards.id }).from(boards).where(and(eq(boards.workspaceId, workspaceId), eq(boards.projectId, projectId)));
+  const boardIds = boardRows.map((b) => b.id);
+  if (boardIds.length > 0) await d.delete(boardColumns).where(inArray(boardColumns.boardId, boardIds));
+  await d.delete(boards).where(and(eq(boards.workspaceId, workspaceId), eq(boards.projectId, projectId)));
+  await d.delete(projects).where(and(eq(projects.workspaceId, workspaceId), eq(projects.id, projectId)));
 }

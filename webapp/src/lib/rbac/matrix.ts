@@ -35,7 +35,8 @@ export enum Capability {
   RemoveAgent = "RemoveAgent",
   AssignRole = "AssignRole",
   ManageWorkspace = "ManageWorkspace",
-  CreateRecord = "CreateRecord", // CRM / PM entities
+  CreateRecord = "CreateRecord", // CRM / PM entities — create + edit (Member+)
+  DeleteRecord = "DeleteRecord", // delete/kill CRM + PM records — Owner/Admin only (auditability)
 }
 
 const ADMIN_CAPS = new Set<Capability>([
@@ -50,6 +51,7 @@ const ADMIN_CAPS = new Set<Capability>([
   Capability.RemoveAgent,
   Capability.AssignRole,
   Capability.CreateRecord,
+  Capability.DeleteRecord,
 ]);
 
 const MEMBER_CAPS = new Set<Capability>([

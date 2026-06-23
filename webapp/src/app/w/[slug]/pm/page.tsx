@@ -25,6 +25,7 @@ export default async function PmPage({ params }: { params: Promise<{ slug: strin
     <PmScreen
       workspaceId={ws.id}
       canEdit={can(ctx.role, Capability.CreateRecord)}
+      canDelete={can(ctx.role, Capability.DeleteRecord)}
       projects={projects.map((p) => ({ id: p.id, name: p.name }))}
       tasks={tasks.map((t) => ({
         id: t.id,

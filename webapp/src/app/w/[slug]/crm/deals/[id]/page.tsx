@@ -27,6 +27,7 @@ export default async function DealFilePage({ params }: { params: Promise<{ slug:
       backHref={`/w/${slug}/crm`}
       canEdit={can(ctx.role, Capability.CreateRecord)}
       canManageFields={can(ctx.role, Capability.ManageWorkspace)}
+      canDelete={can(ctx.role, Capability.DeleteRecord)}
     />
   );
 }
