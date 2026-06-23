@@ -37,6 +37,14 @@ export const inviteSchema = z.object({
   scopeChannelId: z.string().uuid().optional(),
 });
 
+/** Batch invite — many emails, one role/scope, sent in one action. */
+export const batchInviteSchema = z.object({
+  workspaceId: z.string().uuid(),
+  emails: z.array(z.string().email()).min(1).max(100),
+  role: z.enum(["Admin", "Member", "Partner", "Guest"]),
+  scopeChannelId: z.string().uuid().optional(),
+});
+
 // --- CRM ---
 export const createAccountSchema = z.object({
   name: z.string().trim().min(1).max(120),

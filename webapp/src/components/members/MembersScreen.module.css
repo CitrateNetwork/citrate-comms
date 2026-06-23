@@ -233,3 +233,88 @@
   color: var(--danger);
   font-size: var(--t-xs);
 }
+
+/* ── Batch invite chip field ─────────────────────────────────────────────── */
+.chipField {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  align-items: center;
+  min-height: 40px;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+}
+.chipField:focus-within {
+  border-color: var(--citrate-green-deep);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.emailChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  border-radius: var(--r-1);
+  padding: 2px 4px 2px 8px;
+  font-size: var(--t-xs);
+}
+.chipX {
+  display: inline-flex;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--citrate-green-dark);
+  opacity: 0.6;
+  padding: 0;
+}
+.chipX:hover {
+  opacity: 1;
+}
+.chipInput {
+  flex: 1;
+  min-width: 160px;
+  border: none;
+  outline: none;
+  background: none;
+  font-size: var(--t-sm);
+  font-family: var(--font-sans);
+  color: var(--fg-1);
+  padding: 6px 2px;
+}
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 280px;
+  overflow-y: auto;
+}
+.resultRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  padding: var(--s-1) 0;
+  border-bottom: 1px dashed var(--border-2);
+}
+.resultEmail {
+  color: var(--fg-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--success);
+  font-size: var(--t-xs);
+  flex: 0 0 auto;
+}
+.warn {
+  color: var(--citrate-yellow-deep, var(--danger));
+  font-size: var(--t-xs);
+  flex: 0 0 auto;
+}
