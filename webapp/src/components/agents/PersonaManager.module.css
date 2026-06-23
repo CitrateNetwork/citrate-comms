@@ -1,0 +1,76 @@
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-decoration: none;
+}
+.back:hover {
+  color: var(--citrate-green-dark);
+}
+.note {
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.5;
+  max-width: 760px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s-3);
+  margin-top: var(--s-3);
+}
+.card {
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+  background: var(--paper-pure);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.name {
+  font-weight: 600;
+}
+.meta {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-2);
+}
+.editLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--t-sm);
+  color: var(--citrate-green-dark);
+  text-decoration: none;
+}
+.linkBtn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  padding: 0;
+}
+.linkBtn:hover {
+  text-decoration: underline;
+  color: var(--citrate-green-dark);
+}
+.danger {
+  color: var(--danger);
+}
+.danger:hover {
+  color: var(--danger);
+}

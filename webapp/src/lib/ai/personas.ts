@@ -142,6 +142,21 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
 
 export const DEFAULT_PERSONA_LIST: PersonaTemplate[] = Object.values(DEFAULT_PERSONAS);
 
+/** Every tool name (for validating a customized allow-list). */
+export const ALL_TOOL_NAMES: ToolName[] = [
+  "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
+  "memory.recall", "memory.assert", "documents.read", "documents.write",
+  "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
+];
+
+/** The editable prompt layers (1–4). Layer 6 guardrails are force-included, not editable. */
+export const PROMPT_LAYERS: { layer: number; key: string; label: string; help: string }[] = [
+  { layer: 1, key: "mission", label: "Persona & mission", help: "Who this agent is and what it's for." },
+  { layer: 2, key: "capabilities", label: "Capabilities", help: "Override the tool/usage guidance (blank = default)." },
+  { layer: 3, key: "workspaceKnowledge", label: "Workspace knowledge", help: "Org/workspace facts the agent should know." },
+  { layer: 4, key: "skills", label: "Skills / workflows", help: "Override the skill prompt block (blank = enabled skills)." },
+];
+
 /** Agentile-aligned skill bundles — each is a prompt fragment injected at layer 4.
  *  Mirrors AGENTILE.md / citrate-explorer/.agentile/rules/CORE_RULES.md and the
  *  citrate-memories provenance invariants. */

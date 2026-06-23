@@ -44,6 +44,7 @@ export function AgentsScreen({
   workspaceId,
   workspaceSlug,
   canManage,
+  canCustomize = false,
   agents,
   channels,
   personas = [],
@@ -51,6 +52,7 @@ export function AgentsScreen({
   workspaceId: string;
   workspaceSlug: string;
   canManage: boolean;
+  canCustomize?: boolean;
   agents: UiAgent[];
   channels: UiChannelOpt[];
   personas?: UiPersona[];
@@ -89,7 +91,14 @@ export function AgentsScreen({
 
       {personas.length > 0 && (
         <section className={styles.personas}>
-          <div className={styles.personasHead}>Talk to a persona</div>
+          <div className={styles.personasHeadRow}>
+            <div className={styles.personasHead}>Talk to a persona</div>
+            {canCustomize && (
+              <Link href={`/w/${workspaceSlug}/settings/agents`} className={styles.customizeLink}>
+                Customize personas
+              </Link>
+            )}
+          </div>
           <div className={styles.grid}>
             {personas.map((p) => (
               <Link key={p.id} href={`/w/${workspaceSlug}/agents/${p.id}`} className={styles.personaCard}>

@@ -85,11 +85,24 @@
   flex-direction: column;
   gap: var(--s-3);
 }
+.personasHeadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 .personasHead {
   font-size: var(--t-xs);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--fg-3);
+}
+.customizeLink {
+  font-size: var(--t-xs);
+  color: var(--citrate-green-dark);
+  text-decoration: none;
+}
+.customizeLink:hover {
+  text-decoration: underline;
 }
 .personaCard {
   background: var(--paper-pure);
