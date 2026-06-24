@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { Avatar, Btn, Icon, SurfBadge } from "@/components/primitives";
+import { Markdown } from "./Markdown";
 import styles from "./AgentChat.module.css";
 
 export interface PersonaOpt {
@@ -251,7 +252,7 @@ export function AgentChat({
               )}
               {text && (
                 <div className={styles.bubble}>
-                  <div className={styles.rich}>{text}</div>
+                  <Markdown>{text}</Markdown>
                   {citations.length > 0 && (
                     <div className={styles.citations}>
                       <div className={styles.citLbl}>Sources · what it read</div>
