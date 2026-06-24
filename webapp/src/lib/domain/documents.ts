@@ -66,7 +66,25 @@ async function extractDocText(name: string, mime: string | null, buf: Buffer): P
       return null;
     }
   }
-  return null;
+  if (lower.endsWith(".xlsx") || lower.endsWith(".xls") || mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+    try {
+      const XLSX = await import("xlsx");
+      const wb = XLSX.read(buf, { type: "buffer" });
+      return wb.SheetNames.map((n) => `# ${n}\n${XLSX.utils.sheet_to_csv(wb.Sheets[n]!)}`).join("\n\n");
+    } catch {
+      return null;
+    }
+  }
+  if (lower.endsWith(".docx") || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    try {
+      const mammoth = await import("mammoth");
+      const r = await mammoth.extractRawText({ buffer: buf });
+      return r.value;
+    } catch {
+      return null;
+    }
+  }
+  return null; // images/video/other — stored as metadata only (no RAG text)
 }
 
 const CHUNK_SIZE = 1200;

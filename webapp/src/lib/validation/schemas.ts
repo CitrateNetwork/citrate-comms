@@ -137,6 +137,16 @@ export const approvalDecisionSchema = z.object({
   decision: z.enum(["approved", "rejected"]),
 });
 
+// --- Attachments (ATT) ---
+export const documentFinalizeSchema = z.object({
+  blobUrl: z.string().url().max(1000),
+  name: z.string().trim().min(1).max(200),
+  mime: z.string().max(120).optional(),
+  accountId: z.string().uuid().optional(),
+  dealId: z.string().uuid().optional(),
+  channelId: z.string().uuid().optional(),
+});
+
 // --- Persona customization (S5) ---
 const personaModelSchema = z.object({
   gateway: z.string().max(120),
