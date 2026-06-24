@@ -220,7 +220,10 @@ export function RecordFile({
             ) : (
               <div className={styles.attachGrid}>
                 {file.documents.map((d) => (
-                  <Attachment key={d.id} item={{ id: d.id, name: d.name, mime: d.mime, url: d.blobUrl }} />
+                  <Attachment
+                    key={d.id}
+                    item={{ id: d.id, name: d.name, mime: d.mime, url: d.blobUrl, downloadUrl: `/api/workspaces/${workspaceId}/documents/${d.id}/download` }}
+                  />
                 ))}
               </div>
             )}
