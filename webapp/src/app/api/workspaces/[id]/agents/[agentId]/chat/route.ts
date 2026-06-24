@@ -21,6 +21,7 @@ import { appendAudit } from "@/lib/audit/chain";
 import { getInferenceModel } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { citrateCommsTools } from "@/lib/ai/tools";
+import { HITL_TOOLS } from "@/lib/ai/personas";
 import { resolvePersona } from "@/lib/domain/personas";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 import { getOrCreateThread, appendAgentMessage } from "@/lib/domain/agent-threads";
@@ -62,14 +63,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const persona = await resolvePersona(workspaceId, personaId);
   if (!persona || !persona.enabled) return Response.json({ error: "persona_not_found" }, { status: 404 });
 
-  let body: { messages?: UIMessage[]; threadId?: string };
+  let body: { messages?: UIMessage[]; threadId?: string; incognito?: boolean };
   try {
-    body = (await req.json()) as { messages?: UIMessage[]; threadId?: string };
+    body = (await req.json()) as { messages?: UIMessage[]; threadId?: string; incognito?: boolean };
   } catch {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
   const messages = Array.isArray(body.messages) ? body.messages : [];
   if (messages.length === 0) return Response.json({ error: "no_messages" }, { status: 400 });
+
+  // CH-2: incognito = private, session-only. No thread/message persistence, no audit, and
+  // read-only tools (no writes ⇒ nothing that must be logged), so it leaves no trace.
+  const incognito = body.incognito === true;
 
   // Inference model (gateway, or the persona's frontier route when enabled).
   let model;
@@ -80,17 +85,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return Response.json({ error: "Inference is not available right now." }, { status: 503 });
   }
 
-  // Persist the thread + the user turn (best-effort).
+  // Persist the thread + the user turn (best-effort) — skipped entirely in incognito.
   const lastUser = uiText(messages[messages.length - 1]);
-  const threadId = await getOrCreateThread({
-    workspaceId,
-    personaId,
-    invokedBySub: sub,
-    title: lastUser ? lastUser.slice(0, 80) : `Chat with ${persona.name}`,
-    threadId: body.threadId,
-  });
-  if (threadId && lastUser) await appendAgentMessage({ workspaceId, threadId, role: "user", content: lastUser });
-  await appendAudit({ workspaceId, actorSub: sub, event: "agent_invoked", target: `${persona.key}:${threadId ?? ""}` });
+  const threadId = incognito
+    ? null
+    : await getOrCreateThread({
+        workspaceId,
+        personaId,
+        invokedBySub: sub,
+        title: lastUser ? lastUser.slice(0, 80) : `Chat with ${persona.name}`,
+        threadId: body.threadId,
+      });
+  if (!incognito) {
+    if (threadId && lastUser) await appendAgentMessage({ workspaceId, threadId, role: "user", content: lastUser });
+    await appendAudit({ workspaceId, actorSub: sub, event: "agent_invoked", target: `${persona.key}:${threadId ?? ""}` });
+  }
 
   // Budget ceilings (S6 hardening): hard caps so a mis-set/customized persona can't run
   // away — clamped regardless of the persona's configured values.
@@ -105,13 +114,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     context: { scope: `workspace ${workspaceId}` },
   });
 
+  // Incognito ⇒ read-only tools (drop every HITL/mutating tool) so nothing needs auditing.
+  const allow = new Set(persona.tools);
+  if (incognito) for (const t of persona.tools) if (HITL_TOOLS.has(t)) allow.delete(t);
+
   const tools = citrateCommsTools({
     workspaceId,
     invokedBySub: sub,
     personaId,
     threadId,
     agentRole: "Agent",
-    allow: new Set(persona.tools),
+    allow,
+    audit: !incognito,
     fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   });
 

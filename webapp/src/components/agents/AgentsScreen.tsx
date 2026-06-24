@@ -9,7 +9,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Avatar, Btn, SurfBadge, SevDot } from "@/components/primitives";
+import { Avatar, Btn, Icon, SurfBadge, SevDot } from "@/components/primitives";
 import s from "@/components/common/screen.module.css";
 import styles from "./AgentsScreen.module.css";
 
@@ -76,11 +76,16 @@ export function AgentsScreen({
           <div className={s.eyebrow}>Workspace</div>
           <h1 className={s.title}>Agents</h1>
         </div>
-        {canManage && (
-          <Btn variant="primary" icon="plus" onClick={() => setAdding(true)}>
-            Add agent
-          </Btn>
-        )}
+        <div className={s.headActions}>
+          <Link href={`/w/${workspaceSlug}/agents/history`} className={styles.historyLink}>
+            <Icon name="clock" size={14} /> Conversation history
+          </Link>
+          {canManage && (
+            <Btn variant="primary" icon="plus" onClick={() => setAdding(true)}>
+              Add agent
+            </Btn>
+          )}
+        </div>
       </header>
 
       <div className={styles.note}>

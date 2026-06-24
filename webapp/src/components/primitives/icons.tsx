@@ -44,6 +44,7 @@ const PATHS: Record<string, string> = {
   wallet: "M4 7h16v11H4zM4 7l2-3h12l2 3M16 12h2",
   logout: "M14 4h5v16h-5M14 12H4M7 9l-3 3 3 3",
   user: "M12 3a4 4 0 100 8 4 4 0 000-8zM5 21v-1a7 7 0 0114 0v1",
+  "eye-off": "M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.4 5.3A9.6 9.6 0 0112 5c5 0 9 4 10 7a13 13 0 01-3 4M6.1 6.1A13 13 0 002 12c1 3 5 7 10 7a9.6 9.6 0 003.6-.7",
 };
 
 export type IconName = keyof typeof PATHS | string;

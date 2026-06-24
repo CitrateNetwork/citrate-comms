@@ -129,12 +129,17 @@ export function AgentChat({
   const router = useRouter();
   const convIdRef = useRef<string>(newConvId());
   const [input, setInput] = useState("");
+  const [incognito, setIncognito] = useState(false);
+  const incognitoRef = useRef(false);
+  useEffect(() => {
+    incognitoRef.current = incognito;
+  }, [incognito]);
 
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: `/api/workspaces/${workspaceId}/agents/${persona.id}/chat`,
-        body: () => ({ threadId: convIdRef.current }),
+        body: () => ({ threadId: convIdRef.current, incognito: incognitoRef.current }),
       }),
     [workspaceId, persona.id],
   );
@@ -182,6 +187,16 @@ export function AgentChat({
     setShowHistory(false);
   }
 
+  // CH-2: toggling incognito always starts a clean session so a saved transcript and a
+  // private one never share a window. Incognito turns are not persisted or audited and the
+  // agent runs read-only (no write/approval tools).
+  function toggleIncognito() {
+    setIncognito((v) => !v);
+    convIdRef.current = newConvId();
+    setMessages([]);
+    setShowHistory(false);
+  }
+
   // Stick the transcript to the bottom while streaming, unless the user scrolled up.
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -225,8 +240,16 @@ export function AgentChat({
           <button className={styles.capsBtn} onClick={newChat} title="Start a new conversation">
             <Icon name="plus" size={12} /> New
           </button>
-          <button className={styles.capsBtn} onClick={openHistory} aria-expanded={showHistory}>
+          <button className={styles.capsBtn} onClick={openHistory} aria-expanded={showHistory} disabled={incognito}>
             <Icon name="clock" size={12} /> History
+          </button>
+          <button
+            className={`${styles.capsBtn} ${incognito ? styles.capsBtnOn : ""}`}
+            onClick={toggleIncognito}
+            aria-pressed={incognito}
+            title={incognito ? "Incognito on — this chat is not saved" : "Start a private, session-only chat"}
+          >
+            <Icon name="eye-off" size={12} /> Incognito
           </button>
           <button className={styles.capsBtn} onClick={() => setShowCaps((v) => !v)} aria-expanded={showCaps}>
             <Icon name="shield" size={12} /> What can it do?
@@ -247,6 +270,13 @@ export function AgentChat({
           )}
         </div>
       </header>
+
+      {incognito && (
+        <div className={styles.incognitoBar}>
+          <Icon name="eye-off" size={12} /> Incognito — this conversation is not saved, not audited, and {persona.name} runs
+          read-only (no writes or approvals). It ends when you leave or turn incognito off.
+        </div>
+      )}
 
       {showCaps && (
         <div className={styles.caps}>

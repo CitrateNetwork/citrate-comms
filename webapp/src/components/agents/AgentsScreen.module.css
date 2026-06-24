@@ -96,6 +96,22 @@
   letter-spacing: 0.05em;
   color: var(--fg-3);
 }
+.historyLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  text-decoration: none;
+}
+.historyLink:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-dark);
+}
 .customizeLink {
   font-size: var(--t-xs);
   color: var(--citrate-green-dark);

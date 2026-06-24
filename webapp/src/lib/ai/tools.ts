@@ -36,6 +36,8 @@ export interface ToolContext {
   allow?: Set<ToolName>;
   /** Custom field keys per entity — injected so crm.write advertises valid keys (dynamic schema). */
   fieldDefsByEntity?: Partial<Record<CrmEntity, { key: string; label: string; type: string }[]>>;
+  /** When false (incognito), tool calls are NOT written to the transparency log. Default true. */
+  audit?: boolean;
 }
 
 const entitySchema = z.enum(["account", "deal", "contact"]);
@@ -75,11 +77,13 @@ export function citrateCommsTools(ctx: ToolContext) {
     invokedBySub: ctx.invokedBySub,
   };
 
+  const audit = ctx.audit !== false;
   const audited =
     <A>(name: ToolName, cap: Capability, run: (args: A) => Promise<unknown>) =>
     async (args: A) => {
       // Fail-closed RBAC: the agent's role must hold the capability.
       if (!can(ctx.agentRole, cap)) throw new ToolDenied(`role ${ctx.agentRole} may not ${name}`);
+      if (!audit) return run(args); // incognito: no transparency-log row
       const id = await logToolCall(auditCtx, name, args, "auto");
       try {
         const result = await run(args);

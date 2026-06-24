@@ -7,7 +7,7 @@
  */
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { agentThreads, agentMessages } from "@/lib/db/schema";
+import { agentThreads, agentMessages, agentPersonas, members } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 
 export interface AgentThreadRow {
@@ -161,6 +161,70 @@ export async function listAgentThreads(
     invokedBySub: r.invokedBySub,
     createdAt: r.createdAt.toISOString(),
   }));
+}
+
+export interface WorkspaceThreadRow extends AgentThreadRow {
+  personaName: string | null;
+  invokedByName: string | null;
+}
+
+/**
+ * CH-1: org-wide thread directory. Owner/Admin pass `viewAll: true` to see every member's
+ * conversations; everyone else (and admins who opt to filter) is restricted to their own.
+ * Joins persona name + the invoker's display name so the directory is human-readable.
+ * Filterable by persona and by invoker. Incognito chats never reach here (never persisted).
+ */
+export async function listWorkspaceThreads(
+  workspaceId: string,
+  viewerSub: string,
+  opts: { viewAll?: boolean; personaId?: string; invokedBySub?: string; limit?: number } = {},
+): Promise<WorkspaceThreadRow[]> {
+  const conds = [eq(agentThreads.workspaceId, workspaceId)];
+  // Non-admins (or admins who pass viewAll=false) only ever see their own threads.
+  if (!opts.viewAll) conds.push(eq(agentThreads.invokedBySub, viewerSub));
+  else if (opts.invokedBySub) conds.push(eq(agentThreads.invokedBySub, opts.invokedBySub));
+  if (opts.personaId) conds.push(eq(agentThreads.personaId, opts.personaId));
+
+  const rows = await db()
+    .select({
+      id: agentThreads.id,
+      personaId: agentThreads.personaId,
+      title: agentThreads.title,
+      channelId: agentThreads.channelId,
+      dealId: agentThreads.dealId,
+      invokedBySub: agentThreads.invokedBySub,
+      createdAt: agentThreads.createdAt,
+      personaName: agentPersonas.name,
+      invokedByName: members.displayName,
+    })
+    .from(agentThreads)
+    .leftJoin(agentPersonas, eq(agentPersonas.id, agentThreads.personaId))
+    .leftJoin(members, and(eq(members.workspaceId, agentThreads.workspaceId), eq(members.sub, agentThreads.invokedBySub)))
+    .where(and(...conds))
+    .orderBy(desc(agentThreads.createdAt))
+    .limit(Math.min(opts.limit ?? 100, 200));
+
+  return rows.map((r) => ({
+    id: r.id,
+    personaId: r.personaId,
+    title: r.title,
+    channelId: r.channelId,
+    dealId: r.dealId,
+    invokedBySub: r.invokedBySub,
+    createdAt: r.createdAt.toISOString(),
+    personaName: r.personaName ?? null,
+    invokedByName: r.invokedByName ?? null,
+  }));
+}
+
+/** Does this thread exist in this workspace? (Admin viewing path — ownership not required.) */
+export async function threadInWorkspace(workspaceId: string, threadId: string): Promise<boolean> {
+  const [r] = await db()
+    .select({ id: agentThreads.id })
+    .from(agentThreads)
+    .where(and(eq(agentThreads.workspaceId, workspaceId), eq(agentThreads.id, threadId)))
+    .limit(1);
+  return Boolean(r);
 }
 
 function safeDecrypt(workspaceId: string, packed: string): string {
