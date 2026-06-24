@@ -124,3 +124,16 @@
   color: var(--fg-1);
   white-space: pre;
 }
+.mermaid {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
