@@ -137,3 +137,15 @@
   max-width: 100%;
   height: auto;
 }
+.chart {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  overflow-x: auto;
+}
+.chart svg {
+  max-width: 100%;
+  height: auto;
+}

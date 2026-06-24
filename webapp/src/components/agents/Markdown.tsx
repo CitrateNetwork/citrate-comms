@@ -11,6 +11,7 @@ import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import { parseChartSpec } from "@/lib/ai/chart-spec";
 import styles from "./Markdown.module.css";
 
 const schema = {
@@ -71,6 +72,50 @@ function MermaidBlock({ code }: { code: string }) {
   return <CodeBlock text={code} className="language-mermaid" />;
 }
 
+/** Render a ```chart block (Vega-Lite, inline data only) via lazy-loaded vega-embed.
+ *  Container stays mounted so it recovers as the spec completes during streaming; on any
+ *  parse/render failure it shows the code instead. */
+function ChartBlock({ src }: { src: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [ok, setOk] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    let view: { finalize?: () => void } | undefined;
+    const t = setTimeout(async () => {
+      const parsed = parseChartSpec(src);
+      if (!parsed.ok) {
+        if (!cancelled) setOk(false);
+        return;
+      }
+      try {
+        const embed = (await import("vega-embed")).default;
+        if (cancelled || !ref.current) return;
+        const res = await embed(ref.current, parsed.spec as never, { actions: false, renderer: "svg" });
+        view = res.view;
+        if (!cancelled) setOk(true);
+      } catch {
+        if (!cancelled) setOk(false);
+      }
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      try {
+        view?.finalize?.();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [src]);
+
+  return (
+    <>
+      <div ref={ref} className={styles.chart} style={ok ? undefined : { display: "none" }} />
+      {!ok && <CodeBlock text={src} className="language-chart" />}
+    </>
+  );
+}
+
 function CodeBlock({ text, className }: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);
   const lang = /language-(\w+)/.exec(className ?? "")?.[1];
@@ -119,6 +164,7 @@ export const Markdown = memo(function Markdown({ children }: { children: string 
             const lang = /language-(\w+)/.exec(className ?? "")?.[1];
             const isBlock = (className ?? "").startsWith("language-") || text.includes("\n");
             if (isBlock && lang === "mermaid") return <MermaidBlock code={text} />;
+            if (isBlock && lang === "chart") return <ChartBlock src={text} />;
             return isBlock ? <CodeBlock text={text} className={className} /> : <code className={styles.inlineCode}>{children}</code>;
           },
         }}
