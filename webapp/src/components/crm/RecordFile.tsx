@@ -11,6 +11,8 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Avatar, Btn, Icon, SurfBadge, DataChip } from "@/components/primitives";
+import { DropZone } from "./DropZone";
+import { Attachment } from "@/components/attachments/Attachment";
 import type { RecordFile as RecordFileData } from "@/lib/domain/crm-file";
 import type { FieldWithValue, FieldDef } from "@/lib/domain/crm-fields";
 import { CRM_NOTE_TYPES, type CrmEntity, type CrmNoteType } from "@/lib/domain/crm-enums";
@@ -203,17 +205,24 @@ export function RecordFile({
         {tab === "documents" && (
           <div className={styles.docs}>
             {canEdit && file.entity !== "contact" && (
-              <DocUpload workspaceId={workspaceId} entity={file.entity} recordId={file.recordId} onDone={() => router.refresh()} />
+              <DropZone
+                workspaceId={workspaceId}
+                scope={file.entity === "deal" ? { dealId: file.recordId } : { accountId: file.recordId }}
+                onDone={() => router.refresh()}
+              />
             )}
             {file.documents.length === 0 ? (
-              <div className={s.empty}>No documents yet.{canEdit && file.entity !== "contact" ? " Upload one above — it’s parsed + indexed for the agents." : ""}</div>
+              <div className={s.empty}>
+                {file.entity === "contact"
+                  ? "Documents attach to accounts and deals."
+                  : "No documents yet. Drag files above — they’re stored, displayed, and (for docs) indexed for the agents."}
+              </div>
             ) : (
-              file.documents.map((d) => (
-                <a key={d.id} href={d.blobUrl} target="_blank" rel="noreferrer" className={styles.doc}>
-                  <Icon name="paperclip" size={14} /> <span className={styles.docName}>{d.name}</span>
-                  {d.mime && <span className={styles.docMime}>{d.mime}</span>}
-                </a>
-              ))
+              <div className={styles.attachGrid}>
+                {file.documents.map((d) => (
+                  <Attachment key={d.id} item={{ id: d.id, name: d.name, mime: d.mime, url: d.blobUrl }} />
+                ))}
+              </div>
             )}
           </div>
         )}
@@ -432,49 +441,6 @@ function FieldInput({ def, value, onChange }: { def: FieldDef; value: string; on
   }
   const inputType = def.type === "number" || def.type === "currency" ? "number" : def.type === "date" ? "date" : "text";
   return <input className={styles.input} type={inputType} value={value} onChange={(e) => onChange(e.target.value)} />;
-}
-
-// ── Document upload ──────────────────────────────────────────────────────────
-
-function DocUpload({
-  workspaceId,
-  entity,
-  recordId,
-  onDone,
-}: {
-  workspaceId: string;
-  entity: CrmEntity;
-  recordId: string;
-  onDone: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  async function onPick(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setBusy(true);
-    setErr(null);
-    const fd = new FormData();
-    fd.set("file", f);
-    fd.set(entity === "deal" ? "dealId" : "accountId", recordId);
-    const r = await fetch(`/api/workspaces/${workspaceId}/documents`, { method: "POST", body: fd });
-    setBusy(false);
-    e.target.value = "";
-    if (r.ok) onDone();
-    else setErr(r.status === 413 ? "File too large (max 8 MB)." : "Upload failed.");
-  }
-
-  return (
-    <div className={styles.uploadRow}>
-      <label className={styles.uploadBtn}>
-        <Icon name="paperclip" size={13} /> {busy ? "Uploading…" : "Upload document"}
-        <input type="file" hidden onChange={onPick} disabled={busy} />
-      </label>
-      <span className={styles.uploadHint}>txt, md, csv, pdf — parsed + indexed for the agents</span>
-      {err && <span className={styles.uploadErr}>{err}</span>}
-    </div>
-  );
 }
 
 // ── Notes composer ───────────────────────────────────────────────────────────

@@ -266,6 +266,12 @@
   flex-direction: column;
   gap: var(--s-2);
 }
+.attachGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--s-3);
+  align-items: start;
+}
 .uploadRow {
   display: flex;
   align-items: center;
