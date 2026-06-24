@@ -6,8 +6,10 @@ import { channelById, isChannelMember } from "@/lib/domain/channels";
 import { listMessages } from "@/lib/domain/messages";
 import { listLedger } from "@/lib/witness/ledger";
 import { directory } from "@/lib/domain/members";
+import { listAgents } from "@/lib/domain/agents";
 import { can, Capability } from "@/lib/rbac/matrix";
 import { ChannelView } from "@/components/comms/ChannelView";
+import type { Mentionable } from "@/lib/mentions";
 
 /**
  * Per-channel comms screen. Guards: authenticated → workspace member → channel
@@ -33,16 +35,28 @@ export default async function ChannelPage({
   const channel = await channelById(ws.id, channelId);
   if (!channel || !(await isChannelMember(channelId, sub))) notFound();
 
-  const [messages, ledger, dir] = await Promise.all([
+  const [messages, ledger, dir, agents] = await Promise.all([
     listMessages(ws.id, channelId, { limit: 200 }),
     listLedger(ws.id, channelId),
     directory(ws.id),
+    listAgents(ws.id),
   ]);
+
+  // MEN-0: @-mention index = human members + enabled agents. Agents post when @-pinged.
+  const mentionables: Mentionable[] = [
+    ...Object.entries(dir)
+      .filter(([, e]) => !e.isAgent)
+      .map(([sub, e]) => ({ id: sub, name: e.displayName, sub, kind: "member" as const })),
+    ...agents
+      .filter((a) => a.enabled && a.status === "active")
+      .map((a) => ({ id: a.id, name: a.name, sub: a.memberSub, kind: "agent" as const })),
+  ];
 
   return (
     <ChannelView
       workspaceId={ws.id}
       channelId={channelId}
+      mentionables={mentionables}
       channelName={channel.name}
       topic={channel.topic}
       mySub={sub}

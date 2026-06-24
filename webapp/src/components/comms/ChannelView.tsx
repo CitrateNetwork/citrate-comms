@@ -12,6 +12,7 @@ import { ComposerAttach } from "@/components/attachments/ComposerAttach";
 import { Attachment } from "@/components/attachments/Attachment";
 import type { UploadedDoc } from "@/components/attachments/uploadAttachment";
 import type { Role } from "@/lib/rbac/matrix";
+import { type Mentionable, filterMentionables, parseMentions, toHandle } from "@/lib/mentions";
 import styles from "./ChannelView.module.css";
 
 export interface UiAttachment {
@@ -57,6 +58,7 @@ export interface ChannelViewProps {
   initialMessages: UiMessage[];
   initialLedger: UiLedgerEntry[];
   directory: Record<string, DirEntry>;
+  mentionables?: Mentionable[];
 }
 
 const POLL_MS = 3000;
@@ -74,7 +76,76 @@ export function ChannelView(props: ChannelViewProps) {
   const [sending, setSending] = useState(false);
   const [witnessFor, setWitnessFor] = useState<UiMessage | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastSeq = useRef<number>(props.initialMessages.at(-1)?.seq ?? 0);
+
+  // MEN-0/MEN-1: @-mention autocomplete + agents currently composing a channel reply.
+  const mentionables = props.mentionables ?? [];
+  const [mq, setMq] = useState<string | null>(null); // active @-query (null = closed)
+  const [mIdx, setMIdx] = useState(0);
+  const [thinkingAgents, setThinkingAgents] = useState<string[]>([]); // agent names mid-reply
+  const suggestions = mq !== null ? filterMentionables(mentionables, mq) : [];
+
+  /** Read the @-token immediately before the caret (if any) and open/close the popover. */
+  function syncMention(value: string, caret: number) {
+    const upto = value.slice(0, caret);
+    const m = /(^|[^a-zA-Z0-9_])@([a-z0-9._-]*)$/i.exec(upto);
+    if (m) {
+      setMq(m[2]!.toLowerCase());
+      setMIdx(0);
+    } else {
+      setMq(null);
+    }
+  }
+
+  function applyMention(pick: Mentionable) {
+    const el = inputRef.current;
+    const caret = el ? el.selectionStart : draft.length;
+    const before = draft.slice(0, caret).replace(/@([a-z0-9._-]*)$/i, `@${toHandle(pick.name)} `);
+    const next = before + draft.slice(caret);
+    setDraft(next);
+    setMq(null);
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = before.length;
+      }
+    });
+  }
+
+  /** After a human posts, call any @-mentioned agents into the channel (MEN-1). */
+  async function pingMentionedAgents(body: string) {
+    const { agents } = parseMentions(body, mentionables);
+    if (agents.length === 0) return;
+    setThinkingAgents((prev) => [...new Set([...prev, ...agents.map((a) => a.name)])]);
+    await Promise.all(
+      agents.map(async (a) => {
+        try {
+          const r = await fetch(`/api/channels/${props.channelId}/agent-reply`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ agentSub: a.sub }),
+          });
+          if (r.ok) {
+            // The agent's message is fetched by the poll; nudge it immediately.
+            const fresh = await fetch(`/api/channels/${props.channelId}/messages?after=${lastSeq.current}`, { cache: "no-store" });
+            if (fresh.ok) {
+              const { messages: rows } = (await fresh.json()) as { messages: UiMessage[] };
+              if (rows.length) {
+                lastSeq.current = rows.at(-1)!.seq;
+                setMessages((prev) => dedupe([...prev, ...rows]));
+                scrollToEnd();
+              }
+            }
+          }
+        } catch {
+          /* poll will still pick up the reply if it lands late */
+        } finally {
+          setThinkingAgents((prev) => prev.filter((n) => n !== a.name));
+        }
+      }),
+    );
+  }
 
   const nameOf = useCallback(
     (sub: string) => props.directory[sub]?.displayName ?? sub.slice(0, 8),
@@ -133,6 +204,7 @@ export function ChannelView(props: ChannelViewProps) {
         lastSeq.current = Math.max(lastSeq.current, message.seq);
         setMessages((prev) => dedupe([...prev, message]));
         scrollToEnd();
+        void pingMentionedAgents(body); // MEN-1: fire-and-forget; replies stream in via poll
       } else {
         setDraft(body); // restore on failure
         setPending(atts);
@@ -222,6 +294,14 @@ export function ChannelView(props: ChannelViewProps) {
               </div>
             );
           })}
+          {thinkingAgents.length > 0 && (
+            <div className={styles.thinking}>
+              <Avatar name={thinkingAgents[0]!} size="sm" isAgent />
+              <span>
+                {thinkingAgents.join(", ")} {thinkingAgents.length === 1 ? "is" : "are"} replying…
+              </span>
+            </div>
+          )}
         </div>
 
         {props.canPost ? (
@@ -238,12 +318,59 @@ export function ChannelView(props: ChannelViewProps) {
                 ))}
               </div>
             )}
+            {mq !== null && suggestions.length > 0 && (
+              <div className={styles.mentionPop} role="listbox">
+                {suggestions.map((sg, i) => (
+                  <button
+                    key={sg.sub}
+                    role="option"
+                    aria-selected={i === mIdx}
+                    className={`${styles.mentionItem} ${i === mIdx ? styles.mentionActive : ""}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      applyMention(sg);
+                    }}
+                  >
+                    <Avatar name={sg.name} size="sm" isAgent={sg.kind === "agent"} />
+                    <span className={styles.mentionName}>{sg.name}</span>
+                    {sg.kind === "agent" && <SurfBadge variant="agent">AGENT</SurfBadge>}
+                    <span className={styles.mentionHandle}>@{sg.handle}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <textarea
+              ref={inputRef}
               className={styles.input}
-              placeholder={`Message #${props.channelName}`}
+              placeholder={`Message #${props.channelName} — @ to mention a teammate or agent`}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                syncMention(e.target.value, e.target.selectionStart);
+              }}
               onKeyDown={(e) => {
+                if (mq !== null && suggestions.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setMIdx((i) => (i + 1) % suggestions.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMIdx((i) => (i - 1 + suggestions.length) % suggestions.length);
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    applyMention(suggestions[mIdx]!);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setMq(null);
+                    return;
+                  }
+                }
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                   e.preventDefault();
                   send();

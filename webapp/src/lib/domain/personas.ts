@@ -132,6 +132,27 @@ export async function listPersonas(workspaceId: string): Promise<PersonaRow[]> {
   return rows.map(toRow);
 }
 
+/**
+ * MEN-1: which persona should an agent member use when called into a channel? Prefer the
+ * persona explicitly bound to that agent (agentPersonas.agentId); otherwise fall back to the
+ * first enabled, non-template persona in the workspace. Returns null if none are usable.
+ */
+export async function personaIdForAgent(workspaceId: string, agentId: string): Promise<string | null> {
+  const [bound] = await db()
+    .select({ id: agentPersonas.id })
+    .from(agentPersonas)
+    .where(and(eq(agentPersonas.workspaceId, workspaceId), eq(agentPersonas.agentId, agentId), eq(agentPersonas.enabled, true)))
+    .limit(1);
+  if (bound) return bound.id;
+  const [fallback] = await db()
+    .select({ id: agentPersonas.id })
+    .from(agentPersonas)
+    .where(and(eq(agentPersonas.workspaceId, workspaceId), eq(agentPersonas.enabled, true), eq(agentPersonas.isTemplate, false)))
+    .orderBy(asc(agentPersonas.createdAt))
+    .limit(1);
+  return fallback?.id ?? null;
+}
+
 export async function getPersona(workspaceId: string, personaId: string): Promise<PersonaRow | null> {
   const [r] = await db()
     .select()

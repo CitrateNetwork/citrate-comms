@@ -120,6 +120,56 @@
   border-top: 1px solid var(--border-1);
   padding: var(--s-3) var(--s-4);
   background: var(--paper-2);
+  position: relative;
+}
+.mentionPop {
+  position: absolute;
+  left: var(--s-4);
+  right: var(--s-4);
+  bottom: calc(100% - var(--s-2));
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--paper-pure);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.12);
+  z-index: 20;
+  padding: var(--s-1);
+}
+.mentionItem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  padding: var(--s-2);
+  border-radius: var(--r-1);
+}
+.mentionItem:hover,
+.mentionActive {
+  background: var(--citrate-green-tint);
+}
+.mentionName {
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  font-weight: 500;
+}
+.mentionHandle {
+  margin-left: auto;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  font-style: italic;
 }
 .input {
   width: 100%;
