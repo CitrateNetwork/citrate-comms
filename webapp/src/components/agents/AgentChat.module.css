@@ -86,6 +86,40 @@
   color: var(--fg-3);
   line-height: 1.5;
 }
+.histList {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.histItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  padding: var(--s-2) var(--s-2);
+  border-radius: var(--r-1);
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.histItem:hover {
+  background: var(--stone-100);
+}
+.histTitle {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.histWhen {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  flex: 0 0 auto;
+}
 
 .scroll {
   flex: 1;
