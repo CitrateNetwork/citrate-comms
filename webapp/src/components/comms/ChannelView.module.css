@@ -141,8 +141,45 @@
 .composerBar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--s-2);
   margin-top: var(--s-2);
+}
+.composerBar > :last-child {
+  margin-left: auto;
+}
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.pending {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-bottom: var(--s-2);
+}
+.pendChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--citrate-green-tint);
+  color: var(--citrate-green-dark);
+  border-radius: var(--r-1);
+  padding: 2px 4px 2px 8px;
+  font-size: var(--t-xs);
+}
+.pendX {
+  display: inline-flex;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--citrate-green-dark);
+  opacity: 0.7;
+  padding: 0;
+}
+.pendX:hover {
+  opacity: 1;
 }
 .readonly {
   flex: 0 0 auto;
