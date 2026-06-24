@@ -14,6 +14,7 @@ import { Icon, SurfBadge, SevDot } from "@/components/primitives";
 import type { IconName } from "@/components/primitives";
 import { NewChannelButton } from "@/components/comms/NewChannelButton";
 import { NotifBell } from "./NotifBell";
+import { DragDropGuard } from "./DragDropGuard";
 import styles from "./AppShell.module.css";
 
 export interface SpaceLink {
@@ -69,6 +70,7 @@ export function AppShell({
 
   return (
     <div className={styles.win}>
+      <DragDropGuard />
       <header className={styles.titlebar}>
         <div className={styles.tbLeft}>
           <button className={styles.burger} aria-label="Menu" onClick={() => setDrawerOpen((v) => !v)}>

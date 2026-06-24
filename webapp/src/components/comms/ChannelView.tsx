@@ -10,7 +10,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar, Btn, IconBtn, RoleGlyph, SurfBadge, Icon } from "@/components/primitives";
 import { ComposerAttach } from "@/components/attachments/ComposerAttach";
 import { Attachment } from "@/components/attachments/Attachment";
-import type { UploadedDoc } from "@/components/attachments/uploadAttachment";
+import { uploadAttachment, type UploadedDoc } from "@/components/attachments/uploadAttachment";
+import { useFileDrop } from "@/components/attachments/useFileDrop";
 import type { Role } from "@/lib/rbac/matrix";
 import { type Mentionable, filterMentionables, parseMentions, toHandle } from "@/lib/mentions";
 import styles from "./ChannelView.module.css";
@@ -73,8 +74,22 @@ export function ChannelView(props: ChannelViewProps) {
   const [ledger, setLedger] = useState<UiLedgerEntry[]>(props.initialLedger);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<UploadedDoc[]>([]);
+  const [uploading, setUploading] = useState<string[]>([]);
+  const [attErr, setAttErr] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [witnessFor, setWitnessFor] = useState<UiMessage | null>(null);
+
+  async function uploadFiles(fileList: File[]) {
+    setAttErr(null);
+    setUploading((u) => [...u, ...fileList.map((f) => f.name)]);
+    for (const file of fileList) {
+      const r = await uploadAttachment(props.workspaceId, { channelId: props.channelId }, file);
+      setUploading((u) => u.filter((n) => n !== file.name));
+      if (r.ok) setPending((p) => [...p, r.doc]);
+      else setAttErr(`${file.name}: ${r.error}`);
+    }
+  }
+  const { dragging, dropProps } = useFileDrop(uploadFiles);
   const streamRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastSeq = useRef<number>(props.initialMessages.at(-1)?.seq ?? 0);
@@ -305,8 +320,9 @@ export function ChannelView(props: ChannelViewProps) {
         </div>
 
         {props.canPost ? (
-          <div className={styles.composer}>
-            {pending.length > 0 && (
+          <div className={`${styles.composer} ${dragging ? styles.dropping : ""}`} {...dropProps}>
+            {dragging && <div className={styles.dropHint}>Drop files to attach</div>}
+            {(pending.length > 0 || uploading.length > 0) && (
               <div className={styles.pending}>
                 {pending.map((p) => (
                   <span key={p.id} className={styles.pendChip}>
@@ -316,8 +332,14 @@ export function ChannelView(props: ChannelViewProps) {
                     </button>
                   </span>
                 ))}
+                {uploading.map((n) => (
+                  <span key={`up-${n}`} className={styles.pendChip} style={{ opacity: 0.7 }}>
+                    <span className={styles.dots}><i /><i /><i /></span> {n}
+                  </span>
+                ))}
               </div>
             )}
+            {attErr && <div className={styles.attErr}>{attErr}</div>}
             {mq !== null && suggestions.length > 0 && (
               <div className={styles.mentionPop} role="listbox">
                 {suggestions.map((sg, i) => (
@@ -379,7 +401,7 @@ export function ChannelView(props: ChannelViewProps) {
               rows={1}
             />
             <div className={styles.composerBar}>
-              <ComposerAttach workspaceId={props.workspaceId} scope={{ channelId: props.channelId }} onAttached={(d) => setPending((p) => [...p, d])} />
+              <ComposerAttach workspaceId={props.workspaceId} scope={{ channelId: props.channelId }} onAttached={(d) => setPending((p) => [...p, d])} onError={setAttErr} />
               <SurfBadge variant="e2e">Encrypted</SurfBadge>
               <Btn variant="primary" size="sm" icon="send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)}>
                 Send

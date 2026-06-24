@@ -373,3 +373,46 @@
     border-top: 1px solid var(--border-1);
   }
 }
+
+/* Drag-and-drop upload states (composer) */
+.dropping {
+  outline: 2px dashed var(--citrate-green-deep);
+  outline-offset: -4px;
+  background: var(--citrate-green-tint);
+}
+.dropHint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--citrate-green-dark);
+  background: color-mix(in srgb, var(--citrate-green-tint) 80%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
+.attErr {
+  color: var(--danger);
+  font-size: var(--t-xs);
+  margin-bottom: var(--s-2);
+}
+.dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--citrate-green-dark);
+  animation: cvblink 1.2s infinite ease-in-out both;
+}
+.dots i:nth-child(2) { animation-delay: 0.2s; }
+.dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes cvblink {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; }
+}

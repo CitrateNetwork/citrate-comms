@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSearxng, parseDuckduckgo, decodeEntities } from "./search";
+import { parseSearxng, parseDuckduckgo, parseDuckduckgoLite, decodeEntities } from "./search";
 import { isPrivateIp, assertPublicUrl, extractReadable, BlockedUrlError } from "./fetch";
 
 describe("RES — search parsing", () => {
@@ -34,6 +34,20 @@ describe("RES — search parsing", () => {
     expect(r[0]!.url).toBe(target);
     expect(r[0]!.title).toBe("Title & More");
     expect(r[0]!.snippet).toBe("A great snippet");
+  });
+
+  it("parseDuckduckgoLite decodes uddg redirects, dedupes, caps at k", () => {
+    const t1 = "https://a.example.com/x?p=1&q=2";
+    const t2 = "https://b.example.com/y";
+    const html = `
+      <a rel="nofollow" href="//duckduckgo.com/l/?uddg=${encodeURIComponent(t1)}&rut=z">Alpha &amp; Co</a>
+      <a rel="nofollow" href="//duckduckgo.com/l/?uddg=${encodeURIComponent(t1)}">Alpha dupe</a>
+      <a rel="nofollow" href="//duckduckgo.com/l/?uddg=${encodeURIComponent(t2)}">Beta</a>
+      <a href="https://duckduckgo.com/settings">settings (no uddg, skipped)</a>
+    `;
+    const r = parseDuckduckgoLite(html, 5);
+    expect(r.map((x) => x.url)).toEqual([t1, t2]);
+    expect(r[0]!.title).toBe("Alpha & Co");
   });
 
   it("decodeEntities handles named + numeric", () => {

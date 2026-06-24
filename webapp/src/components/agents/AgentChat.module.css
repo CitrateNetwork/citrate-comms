@@ -319,6 +319,33 @@
 .composerWrap {
   border-top: 1px solid var(--border-2);
   padding: var(--s-3) var(--s-4);
+  position: relative;
+}
+.dropping {
+  outline: 2px dashed var(--citrate-green-deep);
+  outline-offset: -4px;
+  background: var(--citrate-green-tint);
+}
+.dropHint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--citrate-green-dark);
+  background: color-mix(in srgb, var(--citrate-green-tint) 80%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+.pendUploading {
+  opacity: 0.75;
+}
+.attErr {
+  color: var(--danger);
+  font-size: var(--t-xs);
+  margin-bottom: var(--s-2);
 }
 .composerWrap .pending {
   display: flex;

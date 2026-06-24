@@ -410,7 +410,7 @@ export function citrateCommsTools(ctx: ToolContext) {
     // ── Runner tools (delegated to the comms-agent-runner; S3) ──
     // Reads run inline; terminal/code are HITL-gated (propose → approve → run).
     "web.search": tool({
-      description: "Search the live web via the agent runner. Returns cited results (title, url, snippet). Use for company/market research; cite every external claim.",
+      description: "Search the live web (keyless SearXNG, with a DuckDuckGo fallback). Returns cited results (title, url, snippet). Use for company/market research; cite every external claim. If it reports unavailable, say so — don't invent results.",
       inputSchema: z.object({ query: z.string().min(1).max(400), k: z.number().int().min(1).max(10).default(5) }),
       execute: audited("web.search", Capability.ReadChannel, async (a: { query: string; k: number }) => {
         // RES: keyless BFF search first (SearXNG → DuckDuckGo). Fall back to the runner only
@@ -426,7 +426,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
     }),
     "web.fetch": tool({
-      description: "Fetch and extract the readable text of a web page via the runner. Use after web.search to read a source.",
+      description: "Fetch and extract the readable text of a web page (SSRF-guarded). Use after web.search to read a source.",
       inputSchema: z.object({ url: z.string().url() }),
       execute: audited("web.fetch", Capability.ReadChannel, async (a: { url: string }) => {
         // RES: SSRF-guarded static fetch + readability on the BFF. Escalate to the runner's

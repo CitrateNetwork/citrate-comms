@@ -14,7 +14,8 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { Avatar, Btn, Icon, SurfBadge } from "@/components/primitives";
 import { ComposerAttach } from "@/components/attachments/ComposerAttach";
-import type { UploadedDoc } from "@/components/attachments/uploadAttachment";
+import { uploadAttachment, type UploadedDoc } from "@/components/attachments/uploadAttachment";
+import { useFileDrop } from "@/components/attachments/useFileDrop";
 import { Markdown } from "./Markdown";
 import styles from "./AgentChat.module.css";
 
@@ -214,6 +215,20 @@ export function AgentChat({
   const lastId = list[list.length - 1]?.id;
 
   const [pendingAtts, setPendingAtts] = useState<UploadedDoc[]>([]);
+  const [uploading, setUploading] = useState<string[]>([]); // names currently uploading
+  const [attErr, setAttErr] = useState<string | null>(null);
+
+  async function uploadFiles(fileList: File[]) {
+    setAttErr(null);
+    setUploading((u) => [...u, ...fileList.map((f) => f.name)]);
+    for (const file of fileList) {
+      const r = await uploadAttachment(workspaceId, {}, file);
+      setUploading((u) => u.filter((n) => n !== file.name));
+      if (r.ok) setPendingAtts((p) => [...p, r.doc]);
+      else setAttErr(`${file.name}: ${r.error}`);
+    }
+  }
+  const { dragging, dropProps } = useFileDrop(uploadFiles);
 
   function submit() {
     const t = input.trim();
@@ -401,8 +416,9 @@ export function AgentChat({
         {error && <div className={styles.err}>The agent hit an error. Please try again.</div>}
       </div>
 
-      <div className={styles.composerWrap}>
-        {pendingAtts.length > 0 && (
+      <div className={`${styles.composerWrap} ${dragging ? styles.dropping : ""}`} {...dropProps}>
+        {dragging && <div className={styles.dropHint}>Drop files to attach</div>}
+        {(pendingAtts.length > 0 || uploading.length > 0) && (
           <div className={styles.pending}>
             {pendingAtts.map((p) => (
               <span key={p.id} className={styles.pendChip}>
@@ -412,10 +428,16 @@ export function AgentChat({
                 </button>
               </span>
             ))}
+            {uploading.map((n) => (
+              <span key={`up-${n}`} className={`${styles.pendChip} ${styles.pendUploading}`}>
+                <span className={styles.dots}><i /><i /><i /></span> {n}
+              </span>
+            ))}
           </div>
         )}
+        {attErr && <div className={styles.attErr}>{attErr}</div>}
         <div className={styles.composer}>
-          <ComposerAttach workspaceId={workspaceId} scope={{}} onAttached={(d) => setPendingAtts((p) => [...p, d])} />
+          <ComposerAttach workspaceId={workspaceId} scope={{}} onAttached={(d) => setPendingAtts((p) => [...p, d])} onError={setAttErr} />
           <textarea
             className={styles.textarea}
             value={input}

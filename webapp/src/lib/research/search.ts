@@ -112,13 +112,53 @@ async function searchSearxng(query: string, k: number): Promise<WebResult[] | nu
   }
 }
 
+/**
+ * DuckDuckGo "lite" endpoint — the most scrape-friendly keyless surface (works better than the
+ * full HTML page from datacenter IPs). Result links are `uddg=`-redirect anchors; pull the real
+ * target out of each. Title only (lite has no per-result snippet markup we can rely on).
+ */
+export function parseDuckduckgoLite(html: string, k: number): WebResult[] {
+  const out: WebResult[] = [];
+  const seen = new Set<string>();
+  const anchor = /<a[^>]*href="([^"]*uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = anchor.exec(html)) && out.length < k) {
+    let href = decodeEntities(m[1]!);
+    const uddg = /[?&]uddg=([^&]+)/.exec(href);
+    if (uddg) href = decodeURIComponent(uddg[1]!);
+    if (href.startsWith("//")) href = "https:" + href;
+    if (!/^https?:\/\//i.test(href) || seen.has(href)) continue;
+    const title = stripTags(m[2]!);
+    if (!title) continue;
+    seen.add(href);
+    out.push({ title, url: href, snippet: "" });
+  }
+  return out;
+}
+
+const BROWSERISH = {
+  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "accept": "text/html,application/xhtml+xml",
+  "accept-language": "en-US,en;q=0.9",
+};
+
 async function searchDuckduckgo(query: string, k: number): Promise<WebResult[] | null> {
+  // Lite first (most reliable keyless from serverless), then the full HTML page.
+  try {
+    const lu = new URL("https://lite.duckduckgo.com/lite/");
+    lu.searchParams.set("q", query);
+    const lr = await fetchWithTimeout(lu.toString(), { headers: BROWSERISH });
+    if (lr.ok) {
+      const lite = parseDuckduckgoLite(await lr.text(), k);
+      if (lite.length) return lite;
+    }
+  } catch {
+    /* fall through to html */
+  }
   try {
     const u = new URL("https://html.duckduckgo.com/html/");
     u.searchParams.set("q", query);
-    const res = await fetchWithTimeout(u.toString(), {
-      headers: { "user-agent": "Mozilla/5.0 (compatible; CitrateComms/1.0)", accept: "text/html" },
-    });
+    const res = await fetchWithTimeout(u.toString(), { headers: BROWSERISH });
     if (!res.ok) return null;
     return parseDuckduckgo(await res.text(), k);
   } catch {
