@@ -4,7 +4,7 @@ import { errorResponse, readJson } from "@/lib/http";
 import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
 import { sendMessageSchema } from "@/lib/validation/schemas";
-import { listMessages, sendMessage } from "@/lib/domain/messages";
+import { listMessages, sendMessage, linkMessageAttachments, getMessageAttachments } from "@/lib/domain/messages";
 import { channelWorkspace, isChannelMember } from "@/lib/domain/channels";
 
 export const runtime = "nodejs";
@@ -36,17 +36,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     const parsed = sendMessageSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
+    const attachmentIds = parsed.data.attachmentIds ?? [];
+    if (!parsed.data.body && attachmentIds.length === 0) return NextResponse.json({ error: "empty" }, { status: 400 });
 
     const message = await sendMessage({
       workspaceId: ctx.workspaceId,
       channelId: id,
       authorSub: ctx.sub,
-      body: parsed.data.body,
+      body: parsed.data.body || (attachmentIds.length ? "" : parsed.data.body),
       fromAgent: ctx.isAgent,
       threadId: parsed.data.threadId ?? null,
       parentId: parsed.data.parentId ?? null,
       clientMsgId: parsed.data.clientMsgId ?? null,
     });
+    if (attachmentIds.length) {
+      await linkMessageAttachments(ctx.workspaceId, message.id, attachmentIds);
+      message.attachments = await getMessageAttachments(ctx.workspaceId, message.id);
+    }
     return NextResponse.json({ message }, { status: 201 });
   } catch (e) {
     return errorResponse(e);

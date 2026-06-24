@@ -8,8 +8,18 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar, Btn, IconBtn, RoleGlyph, SurfBadge, Icon } from "@/components/primitives";
+import { ComposerAttach } from "@/components/attachments/ComposerAttach";
+import { Attachment } from "@/components/attachments/Attachment";
+import type { UploadedDoc } from "@/components/attachments/uploadAttachment";
 import type { Role } from "@/lib/rbac/matrix";
 import styles from "./ChannelView.module.css";
+
+export interface UiAttachment {
+  id: string;
+  name: string;
+  mime: string | null;
+  url: string;
+}
 
 export interface UiMessage {
   id: string;
@@ -18,6 +28,7 @@ export interface UiMessage {
   body: string;
   seq: number;
   onBehalfOf: string | null;
+  attachments?: UiAttachment[];
   createdAt: string;
 }
 
@@ -37,6 +48,7 @@ export interface DirEntry {
 }
 
 export interface ChannelViewProps {
+  workspaceId: string;
   channelId: string;
   channelName: string;
   topic: string | null;
@@ -58,6 +70,7 @@ export function ChannelView(props: ChannelViewProps) {
   const [messages, setMessages] = useState<UiMessage[]>(props.initialMessages);
   const [ledger, setLedger] = useState<UiLedgerEntry[]>(props.initialLedger);
   const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState<UploadedDoc[]>([]);
   const [sending, setSending] = useState(false);
   const [witnessFor, setWitnessFor] = useState<UiMessage | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -104,14 +117,16 @@ export function ChannelView(props: ChannelViewProps) {
 
   async function send() {
     const body = draft.trim();
-    if (!body || sending) return;
+    if ((!body && pending.length === 0) || sending) return;
     setSending(true);
     setDraft("");
+    const atts = pending;
+    setPending([]);
     try {
       const r = await fetch(`/api/channels/${props.channelId}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body, clientMsgId: crypto.randomUUID() }),
+        body: JSON.stringify({ body, clientMsgId: crypto.randomUUID(), attachmentIds: atts.map((a) => a.id) }),
       });
       if (r.ok) {
         const { message } = (await r.json()) as { message: UiMessage };
@@ -120,9 +135,11 @@ export function ChannelView(props: ChannelViewProps) {
         scrollToEnd();
       } else {
         setDraft(body); // restore on failure
+        setPending(atts);
       }
     } catch {
       setDraft(body);
+      setPending(atts);
     } finally {
       setSending(false);
     }
@@ -184,7 +201,18 @@ export function ChannelView(props: ChannelViewProps) {
                       <span className={styles.ts}>{fmtTime(m.createdAt)}</span>
                     </div>
                   )}
-                  <div className={styles.text}>{m.body}</div>
+                  {m.body && <div className={styles.text}>{m.body}</div>}
+                  {m.attachments && m.attachments.length > 0 && (
+                    <div className={styles.attachments}>
+                      {m.attachments.map((a) => (
+                        <Attachment
+                          key={a.id}
+                          compact
+                          item={{ id: a.id, name: a.name, mime: a.mime, url: a.url, downloadUrl: `/api/workspaces/${props.workspaceId}/documents/${a.id}/download` }}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
                 {props.canPost && (
                   <button className={styles.witnessBtn} title="Witness this" onClick={() => setWitnessFor(m)}>
@@ -198,6 +226,18 @@ export function ChannelView(props: ChannelViewProps) {
 
         {props.canPost ? (
           <div className={styles.composer}>
+            {pending.length > 0 && (
+              <div className={styles.pending}>
+                {pending.map((p) => (
+                  <span key={p.id} className={styles.pendChip}>
+                    <Icon name="paperclip" size={11} /> {p.name}
+                    <button className={styles.pendX} onClick={() => setPending((x) => x.filter((y) => y.id !== p.id))} aria-label={`Remove ${p.name}`}>
+                      <Icon name="x" size={10} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               className={styles.input}
               placeholder={`Message #${props.channelName}`}
@@ -212,8 +252,9 @@ export function ChannelView(props: ChannelViewProps) {
               rows={1}
             />
             <div className={styles.composerBar}>
+              <ComposerAttach workspaceId={props.workspaceId} scope={{ channelId: props.channelId }} onAttached={(d) => setPending((p) => [...p, d])} />
               <SurfBadge variant="e2e">Encrypted</SurfBadge>
-              <Btn variant="primary" size="sm" icon="send" onClick={send} disabled={sending || !draft.trim()}>
+              <Btn variant="primary" size="sm" icon="send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)}>
                 Send
               </Btn>
             </div>

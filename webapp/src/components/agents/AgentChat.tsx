@@ -13,6 +13,8 @@ import { useRouter } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { Avatar, Btn, Icon, SurfBadge } from "@/components/primitives";
+import { ComposerAttach } from "@/components/attachments/ComposerAttach";
+import type { UploadedDoc } from "@/components/attachments/uploadAttachment";
 import { Markdown } from "./Markdown";
 import styles from "./AgentChat.module.css";
 
@@ -194,11 +196,17 @@ export function AgentChat({
   const list = messages as unknown as ChatMessage[];
   const lastId = list[list.length - 1]?.id;
 
+  const [pendingAtts, setPendingAtts] = useState<UploadedDoc[]>([]);
+
   function submit() {
     const t = input.trim();
-    if (!t || busy) return;
+    if ((!t && pendingAtts.length === 0) || busy) return;
+    const note = pendingAtts.length ? `\n\n[Attached: ${pendingAtts.map((a) => a.name).join(", ")} — use documents.read to read them.]` : "";
+    const text = (t + note).trim();
+    if (!text) return;
     setInput("");
-    sendMessage({ text: t });
+    setPendingAtts([]);
+    sendMessage({ text });
   }
 
   return (
@@ -361,23 +369,38 @@ export function AgentChat({
         {error && <div className={styles.err}>The agent hit an error. Please try again.</div>}
       </div>
 
-      <div className={styles.composer}>
-        <textarea
-          className={styles.textarea}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          placeholder={`Message ${persona.name}…`}
-          rows={2}
-        />
-        <Btn variant="primary" icon="send" onClick={submit} disabled={busy || !input.trim()}>
-          {busy ? "…" : "Send"}
-        </Btn>
+      <div className={styles.composerWrap}>
+        {pendingAtts.length > 0 && (
+          <div className={styles.pending}>
+            {pendingAtts.map((p) => (
+              <span key={p.id} className={styles.pendChip}>
+                <Icon name="paperclip" size={11} /> {p.name}
+                <button className={styles.pendX} onClick={() => setPendingAtts((x) => x.filter((y) => y.id !== p.id))} aria-label={`Remove ${p.name}`}>
+                  <Icon name="x" size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className={styles.composer}>
+          <ComposerAttach workspaceId={workspaceId} scope={{}} onAttached={(d) => setPendingAtts((p) => [...p, d])} />
+          <textarea
+            className={styles.textarea}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            placeholder={`Message ${persona.name}…`}
+            rows={2}
+          />
+          <Btn variant="primary" icon="send" onClick={submit} disabled={busy || (!input.trim() && pendingAtts.length === 0)}>
+            {busy ? "…" : "Send"}
+          </Btn>
+        </div>
       </div>
     </div>
   );

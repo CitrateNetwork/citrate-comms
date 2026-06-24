@@ -180,6 +180,17 @@ export const messages = pgTable(
   ],
 );
 
+/** Attachments on a message (links uploaded documents to a channel message). ATT-3. */
+export const messageAttachments = pgTable(
+  "message_attachments",
+  {
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    messageId: uuid("message_id").notNull().references(() => messages.id),
+    documentId: uuid("document_id").notNull().references(() => documents.id),
+  },
+  (t) => [primaryKey({ columns: [t.messageId, t.documentId] }), index("message_attachments_ws").on(t.workspaceId)],
+);
+
 export const messageLinks = pgTable(
   "message_links",
   {

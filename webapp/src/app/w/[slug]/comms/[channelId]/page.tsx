@@ -41,6 +41,7 @@ export default async function ChannelPage({
 
   return (
     <ChannelView
+      workspaceId={ws.id}
       channelId={channelId}
       channelName={channel.name}
       topic={channel.topic}
@@ -53,6 +54,7 @@ export default async function ChannelPage({
         body: m.body,
         seq: m.seq,
         onBehalfOf: m.onBehalfOf,
+        attachments: m.attachments,
         createdAt: m.createdAt,
       }))}
       initialLedger={ledger.map((e) => ({

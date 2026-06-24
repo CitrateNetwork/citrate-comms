@@ -16,10 +16,11 @@ export const createChannelSchema = z.object({
 });
 
 export const sendMessageSchema = z.object({
-  body: z.string().trim().min(1).max(8000),
+  body: z.string().trim().max(8000), // may be empty when attachments are present (checked in the route)
   threadId: z.string().uuid().optional(),
   parentId: z.string().uuid().optional(),
   clientMsgId: z.string().max(64).optional(),
+  attachmentIds: z.array(z.string().uuid()).max(10).optional(),
 });
 
 export const witnessSchema = z.object({
