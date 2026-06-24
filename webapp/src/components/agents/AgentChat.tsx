@@ -8,7 +8,7 @@
  * (same-origin fetch), so no Bearer wiring is needed. A client-stable conversation id is
  * sent as `threadId` so the server persists + resumes the thread.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
@@ -140,6 +140,18 @@ export function AgentChat({
   const { messages, sendMessage, status, error } = useChat({ transport });
   const busy = status === "submitted" || status === "streaming";
   const [showCaps, setShowCaps] = useState(false);
+
+  // Stick the transcript to the bottom while streaming, unless the user scrolled up.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+  function onScroll() {
+    const el = scrollRef.current;
+    if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [messages, status]);
   const list = messages as unknown as ChatMessage[];
   const lastId = list[list.length - 1]?.id;
 
@@ -202,7 +214,7 @@ export function AgentChat({
         </div>
       )}
 
-      <div className={styles.scroll}>
+      <div className={styles.scroll} ref={scrollRef} onScroll={onScroll}>
         {list.length === 0 && (
           <div className={styles.empty}>
             <p>Ask {persona.name} about your accounts, deals, or what it remembers.</p>
