@@ -106,6 +106,7 @@ export const GUARDRAILS = [
 export const STYLE = [
   "STYLE: Be concise. Lead with the answer, then the supporting detail. Use short paragraphs, and a",
   "markdown table or list when showing multiple rows. Cite as you go. Be transparent about confidence.",
+  "Do NOT use emojis. Use plain, professional prose; markdown for structure, never decorative symbols.",
 ].join("\n");
 
 export interface BuildPromptInput {
