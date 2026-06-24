@@ -28,7 +28,13 @@ Verdict: ✅ works | ❌ broken | ⚠️ works-but (note)
 Screenshots/pastes welcome. If it's visual, a screenshot beats words.
 
 ## Status legend
-🔲 not built · 🟡 on preview, awaiting your test · ✅ verified by Saul · ❌ failing · ⏸ deferred
+🔲 not built · 🟡 on preview, awaiting your test · ✅ verified by Saul · 🚢 shipped to prod (gates green) · ❌ failing · ⏸ deferred
+
+> **CLOSEOUT (2026-06-24).** We worked option-B (ship to prod after gates, since the gateway env is
+> Production-only) rather than the preview loop for most items. Everything below is 🚢 shipped to prod
+> with typecheck/lint/tests/semgrep/gitleaks/build green. RR-0 (md/tables/code) was Saul-verified ✅;
+> the rest are 🚢 (shipped, gates green) and worth a quick live pass when convenient. Attachment media
+> tests (ATT-1.big / ATT-2.video) need a linked Vercel Blob store.
 
 ## Where to capture what went wrong
 - **Browser DevTools → Console** (red errors) and **Network** (failing request + status code).
@@ -48,26 +54,28 @@ Screenshots/pastes welcome. If it's visual, a screenshot beats words.
 ### Stream A — rich rendering
 | ID | Feature | How to test | Expected | Status |
 |----|---------|-------------|----------|--------|
-| RR-0.md | Markdown | ask an agent for a bulleted summary | bold/lists/headings render (not raw `*`) | 🔲 |
-| RR-0.tables | GFM tables | "show my deals as a markdown table" | a real rendered table | 🔲 |
-| RR-0.code | Code blocks | "show a JSON example" | mono block + copy button | 🔲 |
-| RR-0.stream | Streaming | watch a long answer stream | renders progressively, no flicker/crash | 🔲 |
-| RR-1.mermaid | Mermaid | "draw the deal pipeline as a mermaid flowchart" | a diagram (not code) | 🔲 |
-| RR-1.badmermaid | Mermaid error | force a broken diagram | falls back to showing the code, no crash | 🔲 |
-| RR-2.chart | Vega-Lite | "chart deal value by stage" | a rendered bar/line chart | 🔲 |
-| RR-3.prompt | Agent uses it | normal asks | agent chooses tables/diagrams/charts appropriately | 🔲 |
+| RR-0.md | Markdown | ask an agent for a bulleted summary | bold/lists/headings render (not raw `*`) | ✅ |
+| RR-0.tables | GFM tables | "show my deals as a markdown table" | a real rendered table | ✅ |
+| RR-0.code | Code blocks | "show a JSON example" | mono block + copy button | ✅ |
+| RR-0.stream | Streaming | watch a long answer stream | renders progressively, no flicker/crash | 🚢 |
+| RR-1.mermaid | Mermaid | "draw the deal pipeline as a mermaid flowchart" | a diagram (not code) | 🚢 |
+| RR-1.badmermaid | Mermaid error | force a broken diagram | falls back to showing the code, no crash | 🚢 |
+| RR-2.chart | Vega-Lite | "chart deal value by stage" | a rendered bar/line chart | 🚢 |
+| RR-3.prompt | Agent uses it | normal asks | agent chooses tables/diagrams/charts appropriately | 🚢 |
 
 ### Stream B — attachments
 | ID | Feature | How to test | Expected | Status |
 |----|---------|-------------|----------|--------|
-| ATT-0.xlsx | xlsx RAG | upload an .xlsx to a deal, then ask about it | agent answers from the sheet (documents.read) | 🔲 |
-| ATT-0.docx | docx RAG | upload a .docx, ask about it | agent answers from the doc | 🔲 |
-| ATT-1.big | Large/media upload | upload a 50 MB mp4 | uploads via Blob (no 413) | 🔲 |
-| ATT-1.types | Type allow-list | try an .exe | rejected with a clear message | 🔲 |
-| ATT-2.img | Image display | upload a png/svg/jpg/webp | renders inline in Documents | 🔲 |
-| ATT-2.video | Video player | open an uploaded mp4 | plays in a `<video>` element | 🔲 |
-| ATT-3.channel | Channel attach | attach a file in a channel message | shows in the thread | 🔲 |
-| ATT-3.chat | Chat attach | attach a file in agent chat | agent can read/cite it | 🔲 |
-| ATT-4.audit | Audit | any upload | a `document_ingested` audit row | 🔲 |
+| ATT-0.xlsx | xlsx RAG | upload an .xlsx to a deal, then ask about it | agent answers from the sheet (documents.read) | 🚢 |
+| ATT-0.docx | docx RAG | upload a .docx, ask about it | agent answers from the doc | 🚢 |
+| ATT-1.big | Large/media upload | upload a 50 MB mp4 | uploads via Blob (no 413) | 🚢¹ |
+| ATT-1.types | Type allow-list | try an .exe | rejected with a clear message | 🚢 |
+| ATT-2.img | Image display | upload a png/svg/jpg/webp | renders inline in Documents | 🚢 |
+| ATT-2.video | Video player | open an uploaded mp4 | plays in a `<video>` element | 🚢¹ |
+| ATT-3.channel | Channel attach | attach a file in a channel message | shows in the thread | 🚢 |
+| ATT-3.chat | Chat attach | attach a file in agent chat | agent can read/cite it | 🚢 |
+| ATT-4.audit | Audit | any upload | a `document_ingested` audit row | 🚢 |
 
-(We tick these to ✅ as you verify them on each preview.)
+¹ Needs a linked Vercel Blob store for the large/media path; text-doc upload works without it.
+
+(All 🚢 = shipped to prod with gates green; tick to ✅ as you verify each live.)
