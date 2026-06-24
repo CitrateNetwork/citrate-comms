@@ -14,11 +14,15 @@ export interface AttachmentItem {
   id?: string;
   name: string;
   mime?: string | null;
+  /** Direct (unguessable) Blob URL — used for inline image/video display, not audited. */
   url: string;
+  /** Audited download-proxy URL — used by the explicit download action (logs each download). */
+  downloadUrl?: string;
 }
 
 export function Attachment({ item, compact = false }: { item: AttachmentItem; compact?: boolean }) {
   const kind = kindOf(item.name, item.mime);
+  const dl = item.downloadUrl ?? item.url; // explicit downloads go through the audited proxy
 
   // Generated/text-only docs have no original file to download.
   if (!item.url) {
@@ -37,7 +41,7 @@ export function Attachment({ item, compact = false }: { item: AttachmentItem; co
         <img src={item.url} alt={item.name} className={styles.img} loading="lazy" />
         <figcaption className={styles.cap}>
           <span className={styles.name}>{item.name}</span>
-          <a href={item.url} download={item.name} target="_blank" rel="noreferrer" className={styles.dl}><Icon name="download" size={12} /></a>
+          <a href={dl} download={item.name} target="_blank" rel="noreferrer" className={styles.dl}><Icon name="download" size={12} /></a>
         </figcaption>
       </figure>
     );
@@ -49,7 +53,7 @@ export function Attachment({ item, compact = false }: { item: AttachmentItem; co
         <video src={item.url} controls preload="metadata" className={styles.video} />
         <figcaption className={styles.cap}>
           <span className={styles.name}>{item.name}</span>
-          <a href={item.url} download={item.name} target="_blank" rel="noreferrer" className={styles.dl}><Icon name="download" size={12} /></a>
+          <a href={dl} download={item.name} target="_blank" rel="noreferrer" className={styles.dl}><Icon name="download" size={12} /></a>
         </figcaption>
       </figure>
     );
@@ -57,7 +61,7 @@ export function Attachment({ item, compact = false }: { item: AttachmentItem; co
 
   // Documents + everything else → labeled download chip.
   return (
-    <a href={item.url} download={item.name} target="_blank" rel="noreferrer" className={styles.doc}>
+    <a href={dl} download={item.name} target="_blank" rel="noreferrer" className={styles.doc}>
       <Icon name="paperclip" size={14} />
       <span className={styles.name}>{item.name}</span>
       {item.mime && <span className={styles.mime}>{item.mime.split("/").pop()}</span>}

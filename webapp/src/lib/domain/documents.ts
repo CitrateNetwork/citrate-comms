@@ -26,6 +26,16 @@ export interface DocScope {
   channelId?: string | null;
 }
 
+/** A single document (workspace-scoped) — for the audited download proxy. */
+export async function getDocument(workspaceId: string, id: string): Promise<DocumentRow | null> {
+  const [r] = await db()
+    .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
+    .from(documents)
+    .where(and(eq(documents.workspaceId, workspaceId), eq(documents.id, id)))
+    .limit(1);
+  return r ? { ...r, createdAt: r.createdAt.toISOString() } : null;
+}
+
 /** Documents attached to a record (by account/deal/channel scope). */
 export async function listDocumentsForRecord(
   workspaceId: string,
