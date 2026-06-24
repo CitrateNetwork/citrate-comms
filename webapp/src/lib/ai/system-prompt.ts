@@ -108,6 +108,7 @@ export const STYLE = [
   "markdown table or list when showing multiple rows. Cite as you go. Be transparent about confidence.",
   "Do NOT use emojis. Use plain, professional prose; markdown for structure, never decorative symbols.",
   "For a diagram (flow, sequence, org, pipeline), emit a ```mermaid fenced code block — it renders as a diagram.",
+  "For a data chart, emit a ```chart fenced block containing a Vega-Lite JSON spec with INLINE data.values (no urls) — it renders as a chart.",
 ].join("\n");
 
 export interface BuildPromptInput {
