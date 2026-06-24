@@ -12,7 +12,20 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { parseChartSpec } from "@/lib/ai/chart-spec";
+import { CitrateLoader } from "./CitrateLoader";
 import styles from "./Markdown.module.css";
+
+/** The await-state shown while a diagram/chart renders (no code-flash). */
+function LoaderBox() {
+  return (
+    <div className={styles.loaderBox}>
+      <CitrateLoader size={56} />
+    </div>
+  );
+}
+
+/** How long a block can fail to render before we give up and show its code. */
+const RENDER_SETTLE_MS = 1000;
 
 const schema = {
   ...defaultSchema,
@@ -49,27 +62,39 @@ let mermaidSeq = 0;
  *  parses — during streaming or on a parse error it falls back to showing the code. */
 function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const idRef = useRef(`mmd-${++mermaidSeq}`);
   useEffect(() => {
     let cancelled = false;
+    let settle: ReturnType<typeof setTimeout> | undefined;
     const t = setTimeout(async () => {
       try {
         const mermaid = await getMermaid();
-        await mermaid.parse(code); // throws on incomplete/invalid → keep showing code
-        const { svg } = await mermaid.render(idRef.current, code);
-        if (!cancelled) setSvg(svg);
+        await mermaid.parse(code); // throws on incomplete/invalid → keep awaiting
+        const out = await mermaid.render(idRef.current, code);
+        if (!cancelled) {
+          setSvg(out.svg);
+          setFailed(false);
+        }
       } catch {
-        if (!cancelled) setSvg(null);
+        // Don't flash code: only declare failure if the block stops changing + stays bad.
+        settle = setTimeout(() => {
+          if (!cancelled) setFailed(true);
+        }, RENDER_SETTLE_MS);
       }
     }, 150); // debounce while streaming
     return () => {
       cancelled = true;
       clearTimeout(t);
+      if (settle) clearTimeout(settle);
     };
   }, [code]);
 
+  // Keep the last good diagram while re-rendering; loader until first success; code only
+  // once it has definitively failed and never rendered.
   if (svg) return <div className={styles.mermaid} dangerouslySetInnerHTML={{ __html: svg }} />;
-  return <CodeBlock text={code} className="language-mermaid" />;
+  if (failed) return <CodeBlock text={code} className="language-mermaid" />;
+  return <LoaderBox />;
 }
 
 /** Render a ```chart block (Vega-Lite, inline data only) via lazy-loaded vega-embed.
@@ -77,29 +102,33 @@ function MermaidBlock({ code }: { code: string }) {
  *  parse/render failure it shows the code instead. */
 function ChartBlock({ src }: { src: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [ok, setOk] = useState(true);
+  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   useEffect(() => {
     let cancelled = false;
     let view: { finalize?: () => void } | undefined;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const fail = () => {
+      settle = setTimeout(() => {
+        if (!cancelled) setState((s) => (s === "ok" ? s : "error"));
+      }, RENDER_SETTLE_MS);
+    };
     const t = setTimeout(async () => {
       const parsed = parseChartSpec(src);
-      if (!parsed.ok) {
-        if (!cancelled) setOk(false);
-        return;
-      }
+      if (!parsed.ok) return fail(); // likely still streaming → keep the loader
       try {
         const embed = (await import("vega-embed")).default;
         if (cancelled || !ref.current) return;
         const res = await embed(ref.current, parsed.spec as never, { actions: false, renderer: "svg" });
         view = res.view;
-        if (!cancelled) setOk(true);
+        if (!cancelled) setState("ok");
       } catch {
-        if (!cancelled) setOk(false);
+        fail();
       }
     }, 150);
     return () => {
       cancelled = true;
       clearTimeout(t);
+      if (settle) clearTimeout(settle);
       try {
         view?.finalize?.();
       } catch {
@@ -108,10 +137,13 @@ function ChartBlock({ src }: { src: string }) {
     };
   }, [src]);
 
+  // Container stays mounted (vega needs the element). Loader until first render; code
+  // only after it has definitively failed.
   return (
     <>
-      <div ref={ref} className={styles.chart} style={ok ? undefined : { display: "none" }} />
-      {!ok && <CodeBlock text={src} className="language-chart" />}
+      <div ref={ref} className={styles.chart} hidden={state !== "ok"} />
+      {state === "loading" && <LoaderBox />}
+      {state === "error" && <CodeBlock text={src} className="language-chart" />}
     </>
   );
 }
