@@ -6,6 +6,7 @@ import { hashId } from "@/lib/security/crypto";
 import { sendMessageSchema } from "@/lib/validation/schemas";
 import { listMessages, sendMessage, linkMessageAttachments, getMessageAttachments } from "@/lib/domain/messages";
 import { channelWorkspace, isChannelMember } from "@/lib/domain/channels";
+import { notifyChannelMentions } from "@/lib/domain/notifications";
 
 export const runtime = "nodejs";
 
@@ -52,6 +53,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (attachmentIds.length) {
       await linkMessageAttachments(ctx.workspaceId, message.id, attachmentIds);
       message.attachments = await getMessageAttachments(ctx.workspaceId, message.id);
+    }
+    // MEN-2: ping any @-mentioned members (best-effort; never blocks the send).
+    if (parsed.data.body) {
+      await notifyChannelMentions({ workspaceId: ctx.workspaceId, channelId: id, messageId: message.id, body: parsed.data.body, actorSub: ctx.sub });
     }
     return NextResponse.json({ message }, { status: 201 });
   } catch (e) {

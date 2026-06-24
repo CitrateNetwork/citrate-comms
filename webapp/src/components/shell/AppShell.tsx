@@ -13,6 +13,7 @@ import { usePathname } from "next/navigation";
 import { Icon, SurfBadge, SevDot } from "@/components/primitives";
 import type { IconName } from "@/components/primitives";
 import { NewChannelButton } from "@/components/comms/NewChannelButton";
+import { NotifBell } from "./NotifBell";
 import styles from "./AppShell.module.css";
 
 export interface SpaceLink {
@@ -82,6 +83,7 @@ export function AppShell({
           <span className={styles.conn}>
             <SevDot level="pass" /> Connected
           </span>
+          <NotifBell workspaceId={workspaceId} workspaceSlug={workspaceSlug} />
           {/* Sign-out is a POST form, NOT a <Link> — a GET logout gets prefetched/
               preloaded by the router and browser, silently clearing the session. */}
           <form action="/auth/logout" method="post" className={styles.meForm}>

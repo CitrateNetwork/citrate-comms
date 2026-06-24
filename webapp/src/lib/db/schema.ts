@@ -893,3 +893,24 @@ export const agentConfigGrants = pgTable(
   },
   (t) => [index("agent_config_grants_ws").on(t.workspaceId, t.granteeSub)],
 );
+
+// ── MEN-2: notifications (pings) ─────────────────────────────────────────────
+
+/** A notification to a member — e.g. an @-mention in a channel. Deliberately stores NO
+ *  message content (bodies are encrypted at rest); the recipient follows the link to read
+ *  it in context. `readAt` NULL = unread. */
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    recipientSub: text("recipient_sub").notNull(),
+    kind: text("kind").notNull(), // 'mention'
+    actorSub: text("actor_sub"), // who triggered it (member or agent member)
+    channelId: uuid("channel_id").references(() => channels.id),
+    messageId: uuid("message_id"), // messages.id (no FK — messages may be pruned independently)
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("notifications_recipient").on(t.workspaceId, t.recipientSub, t.readAt)],
+);

@@ -15,6 +15,7 @@ import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 import { listMessages, sendMessage, linkMessageAttachments, getMessageAttachments } from "@/lib/domain/messages";
 import { directory } from "@/lib/domain/members";
 import { listAgents } from "@/lib/domain/agents";
+import { notifyChannelMentions } from "@/lib/domain/notifications";
 import { appendAudit } from "@/lib/audit/chain";
 
 export interface ChannelAgentResult {
@@ -131,6 +132,8 @@ export async function respondInChannelAsAgent(args: {
     await linkMessageAttachments(workspaceId, message.id, [...artifactIds]);
     message.attachments = await getMessageAttachments(workspaceId, message.id);
   }
+  // MEN-2: if the agent @-mentioned members in its reply, ping them.
+  await notifyChannelMentions({ workspaceId, channelId, messageId: message.id, body: text, actorSub: agentMemberSub });
   await appendAudit({ workspaceId, actorSub: invokedBySub, event: "agent_channel_reply", target: `${agent.id}:${channelId}` });
   return { ok: true, messageId: message.id };
 }
