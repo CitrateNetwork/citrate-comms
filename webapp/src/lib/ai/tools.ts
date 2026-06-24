@@ -20,6 +20,8 @@ import { retrieveChunks } from "@/lib/domain/documents";
 import { listMessages } from "@/lib/domain/messages";
 import { listTasks, listProjects } from "@/lib/domain/pm";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
+import { searchWeb } from "@/lib/research/search";
+import { fetchReadable } from "@/lib/research/fetch";
 import type { CrmEntity } from "@/lib/domain/crm-enums";
 import { getMemoryStore, neonMemoryStore, crmRepo, type TrustTier } from "@/lib/memory";
 import { logToolCall, finishToolCall, type ToolAuditCtx } from "./audit";
@@ -383,10 +385,14 @@ export function citrateCommsTools(ctx: ToolContext) {
       description: "Search the live web via the agent runner. Returns cited results (title, url, snippet). Use for company/market research; cite every external claim.",
       inputSchema: z.object({ query: z.string().min(1).max(400), k: z.number().int().min(1).max(10).default(5) }),
       execute: audited("web.search", Capability.ReadChannel, async (a: { query: string; k: number }) => {
+        // RES: keyless BFF search first (SearXNG → DuckDuckGo). Fall back to the runner only
+        // if the BFF has nothing configured/reachable AND a runner is present.
+        const bff = await searchWeb(a.query, a.k);
+        if (bff.available) return bff;
         try {
           return await webSearch(a.query, a.k);
         } catch (e) {
-          if (e instanceof RunnerUnavailableError) return { results: [], available: false, note: "Web search is unavailable (agent runner not configured)." };
+          if (e instanceof RunnerUnavailableError) return bff; // keep the BFF "unavailable" note
           throw e;
         }
       }),
@@ -395,12 +401,18 @@ export function citrateCommsTools(ctx: ToolContext) {
       description: "Fetch and extract the readable text of a web page via the runner. Use after web.search to read a source.",
       inputSchema: z.object({ url: z.string().url() }),
       execute: audited("web.fetch", Capability.ReadChannel, async (a: { url: string }) => {
+        // RES: SSRF-guarded static fetch + readability on the BFF. Escalate to the runner's
+        // Playwright path only when the static extraction yields no usable text (JS-heavy).
+        const page = await fetchReadable(a.url);
+        if (page.available && page.text.length > 200) return page;
         try {
-          return await webFetch(a.url);
+          const dyn = await webFetch(a.url);
+          if (dyn && typeof dyn.text === "string" && dyn.text.length > 0) return { ...dyn, available: true };
         } catch (e) {
-          if (e instanceof RunnerUnavailableError) return { text: "", available: false, note: "Web fetch is unavailable (agent runner not configured)." };
-          throw e;
+          if (!(e instanceof RunnerUnavailableError)) throw e;
         }
+        // No runner (or it failed): return whatever static gave us, honestly flagged.
+        return page.available ? page : { url: a.url, title: "", text: "", available: false, note: page.note };
       }),
     }),
     "chart.render": tool({
