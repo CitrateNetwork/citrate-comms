@@ -16,7 +16,7 @@ import { appendAudit } from "@/lib/audit/chain";
 import { logToolCall, finishToolCall } from "@/lib/ai/audit";
 import { addNote } from "./crm-notes";
 import { setFieldValue, listFieldDefs } from "./crm-fields";
-import { updateAccount, updateDeal, updateContact } from "./crm";
+import { updateAccount, updateDeal, updateContact, createAccount, createDeal, createContact } from "./crm";
 import { recordActivity } from "./crm-activity";
 import { getMemoryStore, neonMemoryStore, type MemoryAnchor, type TrustTier } from "@/lib/memory";
 import { terminalExec, codeRun } from "@/lib/ai/runner";
@@ -30,6 +30,7 @@ export type AgentAction =
   | { kind: "crm.note"; entity: CrmEntity; recordId: string; type: CrmNoteType; title?: string; body: string }
   | { kind: "crm.field"; entity: CrmEntity; recordId: string; fieldKey: string; value: string }
   | { kind: "crm.standard"; entity: CrmEntity; recordId: string; patch: { name?: string; domain?: string; title?: string; valueMinor?: number } }
+  | { kind: "crm.create"; entity: CrmEntity; standard: { name: string; domain?: string; title?: string; valueMinor?: number }; accountId?: string; fields?: { key: string; value: string }[] }
   | { kind: "memory.assert"; repo: string; nodeKind: string; content: string; anchors?: MemoryAnchor[]; confidence?: number }
   | { kind: "runner.terminal"; cmd: string; cwd?: string }
   | { kind: "runner.code"; lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] }
@@ -43,6 +44,7 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "crm.note": "low",
   "crm.field": "medium",
   "crm.standard": "medium",
+  "crm.create": "medium",
   "memory.assert": "low",
   "runner.terminal": "high",
   "runner.code": "high",
@@ -114,6 +116,8 @@ function describe(action: AgentAction): string {
       return `Set ${action.entity} field “${action.fieldKey}” = ${truncate(action.value)}`;
     case "crm.standard":
       return `Update ${action.entity}: ${truncate(JSON.stringify(action.patch))}`;
+    case "crm.create":
+      return `Create ${action.entity} “${truncate(action.standard.name, 80)}”${action.fields?.length ? ` (+${action.fields.length} fields)` : ""}`;
     case "memory.assert":
       return `Assert to knowledge graph (${action.nodeKind}): ${truncate(action.content)}`;
     case "runner.terminal":
@@ -239,6 +243,30 @@ async function executeAction(
       else await updateContact(workspaceId, action.recordId, { name: action.patch.name, title: action.patch.title }, by.bySub);
       await recordActivity({ workspaceId, entity: action.entity, recordId: action.recordId, actorSub: by.bySub, byAgent: true, input: { kind: "agent_action", tool: "crm.write" } });
       return { updated: true };
+    }
+    case "crm.create": {
+      // Create the record, then apply any custom fields to the new record id.
+      let recordId: string;
+      if (action.entity === "account") {
+        const row = await createAccount(workspaceId, action.standard.name, action.standard.domain ?? null, by.bySub);
+        recordId = row.id;
+      } else if (action.entity === "deal") {
+        if (!action.accountId) throw new Error("deal requires accountId (its parent account)");
+        const row = await createDeal({ workspaceId, accountId: action.accountId, name: action.standard.name, valueMinor: action.standard.valueMinor ?? 0, ownerSub: by.bySub });
+        recordId = row.id;
+      } else {
+        const row = await createContact({ workspaceId, name: action.standard.name, title: action.standard.title ?? null, accountId: action.accountId ?? null, ownerSub: by.bySub });
+        recordId = row.id;
+      }
+      if (action.fields?.length) {
+        const defs = await listFieldDefs(workspaceId, action.entity, { includeDisabled: true });
+        for (const f of action.fields) {
+          const def = defs.find((d) => d.key === f.key);
+          if (def) await setFieldValue({ workspaceId, entity: action.entity, recordId, fieldId: def.id, raw: f.value, bySub: by.bySub, byAgent: true });
+        }
+      }
+      await recordActivity({ workspaceId, entity: action.entity, recordId, actorSub: by.bySub, byAgent: true, input: { kind: "agent_action", tool: "crm.create" } });
+      return { created: true, recordId };
     }
     case "memory.assert": {
       const input = {

@@ -21,7 +21,8 @@ import { SKILL_FRAGMENTS, type SkillKey, type ToolName } from "./personas";
 /** One-line capability blurbs for the tools a persona can use (layer 2). */
 const TOOL_BLURB: Record<ToolName, string> = {
   "crm.read": "read accounts, deals, and contacts incl. a record's full file (fields, notes, activity)",
-  "crm.write": "set standard + custom fields on a record — HITL-approved",
+  "crm.create": "create a NEW account/deal/contact (no id needed; a deal needs its parent accountId) — HITL-approved",
+  "crm.write": "update fields on an EXISTING record (needs its recordId) — HITL-approved",
   "crm.note": "add a note/journal/call/meeting entry to a record — HITL-approved",
   "pm.read": "read projects and tasks",
   "pm.write": "create/move tasks — HITL-approved",

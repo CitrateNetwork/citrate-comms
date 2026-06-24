@@ -29,6 +29,7 @@ export interface PersonaOpt {
 /** Plain-English, honest descriptions of what each tool lets the agent do. */
 const TOOL_LABEL: Record<string, string> = {
   "crm.read": "Read your CRM records",
+  "crm.create": "Propose new CRM records (you approve)",
   "crm.write": "Propose CRM edits (you approve)",
   "crm.note": "Propose notes on records (you approve)",
   "pm.read": "Read projects & tasks",

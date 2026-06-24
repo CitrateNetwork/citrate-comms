@@ -161,9 +161,47 @@ export function citrateCommsTools(ctx: ToolContext) {
       },
     }),
 
+    "crm.create": tool({
+      description:
+        "Propose CREATING a new CRM record (account, deal, or contact) — queued for human approval. Use this " +
+        "for NEW records (no id yet). For an account: name (+ optional domain). For a deal: name, value in USD, " +
+        "and `accountId` of its PARENT account (create the account first, get its id, then the deal). For a " +
+        "contact: name (+ optional title, accountId). You may also set custom `fields`. Use crm.write (with a " +
+        "recordId) only to UPDATE an existing record.",
+      inputSchema: z.object({
+        entity: entitySchema,
+        name: z.string().min(1).max(160),
+        domain: z.string().max(160).optional(),
+        title: z.string().max(160).optional(),
+        value: z.number().min(0).optional(),
+        accountId: z.string().uuid().optional(),
+        fields: z.array(z.object({ key: z.string().max(60), value: z.string().max(8000) })).max(30).optional(),
+      }),
+      execute: async (a: { entity: CrmEntity; name: string; domain?: string; title?: string; value?: number; accountId?: string; fields?: { key: string; value: string }[] }) => {
+        if (a.entity === "deal" && !a.accountId) {
+          return { status: "error", message: "A deal needs `accountId` (its parent account). Create/find the account first, then create the deal with that id." };
+        }
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "crm.create",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: {
+            kind: "crm.create",
+            entity: a.entity,
+            standard: { name: a.name, domain: a.domain, title: a.title, valueMinor: a.value != null ? Math.round(a.value * 100) : undefined },
+            accountId: a.accountId,
+            fields: a.fields,
+          },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
+      },
+    }),
     "crm.write": tool({
       description:
-        "Propose setting fields on a CRM record (queued for human approval — NOT applied immediately). " +
+        "Propose setting fields on an EXISTING CRM record (queued for human approval — NOT applied immediately). " +
+        "Requires `recordId` — for NEW records use crm.create instead. " +
         "Provide `standard` (name; domain for account; value in USD for deal; title for contact) and/or " +
         "`fields` (custom field key/value pairs). Available custom field keys — " +
         `account: [${(ctx.fieldDefsByEntity?.account ?? []).map((d) => d.key).join(", ") || "none"}]; ` +
@@ -500,6 +538,7 @@ export function citrateCommsTools(ctx: ToolContext) {
 export const IMPLEMENTED_TOOLS: ToolName[] = [
   "crm.read",
   "crm.write",
+  "crm.create",
   "crm.note",
   "pm.read",
   "pm.write",
