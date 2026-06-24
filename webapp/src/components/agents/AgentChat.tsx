@@ -38,6 +38,8 @@ const TOOL_LABEL: Record<string, string> = {
   "memory.assert": "Propose graph findings (you approve)",
   "documents.read": "Search uploaded documents",
   "documents.write": "Propose new documents (you approve)",
+  "documents.list": "List documents & artifacts",
+  "artifact.attach": "Attach documents/images to its replies",
   "web.search": "Search the live web",
   "web.fetch": "Read a web page",
   "terminal.exec": "Run sandboxed commands (you approve)",

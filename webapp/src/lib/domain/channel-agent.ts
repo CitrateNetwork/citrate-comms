@@ -12,7 +12,7 @@ import { citrateCommsTools } from "@/lib/ai/tools";
 import { HITL_TOOLS } from "@/lib/ai/personas";
 import { resolvePersona, personaIdForAgent } from "@/lib/domain/personas";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
-import { listMessages, sendMessage } from "@/lib/domain/messages";
+import { listMessages, sendMessage, linkMessageAttachments, getMessageAttachments } from "@/lib/domain/messages";
 import { directory } from "@/lib/domain/members";
 import { listAgents } from "@/lib/domain/agents";
 import { appendAudit } from "@/lib/audit/chain";
@@ -70,6 +70,9 @@ export async function respondInChannelAsAgent(args: {
   const allow = new Set(persona.tools);
   for (const t of persona.tools) if (HITL_TOOLS.has(t)) allow.delete(t);
 
+  // AGT-ART: collect documents the agent attaches during this turn (artifact.attach).
+  const artifactIds = new Set<string>();
+
   const system = buildSystemPrompt({
     persona: { name: persona.name, mission: persona.mission, tools: persona.tools, skills: persona.skills },
     overrides: persona.overrides,
@@ -85,6 +88,7 @@ export async function respondInChannelAsAgent(args: {
     agentRole: "Agent",
     allow,
     audit: true,
+    collectArtifact: (id) => artifactIds.add(id),
     fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   });
 
@@ -122,6 +126,11 @@ export async function respondInChannelAsAgent(args: {
     parentId: null,
     clientMsgId: null,
   });
+  // AGT-ART: link any artifacts the agent attached so they render on its channel message.
+  if (artifactIds.size > 0) {
+    await linkMessageAttachments(workspaceId, message.id, [...artifactIds]);
+    message.attachments = await getMessageAttachments(workspaceId, message.id);
+  }
   await appendAudit({ workspaceId, actorSub: invokedBySub, event: "agent_channel_reply", target: `${agent.id}:${channelId}` });
   return { ok: true, messageId: message.id };
 }

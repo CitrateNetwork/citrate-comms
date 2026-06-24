@@ -57,6 +57,17 @@ export async function listDocumentsForRecord(
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
 }
 
+/** All documents in a workspace (newest first, bounded) — for agent artifact discovery. */
+export async function listDocuments(workspaceId: string, limit = 50): Promise<DocumentRow[]> {
+  const rows = await db()
+    .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
+    .from(documents)
+    .where(eq(documents.workspaceId, workspaceId))
+    .orderBy(desc(documents.createdAt))
+    .limit(Math.min(Math.max(limit, 1), 200));
+  return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
+}
+
 // ── Ingest: parse → chunk → embed (COMMS-AGENTS S4) ──────────────────────────
 
 /** Extract text from a file buffer by type. Text formats inline; PDF via unpdf;

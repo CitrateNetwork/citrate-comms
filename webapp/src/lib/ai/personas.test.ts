@@ -5,15 +5,12 @@ import {
   HITL_TOOLS,
   RUNNER_TOOLS,
   SKILL_FRAGMENTS,
+  ALL_TOOL_NAMES,
   type SkillKey,
-  type ToolName,
 } from "./personas";
 
-const ALL_TOOLS: ToolName[] = [
-  "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
-  "memory.recall", "memory.assert", "documents.read", "documents.write",
-  "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
-];
+// Source-of-truth list so persona tools and the registry can't silently drift.
+const ALL_TOOLS = ALL_TOOL_NAMES;
 
 describe("default personas", () => {
   it("ships exactly the three org-default personas", () => {

@@ -29,7 +29,9 @@ export type ToolName =
   | "web.fetch"
   | "terminal.exec"
   | "code.run"
-  | "chart.render";
+  | "chart.render"
+  | "documents.list"
+  | "artifact.attach";
 
 /** Write/terminal tools that MUST pass the HITL approval gate before mutating. */
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -101,7 +103,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: false,
     maxSteps: 6,
     temperature: 0.3,
-    tools: ["crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "memory.recall", "memory.assert", "thread.summarize"],
+    tools: ["crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "memory.recall", "memory.assert", "thread.summarize", "documents.list", "artifact.attach"],
     skills: ["decision-record", "commitment-tracking", "handoff-discipline"],
   },
   "marketing-growth-engineer": {
@@ -118,7 +120,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: true,
     maxSteps: 10,
     temperature: 0.4,
-    tools: ["web.search", "web.fetch", "crm.read", "crm.write", "memory.recall", "memory.assert", "documents.read"],
+    tools: ["web.search", "web.fetch", "crm.read", "crm.write", "memory.recall", "memory.assert", "documents.read", "documents.list", "artifact.attach"],
     skills: ["research-provenance", "claim-vs-derivation", "no-fabrication"],
   },
   "data-scientist-notetaker": {
@@ -135,7 +137,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: true,
     maxSteps: 12,
     temperature: 0.2,
-    tools: ["documents.read", "documents.write", "terminal.exec", "code.run", "memory.assert", "crm.read", "crm.note", "ledger.write", "chart.render"],
+    tools: ["documents.read", "documents.write", "documents.list", "artifact.attach", "terminal.exec", "code.run", "memory.assert", "crm.read", "crm.note", "ledger.write", "chart.render"],
     skills: ["two-plane-provenance", "trust-tiering", "reproducible-analysis"],
   },
 };
@@ -145,7 +147,7 @@ export const DEFAULT_PERSONA_LIST: PersonaTemplate[] = Object.values(DEFAULT_PER
 /** Every tool name (for validating a customized allow-list). */
 export const ALL_TOOL_NAMES: ToolName[] = [
   "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
-  "memory.recall", "memory.assert", "documents.read", "documents.write",
+  "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
 ];
 

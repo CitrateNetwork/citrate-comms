@@ -16,7 +16,7 @@ import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
-import { retrieveChunks } from "@/lib/domain/documents";
+import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
 import { listMessages } from "@/lib/domain/messages";
 import { listTasks, listProjects } from "@/lib/domain/pm";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
@@ -40,6 +40,9 @@ export interface ToolContext {
   fieldDefsByEntity?: Partial<Record<CrmEntity, { key: string; label: string; type: string }[]>>;
   /** When false (incognito), tool calls are NOT written to the transparency log. Default true. */
   audit?: boolean;
+  /** AGT-ART: called by artifact.attach with a documentId the agent wants attached to its
+   *  message. The caller (channel reply / chat) links the collected documents afterward. */
+  collectArtifact?: (documentId: string) => void;
 }
 
 const entitySchema = z.enum(["account", "deal", "contact"]);
@@ -292,7 +295,32 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({ query: z.string().min(1).max(400), budget: z.number().int().min(1).max(10).default(6) }),
       execute: audited("documents.read", Capability.ReadChannel, async (a: { query: string; budget: number }) => {
         const results = await retrieveChunks(ctx.workspaceId, a.query, { budget: a.budget });
-        return { results: results.map((r) => ({ document: r.name, snippet: r.snippet })) };
+        // documentId is surfaced so the agent can artifact.attach a source it cited.
+        return { results: results.map((r) => ({ documentId: r.documentId, document: r.name, snippet: r.snippet })) };
+      }),
+    }),
+    "documents.list": tool({
+      description:
+        "List the workspace's documents/artifacts (id, name, type, when). Use to find an existing " +
+        "file/image/chart by id so you can attach it to your reply with artifact.attach.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
+      execute: audited("documents.list", Capability.ReadChannel, async (a: { limit: number }) => {
+        const docs = await listDocuments(ctx.workspaceId, a.limit);
+        return { documents: docs.map((d) => ({ id: d.id, name: d.name, mime: d.mime, at: d.createdAt })) };
+      }),
+    }),
+    "artifact.attach": tool({
+      description:
+        "Attach an existing workspace document/image/chart (by documentId) to THIS reply so members can " +
+        "open and download it. Find ids with documents.read (sources you cited) or documents.list. Returns " +
+        "a markdown link you can also embed inline. Attachments are recorded and downloads are audited.",
+      inputSchema: z.object({ documentId: z.string().uuid(), note: z.string().max(200).optional() }),
+      execute: audited("artifact.attach", Capability.ReadChannel, async (a: { documentId: string; note?: string }) => {
+        const doc = await getDocument(ctx.workspaceId, a.documentId);
+        if (!doc) return { ok: false, error: "document_not_found" };
+        ctx.collectArtifact?.(a.documentId);
+        const downloadUrl = `/api/workspaces/${ctx.workspaceId}/documents/${doc.id}/download`;
+        return { ok: true, documentId: doc.id, title: doc.name, downloadUrl, markdown: `[${doc.name}](${downloadUrl})` };
       }),
     }),
     "pm.read": tool({
@@ -481,6 +509,8 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "memory.assert",
   "documents.read",
   "documents.write",
+  "documents.list",
+  "artifact.attach",
   "web.search",
   "web.fetch",
   "terminal.exec",

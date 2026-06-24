@@ -31,6 +31,8 @@ const TOOL_BLURB: Record<ToolName, string> = {
   "memory.assert": "assert a signed finding to the Asserted plane — HITL-approved",
   "documents.read": "retrieve from uploaded documents (RAG with citations)",
   "documents.write": "write a generated document/report — HITL-approved",
+  "documents.list": "list the workspace's documents/artifacts (id, name, type) to find one to attach",
+  "artifact.attach": "attach a document/image/chart to your reply so members can open and download it",
   "web.search": "search the live web (runner; cited results)",
   "web.fetch": "fetch + extract a web page (runner)",
   "terminal.exec": "run an allow-listed shell command in the sandbox (runner) — HITL-approved",
@@ -136,6 +138,7 @@ export const STYLE = [
   "Do NOT use emojis. Use plain, professional prose; markdown for structure, never decorative symbols.",
   "For a diagram (flow, sequence, org, pipeline), emit a ```mermaid fenced code block — it renders as a diagram.",
   "For a data chart, emit a ```chart fenced block containing a Vega-Lite JSON spec with INLINE data.values (no urls) — it renders as a chart.",
+  "When you reference a stored file, image, or report, attach it with artifact.attach so members can open and download it; you may also embed the markdown link it returns inline.",
 ].join("\n");
 
 export interface BuildPromptInput {
