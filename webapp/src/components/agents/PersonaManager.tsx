@@ -21,10 +21,66 @@ export interface UiPersonaRow {
   toolCount: number;
 }
 
-export function PersonaManager({ workspaceId, backHref, personas }: { workspaceId: string; backHref: string; personas: UiPersonaRow[] }) {
+export interface UiMemberOpt {
+  sub: string;
+  name: string;
+}
+export interface UiGrant {
+  id: string;
+  granteeSub: string;
+  granteeName: string | null;
+  personaId: string | null;
+}
+
+export function PersonaManager({
+  workspaceId,
+  backHref,
+  personas,
+  canDelegate = false,
+  members = [],
+  grants: initialGrants = [],
+}: {
+  workspaceId: string;
+  backHref: string;
+  personas: UiPersonaRow[];
+  canDelegate?: boolean;
+  members?: UiMemberOpt[];
+  grants?: UiGrant[];
+}) {
   const router = useRouter();
   const api = `/api/workspaces/${workspaceId}/personas`;
+  const grantsApi = `/api/workspaces/${workspaceId}/persona-config-grants`;
   const [busy, setBusy] = useState(false);
+
+  // CFG delegation state (admin only).
+  const [grants, setGrants] = useState<UiGrant[]>(initialGrants);
+  const [grantee, setGrantee] = useState("");
+  const [grantPersona, setGrantPersona] = useState(""); // "" = all personas
+  const personaName = (id: string | null) => (id ? personas.find((p) => p.id === id)?.name ?? "a persona" : "All personas");
+
+  async function addGrant() {
+    if (!grantee) return;
+    const r = await fetch(grantsApi, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ granteeSub: grantee, personaId: grantPersona || null }),
+    });
+    if (r.ok) {
+      const member = members.find((m) => m.sub === grantee);
+      // Optimistic add; refresh pulls the authoritative list (with dedupe).
+      setGrants((prev) => [
+        ...prev.filter((g) => !(g.granteeSub === grantee && g.personaId === (grantPersona || null))),
+        { id: `tmp-${grantee}-${grantPersona}`, granteeSub: grantee, granteeName: member?.name ?? null, personaId: grantPersona || null },
+      ]);
+      setGrantee("");
+      setGrantPersona("");
+      router.refresh();
+    }
+  }
+  async function revokeGrant(id: string) {
+    setGrants((prev) => prev.filter((g) => g.id !== id));
+    await fetch(`${grantsApi}/${id}`, { method: "DELETE" });
+  }
 
   async function clone(id: string, name: string) {
     const n = prompt("Name for the cloned persona:", `${name} (copy)`);
@@ -86,6 +142,42 @@ export function PersonaManager({ workspaceId, backHref, personas }: { workspaceI
           </div>
         ))}
       </div>
+
+      {canDelegate && (
+        <section className={styles.delegate}>
+          <div className={styles.delegateHead}>Config delegation</div>
+          <p className={styles.note}>
+            Let a teammate configure a persona’s prompts, skills, resources, and settings without making them a
+            workspace admin. They can’t delete personas or change membership. Grants are audited.
+          </p>
+          <div className={styles.grantForm}>
+            <select className={styles.grantSelect} value={grantee} onChange={(e) => setGrantee(e.target.value)} aria-label="Member">
+              <option value="">Choose a member…</option>
+              {members.map((m) => (
+                <option key={m.sub} value={m.sub}>{m.name}</option>
+              ))}
+            </select>
+            <select className={styles.grantSelect} value={grantPersona} onChange={(e) => setGrantPersona(e.target.value)} aria-label="Persona">
+              <option value="">All personas</option>
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <Btn variant="primary" size="sm" onClick={addGrant} disabled={!grantee}>Grant</Btn>
+          </div>
+          {grants.length > 0 && (
+            <div className={styles.grantList}>
+              {grants.map((g) => (
+                <div key={g.id} className={styles.grantItem}>
+                  <span className={styles.grantWho}>{g.granteeName ?? g.granteeSub.slice(0, 10)}</span>
+                  <span className={styles.grantScope}>can configure <strong>{personaName(g.personaId)}</strong></span>
+                  <button className={`${styles.linkBtn} ${styles.danger}`} onClick={() => revokeGrant(g.id)}>Revoke</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { listAgents } from "@/lib/domain/agents";
 import { channelsForMember } from "@/lib/domain/channels";
 import { directory } from "@/lib/domain/members";
 import { listPersonas, seedDefaultPersonas } from "@/lib/domain/personas";
+import { hasAnyConfigGrant } from "@/lib/domain/agent-config";
 import { can, Capability } from "@/lib/rbac/matrix";
 import { AgentsScreen } from "@/components/agents/AgentsScreen";
 
@@ -34,12 +35,16 @@ export default async function AgentsPage({ params }: { params: Promise<{ slug: s
     personas = await listPersonas(ws.id);
   }
 
+  // Customize link: admins, or members holding any persona config grant (CFG delegation).
+  const isAdmin = can(ctx.role, Capability.ManageWorkspace);
+  const canCustomize = isAdmin || (await hasAnyConfigGrant(ws.id, sub));
+
   return (
     <AgentsScreen
       workspaceId={ws.id}
       workspaceSlug={slug}
       canManage={can(ctx.role, Capability.AddAgent)}
-      canCustomize={can(ctx.role, Capability.ManageWorkspace)}
+      canCustomize={canCustomize}
       personas={personas.map((p) => ({ id: p.id, name: p.name, key: p.key, baseTemplate: p.baseTemplate, toolCount: p.tools.length }))}
       agents={agents.map((a) => ({
         id: a.id,

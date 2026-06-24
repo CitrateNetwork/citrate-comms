@@ -111,6 +111,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const system = buildSystemPrompt({
     persona: { name: persona.name, mission: persona.mission, tools: persona.tools, skills: persona.skills },
     overrides: persona.overrides,
+    resources: persona.resources,
     context: { scope: `workspace ${workspaceId}` },
   });
 

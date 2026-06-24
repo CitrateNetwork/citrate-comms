@@ -74,3 +74,56 @@
 .danger:hover {
   color: var(--danger);
 }
+
+/* CFG: config delegation */
+.delegate {
+  margin-top: var(--s-5);
+  border-top: 1px solid var(--border-2);
+  padding-top: var(--s-4);
+}
+.delegateHead {
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--fg-1);
+  margin-bottom: var(--s-2);
+}
+.grantForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+  margin-bottom: var(--s-3);
+}
+.grantSelect {
+  height: 34px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  padding: 0 var(--s-2);
+}
+.grantList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.grantItem {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  padding: var(--s-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  background: var(--paper-pure);
+}
+.grantWho {
+  font-weight: 500;
+  color: var(--fg-1);
+}
+.grantScope {
+  flex: 1;
+  color: var(--fg-3);
+}

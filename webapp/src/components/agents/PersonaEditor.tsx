@@ -5,7 +5,7 @@
  * skills, model tier, step/temperature budget, and tool allow-list. The force-included
  * guardrails layer is shown READ-ONLY (it can never be removed). Export to JSON.
  */
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Btn, Icon, SurfBadge } from "@/components/primitives";
@@ -13,6 +13,15 @@ import { PROMPT_LAYERS } from "@/lib/ai/personas";
 import type { PersonaConfig } from "@/lib/domain/personas";
 import s from "@/components/common/screen.module.css";
 import styles from "./PersonaEditor.module.css";
+
+interface ResourceItem {
+  id: string;
+  kind: "text" | "link" | "document";
+  title: string;
+  content: string | null;
+  url: string | null;
+  enabled: boolean;
+}
 
 export function PersonaEditor({ workspaceId, backHref, config }: { workspaceId: string; backHref: string; config: PersonaConfig }) {
   const router = useRouter();
@@ -34,6 +43,51 @@ export function PersonaEditor({ workspaceId, backHref, config }: { workspaceId: 
   const [skills, setSkills] = useState(config.skills);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savedNote, setSavedNote] = useState<string | null>(null);
+
+  // CFG: pinned resources/knowledge.
+  const [resources, setResources] = useState<ResourceItem[]>([]);
+  const [resKind, setResKind] = useState<"text" | "link">("text");
+  const [resTitle, setResTitle] = useState("");
+  const [resBody, setResBody] = useState("");
+  const [addingRes, setAddingRes] = useState(false);
+
+  const loadResources = useCallback(async () => {
+    const r = await fetch(`${api}/resources`);
+    if (r.ok) {
+      const j = (await r.json()) as { resources: ResourceItem[] };
+      setResources(j.resources ?? []);
+    }
+  }, [api]);
+  useEffect(() => {
+    void loadResources();
+  }, [loadResources]);
+
+  async function addResource() {
+    const title = resTitle.trim();
+    const value = resBody.trim();
+    if (!title || !value || addingRes) return;
+    setAddingRes(true);
+    const payload = resKind === "text" ? { kind: "text", title, content: value } : { kind: "link", title, url: value };
+    const r = await fetch(`${api}/resources`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+    setAddingRes(false);
+    if (r.ok) {
+      setResTitle("");
+      setResBody("");
+      void loadResources();
+    } else {
+      setSavedNote(resKind === "link" ? "Add failed — link must start with http(s)." : "Add failed.");
+    }
+  }
+
+  async function toggleResource(id: string, enabled: boolean) {
+    setResources((prev) => prev.map((x) => (x.id === id ? { ...x, enabled } : x)));
+    await fetch(`${api}/resources/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  }
+
+  async function deleteResource(id: string) {
+    setResources((prev) => prev.filter((x) => x.id !== id));
+    await fetch(`${api}/resources/${id}`, { method: "DELETE" });
+  }
 
   function toggleTool(t: string) {
     setTools((prev) => {
@@ -160,6 +214,55 @@ export function PersonaEditor({ workspaceId, backHref, config }: { workspaceId: 
             <span><strong>{sk.key}</strong> — {sk.fragment}</span>
           </label>
         ))}
+      </section>
+
+      {/* Resources & knowledge (CFG) */}
+      <section className={styles.section}>
+        <div className={styles.sectionHead}>Resources &amp; knowledge</div>
+        <div className={styles.hint}>
+          Pin org material this agent should treat as authoritative. Enabled items are folded into its system
+          prompt every turn. Text is encrypted at rest; links are read on demand with web.fetch.
+        </div>
+        {resources.length > 0 && (
+          <div className={styles.resList}>
+            {resources.map((r) => (
+              <div key={r.id} className={styles.resItem}>
+                <label className={styles.resToggle}>
+                  <input type="checkbox" checked={r.enabled} onChange={(e) => toggleResource(r.id, e.target.checked)} />
+                </label>
+                <div className={styles.resBody}>
+                  <div className={styles.resTitle}>
+                    <SurfBadge variant="outline">{r.kind}</SurfBadge> {r.title}
+                  </div>
+                  {r.kind === "link" && r.url && <a className={styles.resUrl} href={r.url} target="_blank" rel="noreferrer">{r.url}</a>}
+                  {r.kind === "text" && r.content && <div className={styles.resText}>{r.content}</div>}
+                </div>
+                <button className={styles.resDel} onClick={() => deleteResource(r.id)} aria-label="Delete resource">
+                  <Icon name="x" size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.resAdd}>
+          <div className={styles.resAddRow}>
+            <select className={styles.resKind} value={resKind} onChange={(e) => setResKind(e.target.value as "text" | "link")}>
+              <option value="text">Knowledge text</option>
+              <option value="link">Reference link</option>
+            </select>
+            <input className={styles.input} value={resTitle} onChange={(e) => setResTitle(e.target.value)} placeholder="Title (e.g. Pricing policy)" />
+          </div>
+          {resKind === "text" ? (
+            <textarea className={styles.textarea} rows={3} value={resBody} onChange={(e) => setResBody(e.target.value)} placeholder="Paste the knowledge the agent should know…" />
+          ) : (
+            <input className={styles.input} value={resBody} onChange={(e) => setResBody(e.target.value)} placeholder="https://…" />
+          )}
+          <div className={styles.saveRow}>
+            <Btn variant="primary" size="sm" onClick={addResource} disabled={addingRes || !resTitle.trim() || !resBody.trim()}>
+              {addingRes ? "Adding…" : "Add resource"}
+            </Btn>
+          </div>
+        </div>
       </section>
 
       {/* Guardrails (read-only) */}

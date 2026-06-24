@@ -58,6 +58,33 @@ function skillsLayer(skills: SkillKey[]): string {
   return ["SKILLS & WORKFLOWS (the disciplines this workspace expects of you):", body].join("\n");
 }
 
+/** A pinned resource/knowledge item attached to the persona (CFG). */
+export interface PromptResource {
+  kind: "text" | "link" | "document";
+  title: string;
+  content?: string;
+  url?: string;
+}
+
+function resourcesLayer(resources?: PromptResource[]): string {
+  if (!resources || resources.length === 0) return "";
+  const lines: string[] = [];
+  for (const r of resources) {
+    if (r.kind === "text" && r.content) {
+      lines.push(`- ${r.title}:\n${r.content}`);
+    } else if (r.kind === "link" && r.url) {
+      lines.push(`- ${r.title} — ${r.url} (use web.fetch to read it when relevant)`);
+    } else if (r.kind === "document") {
+      lines.push(`- Pinned document "${r.title}" — prefer documents.read to retrieve from it`);
+    }
+  }
+  if (lines.length === 0) return "";
+  return [
+    "PINNED RESOURCES & KNOWLEDGE (curated for you by your owners — treat as authoritative org material):",
+    lines.join("\n"),
+  ].join("\n");
+}
+
 /** A recalled memory item surfaced into the CONTEXT layer with its trust tier. */
 export interface ContextMemory {
   content: string;
@@ -120,19 +147,22 @@ export interface BuildPromptInput {
     workspaceKnowledge?: string; // layer 3
     skills?: string; // layer 4
   };
+  /** CFG: pinned resources/knowledge the owners attached to this persona. */
+  resources?: PromptResource[];
   context?: PromptContext;
 }
 
 /** Compose the full system prompt. Guardrails (layer 6) are ALWAYS appended. */
 export function buildSystemPrompt(input: BuildPromptInput): string {
-  const { persona, overrides, context } = input;
+  const { persona, overrides, resources, context } = input;
   const layer1 = overrides?.mission?.trim() || persona.mission;
   const layer2 = overrides?.capabilities?.trim() || capabilitiesLayer(persona.tools);
   const layer3 = overrides?.workspaceKnowledge?.trim() || "";
   const layer4 = overrides?.skills?.trim() || skillsLayer(persona.skills);
+  const layerResources = resourcesLayer(resources);
   const layer5 = contextLayer(context);
 
-  return [layer1, layer2, layer3, layer4, layer5, GUARDRAILS, STYLE]
+  return [layer1, layer2, layer3, layer4, layerResources, layer5, GUARDRAILS, STYLE]
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
     .join("\n\n");

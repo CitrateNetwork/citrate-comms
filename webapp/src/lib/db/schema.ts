@@ -853,3 +853,43 @@ export const crmViews = pgTable(
   },
   (t) => [index("crm_views_ws_entity").on(t.workspaceId, t.entity)],
 );
+
+// ── CFG: per-persona resources/knowledge-bases + config delegation ───────────
+
+/** A resource/knowledge item attached to a persona (CFG). At runtime, enabled items
+ *  are folded into the persona's system prompt. `text` content is encrypted at rest;
+ *  `link` keeps the URL plain (so the agent can web.fetch it); `document` pins an
+ *  uploaded document the agent should prefer via documents.read. */
+export const agentResources = pgTable(
+  "agent_resources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    personaId: uuid("persona_id").notNull().references(() => agentPersonas.id),
+    kind: text("kind").notNull(), // 'text' | 'link' | 'document'
+    title: text("title").notNull(),
+    contentEnc: text("content_enc"), // kind=text: the knowledge snippet (encrypted)
+    url: text("url"), // kind=link
+    documentId: uuid("document_id").references(() => documents.id), // kind=document
+    enabled: boolean("enabled").notNull().default(true),
+    createdBySub: text("created_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_resources_persona").on(t.workspaceId, t.personaId)],
+);
+
+/** Config-rights delegation (CFG): an Owner/Admin grants a member the right to configure
+ *  a persona (resources, prompts, skills, settings) WITHOUT full workspace admin.
+ *  `personaId` NULL = rights over every persona in the workspace. */
+export const agentConfigGrants = pgTable(
+  "agent_config_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    granteeSub: text("grantee_sub").notNull(),
+    personaId: uuid("persona_id").references(() => agentPersonas.id), // NULL = all personas
+    grantedBySub: text("granted_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_config_grants_ws").on(t.workspaceId, t.granteeSub)],
+);

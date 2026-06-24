@@ -1,17 +1,19 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability } from "@/lib/tenant/guard";
+import { Capability, requireMember, requireCapability, GuardError } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { personaUpdateSchema } from "@/lib/validation/schemas";
 import { getPersonaConfig, updatePersona, deletePersona, exportPersona } from "@/lib/domain/personas";
+import { canConfigurePersona } from "@/lib/domain/agent-config";
 import type { ToolName } from "@/lib/ai/personas";
 
 export const runtime = "nodejs";
 
-/** Persona editor config (or ?export=1 → portable JSON). Owner/Admin. */
+/** Persona editor config (or ?export=1 → portable JSON). Admin OR a delegated configurer. */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; personaId: string }> }) {
   try {
     const { id, personaId } = await params;
-    await requireCapability(req, id, Capability.ManageWorkspace);
+    const ctx = await requireMember(req, id);
+    if (!(await canConfigurePersona(id, ctx.sub, ctx.role, personaId))) throw new GuardError(403, "not authorized to configure this persona");
     if (new URL(req.url).searchParams.get("export") === "1") {
       const exp = await exportPersona(id, personaId);
       if (!exp) return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -25,11 +27,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   }
 }
 
-/** Update model/tools/steps/temperature/name/enabled. Owner/Admin. */
+/** Update model/tools/steps/temperature/name/enabled. Admin OR a delegated configurer. */
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string; personaId: string }> }) {
   try {
     const { id, personaId } = await params;
-    const ctx = await requireCapability(req, id, Capability.ManageWorkspace);
+    const ctx = await requireMember(req, id);
+    if (!(await canConfigurePersona(id, ctx.sub, ctx.role, personaId))) throw new GuardError(403, "not authorized to configure this persona");
     const parsed = personaUpdateSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
     await updatePersona(id, personaId, { ...parsed.data, tools: parsed.data.tools as ToolName[] | undefined }, ctx.sub);
@@ -39,7 +42,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 }
 
-/** Delete a non-template persona. Owner/Admin. */
+/** Delete a non-template persona. Owner/Admin only (destructive — not delegable). */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string; personaId: string }> }) {
   try {
     const { id, personaId } = await params;

@@ -50,6 +50,13 @@
       "when": 1782273357687,
       "tag": "0006_blue_karma",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1782310545613,
+      "tag": "0007_closed_blob",
+      "breakpoints": true
     }
   ]
 }

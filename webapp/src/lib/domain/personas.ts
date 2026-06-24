@@ -12,6 +12,7 @@ import { agentPersonas, agentPrompts, agentSkills } from "@/lib/db/schema";
 import { decryptField, encryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { GUARDRAILS } from "@/lib/ai/system-prompt";
+import { resolvePersonaResources, type PersonaResourceForPrompt } from "@/lib/domain/agent-config";
 import {
   DEFAULT_PERSONA_LIST,
   DEFAULT_PERSONAS,
@@ -53,6 +54,8 @@ export interface ResolvedPersona extends PersonaRow {
     workspaceKnowledge?: string;
     skills?: string;
   };
+  /** CFG: pinned resources/knowledge folded into the system prompt at runtime. */
+  resources: PersonaResourceForPrompt[];
 }
 
 interface StoredModel extends PersonaModel {
@@ -197,6 +200,8 @@ export async function resolvePersona(workspaceId: string, personaId: string): Pr
   const enabledSkills = skillRows.filter((s) => s.enabled).map((s) => s.skillKey as SkillKey);
   const skills = enabledSkills.length > 0 ? enabledSkills : (template?.skills ?? []);
 
+  const resources = await resolvePersonaResources(workspaceId, personaId);
+
   return {
     ...row,
     mission: byLayer.get(1) || template?.mission || `You are ${row.name}.`,
@@ -208,6 +213,7 @@ export async function resolvePersona(workspaceId: string, personaId: string): Pr
       workspaceKnowledge: byLayer.get(3),
       skills: byLayer.get(4),
     },
+    resources,
   };
 }
 

@@ -73,6 +73,7 @@ export async function respondInChannelAsAgent(args: {
   const system = buildSystemPrompt({
     persona: { name: persona.name, mission: persona.mission, tools: persona.tools, skills: persona.skills },
     overrides: persona.overrides,
+    resources: persona.resources,
     context: { scope: `channel reply in workspace ${workspaceId}` },
   });
 

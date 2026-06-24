@@ -57,4 +57,29 @@ describe("buildSystemPrompt — layered composition + force-included guardrails"
     });
     expect(out).not.toContain("\n\n\n"); // trimmed + filtered join
   });
+
+  it("CFG: folds pinned resources in, with guardrails still last", () => {
+    const out = buildSystemPrompt({
+      persona: { name: ea.name, mission: ea.mission, tools: ea.tools, skills: ea.skills },
+      resources: [
+        { kind: "text", title: "Pricing policy", content: "Annual plans get 15% off." },
+        { kind: "link", title: "Brand book", url: "https://example.com/brand" },
+        { kind: "document", title: "Q3 deck" },
+      ],
+    });
+    expect(out).toContain("PINNED RESOURCES");
+    expect(out).toContain("Annual plans get 15% off.");
+    expect(out).toContain("https://example.com/brand");
+    expect(out).toContain("Q3 deck");
+    // guardrails remain the irreducible floor, appended after resources
+    expect(out.indexOf("PINNED RESOURCES")).toBeLessThan(out.indexOf(GUARDRAILS));
+  });
+
+  it("CFG: no resources → no resources section", () => {
+    const out = buildSystemPrompt({
+      persona: { name: ea.name, mission: ea.mission, tools: ea.tools, skills: ea.skills },
+      resources: [],
+    });
+    expect(out).not.toContain("PINNED RESOURCES");
+  });
 });
