@@ -137,7 +137,17 @@ export interface IngestArgs {
 /** Store a document + its embedded chunks. Embeddings are best-effort (null until the
  *  gateway serves bge); RAG falls back to lexical until then. */
 export async function ingestDocument(args: IngestArgs): Promise<{ id: string; chunks: number }> {
-  const text = args.text ?? (args.buffer ? await extractDocText(args.name, args.mime, args.buffer) : null);
+  // Text extraction is best-effort and must never fail the upload (extractDocText already
+  // catches per-format, but guard the whole step regardless).
+  let text: string | null = null;
+  try {
+    text = args.text ?? (args.buffer ? await extractDocText(args.name, args.mime, args.buffer) : null);
+  } catch {
+    text = null;
+  }
+
+  // The document record is the part that MUST succeed — once the blob is up, the file is
+  // recorded + downloadable. If this insert throws, the caller surfaces a real failure.
   const [doc] = await db()
     .insert(documents)
     .values({
@@ -154,30 +164,44 @@ export async function ingestDocument(args: IngestArgs): Promise<{ id: string; ch
     .returning({ id: documents.id });
   const documentId = doc!.id;
 
+  // Everything after the doc row is best-effort RAG indexing — a failure here (embeddings,
+  // a large chunk batch, pgvector) must NOT fail the upload. The doc is already stored.
   let chunks = 0;
   if (text) {
-    const parts = chunkText(text);
-    if (parts.length > 0) {
-      const vecs = await embed(parts).catch(() => null);
-      await db().insert(documentChunks).values(
-        parts.map((t, i) => ({
+    try {
+      const parts = chunkText(text);
+      if (parts.length > 0) {
+        const vecs = await embed(parts).catch(() => null);
+        const rows = parts.map((t, i) => ({
           workspaceId: args.workspaceId,
           documentId,
           ord: i,
           textEnc: encryptField(args.workspaceId, t),
           embedding: vecs?.[i] ?? null,
-        })),
-      );
-      chunks = parts.length;
+        }));
+        // Batch inserts so a long PDF (hundreds of 1024-dim vectors) can't blow the
+        // statement/param ceiling and fail the whole upload.
+        for (let i = 0; i < rows.length; i += 50) {
+          await db().insert(documentChunks).values(rows.slice(i, i + 50));
+        }
+        chunks = parts.length;
+      }
+    } catch (e) {
+      console.error("[ingestDocument] indexing failed (doc still stored):", e);
+      chunks = 0;
     }
   }
 
-  const entity = args.scope.dealId ? "deal" : args.scope.accountId ? "account" : null;
-  const recordId = args.scope.dealId ?? args.scope.accountId ?? null;
-  if (entity && recordId) {
-    await recordActivity({ workspaceId: args.workspaceId, entity, recordId, actorSub: args.uploadedBySub, input: { kind: "document_added" }, meta: { documentId } });
+  try {
+    const entity = args.scope.dealId ? "deal" : args.scope.accountId ? "account" : null;
+    const recordId = args.scope.dealId ?? args.scope.accountId ?? null;
+    if (entity && recordId) {
+      await recordActivity({ workspaceId: args.workspaceId, entity, recordId, actorSub: args.uploadedBySub, input: { kind: "document_added" }, meta: { documentId } });
+    }
+    await appendAudit({ workspaceId: args.workspaceId, actorSub: args.uploadedBySub, event: "document_ingested", target: documentId });
+  } catch (e) {
+    console.error("[ingestDocument] activity/audit failed (doc still stored):", e);
   }
-  await appendAudit({ workspaceId: args.workspaceId, actorSub: args.uploadedBySub, event: "document_ingested", target: documentId });
   return { id: documentId, chunks };
 }
 

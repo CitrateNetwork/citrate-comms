@@ -49,22 +49,34 @@ export function DropZone({ workspaceId, scope, onDone }: { workspaceId: string; 
         setFile(file.name, { status: "error", error: `Too large (max ${humanSize(maxBytesFor(file.name, file.type))})` });
         continue;
       }
+      let blobUrl: string;
       try {
         const blob = await upload(file.name, file, {
           access: "public",
           handleUploadUrl: `/api/workspaces/${workspaceId}/documents/upload-token`,
           clientPayload: JSON.stringify(scope),
         });
+        blobUrl = blob.url;
+      } catch (e) {
+        const msg = (e as Error)?.message ?? "";
+        setFile(file.name, { status: "error", error: /token|blob|store|not\s*found/i.test(msg) ? "Storage not configured (link a Vercel Blob store)" : "Storage upload failed" });
+        continue;
+      }
+      try {
         const r = await fetch(`/api/workspaces/${workspaceId}/documents/finalize`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ blobUrl: blob.url, name: file.name, mime: file.type, ...scope }),
+          body: JSON.stringify({ blobUrl, name: file.name, mime: file.type, ...scope }),
         });
-        if (!r.ok) throw new Error("finalize failed");
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { error?: string };
+          setFile(file.name, { status: "error", error: `Finalize failed (${r.status}${body.error ? `: ${body.error}` : ""})` });
+          continue;
+        }
         setFile(file.name, { status: "done" });
         anyDone = true;
       } catch {
-        setFile(file.name, { status: "error", error: "Upload failed" });
+        setFile(file.name, { status: "error", error: "Finalize error" });
       }
     }
     if (anyDone) onDone();
