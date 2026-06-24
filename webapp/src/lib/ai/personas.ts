@@ -54,6 +54,16 @@ export const RUNNER_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "chart.render",
 ]);
 
+/** Every tool name. Also the default allow-list for the org personas: all agents get every
+ *  tool. This is safe — mutating/terminal/code tools are HITL-gated (propose → human approves),
+ *  reads are RBAC + workspace-scoped, and the force-included guardrails apply regardless. The
+ *  persona's MISSION + skills shape behavior; the tool list no longer restricts it. */
+export const ALL_TOOL_NAMES: ToolName[] = [
+  "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
+  "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
+  "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
+];
+
 export type SkillKey =
   | "decision-record"
   | "commitment-tracking"
@@ -103,7 +113,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: false,
     maxSteps: 6,
     temperature: 0.3,
-    tools: ["crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "memory.recall", "memory.assert", "thread.summarize", "documents.list", "artifact.attach"],
+    tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["decision-record", "commitment-tracking", "handoff-discipline"],
   },
   "marketing-growth-engineer": {
@@ -120,7 +130,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: true,
     maxSteps: 10,
     temperature: 0.4,
-    tools: ["web.search", "web.fetch", "crm.read", "crm.write", "memory.recall", "memory.assert", "documents.read", "documents.list", "artifact.attach"],
+    tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["research-provenance", "claim-vs-derivation", "no-fabrication"],
   },
   "data-scientist-notetaker": {
@@ -137,19 +147,12 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     preferFrontier: true,
     maxSteps: 12,
     temperature: 0.2,
-    tools: ["documents.read", "documents.write", "documents.list", "artifact.attach", "terminal.exec", "code.run", "memory.assert", "crm.read", "crm.note", "ledger.write", "chart.render"],
+    tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["two-plane-provenance", "trust-tiering", "reproducible-analysis"],
   },
 };
 
 export const DEFAULT_PERSONA_LIST: PersonaTemplate[] = Object.values(DEFAULT_PERSONAS);
-
-/** Every tool name (for validating a customized allow-list). */
-export const ALL_TOOL_NAMES: ToolName[] = [
-  "crm.read", "crm.write", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
-  "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
-  "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
-];
 
 /** The editable prompt layers (1–4). Layer 6 guardrails are force-included, not editable. */
 export const PROMPT_LAYERS: { layer: number; key: string; label: string; help: string }[] = [

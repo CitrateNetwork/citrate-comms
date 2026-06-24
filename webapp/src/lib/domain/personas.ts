@@ -111,13 +111,13 @@ export async function seedDefaultPersonas(workspaceId: string, createdBy: string
     }
     seeded++;
   }
-  // Top up the default personas' tool allow-lists to the current templates, so
-  // workspaces seeded before new tools shipped (e.g. crm.note/crm.write) gain them.
-  // Safe today: there is no persona tool-customization UI to clobber.
+  // Keep the org TEMPLATE personas synced to the current default toolset (now: every tool).
+  // Only `isTemplate: true` rows are touched — user CLONES (isTemplate: false) keep any
+  // customized/narrowed tool list. To restrict an agent, clone a template and edit the clone.
   for (const t of DEFAULT_PERSONA_LIST) {
     await db()
       .update(agentPersonas)
-      .set({ toolsJson: t.tools, maxSteps: t.maxSteps })
+      .set({ toolsJson: t.tools }) // tools only — don't clobber a tuned maxSteps/temperature
       .where(and(eq(agentPersonas.workspaceId, workspaceId), eq(agentPersonas.key, t.key), eq(agentPersonas.isTemplate, true)));
   }
   if (seeded > 0) {

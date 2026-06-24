@@ -28,12 +28,10 @@ export default async function AgentsPage({ params }: { params: Promise<{ slug: s
     directory(ws.id),
   ]);
 
-  // The agent BRAINS (personas) — seed the org defaults on first visit.
-  let personas = await listPersonas(ws.id);
-  if (personas.length === 0) {
-    await seedDefaultPersonas(ws.id, sub);
-    personas = await listPersonas(ws.id);
-  }
+  // The agent BRAINS (personas) — seed the org defaults + keep the template tool-lists synced
+  // to the current defaults (idempotent; only template rows are touched, clones are left alone).
+  await seedDefaultPersonas(ws.id, sub);
+  const personas = await listPersonas(ws.id);
 
   // Customize link: admins, or members holding any persona config grant (CFG delegation).
   const isAdmin = can(ctx.role, Capability.ManageWorkspace);

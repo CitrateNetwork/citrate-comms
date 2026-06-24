@@ -47,8 +47,12 @@ describe("default personas", () => {
     expect(RUNNER_TOOLS.has("memory.recall")).toBe(false); // inline BFF tool
   });
 
-  it("the notetaker is the only persona with terminal/code (sandbox) tools", () => {
-    const withTerminal = DEFAULT_PERSONA_LIST.filter((p) => p.tools.includes("terminal.exec"));
-    expect(withTerminal.map((p) => p.key)).toEqual(["data-scientist-notetaker"]);
+  it("all default personas get the full toolset (safety is HITL/RBAC/guardrails, not the allow-list)", () => {
+    for (const p of DEFAULT_PERSONA_LIST) {
+      expect([...p.tools].sort()).toEqual([...ALL_TOOL_NAMES].sort());
+    }
+    // The sandbox tools every persona now holds are still HITL-gated — that's the real boundary.
+    expect(HITL_TOOLS.has("terminal.exec")).toBe(true);
+    expect(HITL_TOOLS.has("code.run")).toBe(true);
   });
 });
