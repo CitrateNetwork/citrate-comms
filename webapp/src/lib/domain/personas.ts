@@ -204,6 +204,10 @@ export async function resolvePersona(workspaceId: string, personaId: string): Pr
 
   return {
     ...row,
+    // Org TEMPLATE personas always expose the CURRENT full toolset at runtime, so newly-shipped
+    // tools (e.g. crm.create) are available immediately without waiting for a sync write. Clones
+    // (isTemplate=false) use their stored, customizable allow-list.
+    tools: row.isTemplate ? ALL_TOOL_NAMES : row.tools,
     mission: byLayer.get(1) || template?.mission || `You are ${row.name}.`,
     preferFrontier: storedModel.preferFrontier ?? template?.preferFrontier ?? false,
     skills,

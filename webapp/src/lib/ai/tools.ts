@@ -13,7 +13,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { Capability, can, type Role } from "@/lib/rbac/matrix";
-import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
+import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
@@ -209,7 +209,9 @@ export function citrateCommsTools(ctx: ToolContext) {
         `contact: [${(ctx.fieldDefsByEntity?.contact ?? []).map((d) => d.key).join(", ") || "none"}].`,
       inputSchema: z.object({
         entity: entitySchema,
-        recordId: z.string().uuid(),
+        // Not .uuid() on purpose: a non-existent id returns a recoverable, instructive error
+        // (pointing at crm.create) rather than a hard schema rejection the model can't read.
+        recordId: z.string().min(1),
         standard: z
           .object({
             name: z.string().max(160).optional(),
@@ -221,6 +223,16 @@ export function citrateCommsTools(ctx: ToolContext) {
         fields: z.array(z.object({ key: z.string().max(60), value: z.string().max(8000) })).max(30).optional(),
       }),
       execute: async (a: { entity: CrmEntity; recordId: string; standard?: { name?: string; domain?: string; title?: string; value?: number }; fields?: { key: string; value: string }[] }) => {
+        // crm.write only UPDATES existing records. If the id isn't a real record (e.g. the agent
+        // passed a NAME), tell it to use crm.create instead — recoverable in the same turn.
+        // Check UUID shape first so a name can't reach the uuid-typed column (Postgres would throw).
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(a.recordId);
+        if (!isUuid || !(await recordExists(ctx.workspaceId, a.entity, a.recordId))) {
+          return {
+            status: "error",
+            message: `No existing ${a.entity} with id "${a.recordId}". To CREATE a new ${a.entity}, call crm.create with its name (don't pass a name as recordId). Use crm.write only to update a record returned by crm.read.`,
+          };
+        }
         const approvalIds: string[] = [];
         if (a.standard && Object.values(a.standard).some((v) => v !== undefined)) {
           const patch = {
