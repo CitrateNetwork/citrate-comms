@@ -93,8 +93,8 @@ export async function respondInChannelAsAgent(args: {
     fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   });
 
-  const maxSteps = Math.max(1, Math.min(persona.maxSteps, Number(process.env.COMMS_AGENT_MAX_STEPS ?? 16)));
-  const maxOutputTokens = Math.min(Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 1024), 4096);
+  const maxSteps = Math.max(8, Math.min(persona.maxSteps, Number(process.env.COMMS_AGENT_MAX_STEPS ?? 48)));
+  const maxOutputTokens = Math.min(Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 4096), 8192);
 
   let text = "";
   try {

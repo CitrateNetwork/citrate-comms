@@ -104,9 +104,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Budget ceilings (S6 hardening): hard caps so a mis-set/customized persona can't run
   // away — clamped regardless of the persona's configured values.
   const historyTurns = Math.min(Number(process.env.CITRATE_HISTORY_TURNS ?? 8), 20);
-  const maxOutputTokens = Math.min(Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 1024), 4096);
-  const stepCeiling = Number(process.env.COMMS_AGENT_MAX_STEPS ?? 16);
-  const maxSteps = Math.max(1, Math.min(persona.maxSteps, stepCeiling));
+  // Output budget: 1024 was truncating multi-step answers mid-stream. Default 4096, ceiling 8192.
+  const maxOutputTokens = Math.min(Number(process.env.CITRATE_MAX_OUTPUT_TOKENS ?? 4096), 8192);
+  // Tool-step budget: batch work (e.g. create N accounts + N deals) needs many tool calls.
+  // Floor of 8 so a conservatively-tuned persona still gets enough steps to finish a turn.
+  const stepCeiling = Number(process.env.COMMS_AGENT_MAX_STEPS ?? 48);
+  const maxSteps = Math.max(8, Math.min(persona.maxSteps, stepCeiling));
 
   const system = buildSystemPrompt({
     persona: { name: persona.name, mission: persona.mission, tools: persona.tools, skills: persona.skills },

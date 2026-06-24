@@ -165,7 +165,7 @@ export function PersonaEditor({ workspaceId, backHref, config }: { workspaceId: 
           <label className={styles.field}><span className={styles.lbl}>Prefer frontier for heavy tasks</span>
             <select className={styles.input} value={preferFrontier ? "1" : "0"} onChange={(e) => setPreferFrontier(e.target.value === "1")}><option value="0">No</option><option value="1">Yes</option></select>
           </label>
-          <label className={styles.field}><span className={styles.lbl}>Max tool steps ({maxSteps})</span><input className={styles.input} type="range" min={1} max={20} value={maxSteps} onChange={(e) => setMaxSteps(Number(e.target.value))} /></label>
+          <label className={styles.field}><span className={styles.lbl}>Max tool steps ({maxSteps})</span><input className={styles.input} type="range" min={1} max={50} value={maxSteps} onChange={(e) => setMaxSteps(Number(e.target.value))} /></label>
           <label className={styles.field}><span className={styles.lbl}>Temperature ({temperature.toFixed(2)})</span><input className={styles.input} type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} /></label>
         </div>
         <div className={styles.saveRow}><Btn variant="primary" size="sm" onClick={saveSettings} disabled={savingSettings}>{savingSettings ? "Saving…" : "Save settings"}</Btn></div>

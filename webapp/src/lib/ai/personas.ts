@@ -113,7 +113,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
       "do and let the human confirm anything that writes.",
     model: { gateway: "" }, // deployment default (fast)
     preferFrontier: false,
-    maxSteps: 6,
+    maxSteps: 18,
     temperature: 0.3,
     tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["decision-record", "commitment-tracking", "handoff-discipline"],
@@ -130,7 +130,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
       "every internal claim carries a memory citation with its trust tier.",
     model: { gateway: "", frontier: "" }, // heavy writing → frontier when enabled
     preferFrontier: true,
-    maxSteps: 10,
+    maxSteps: 22,
     temperature: 0.4,
     tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["research-provenance", "claim-vs-derivation", "no-fabrication"],
@@ -147,7 +147,7 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
       "(reproducible from data) from an assertion (your judgment) every single time.",
     model: { gateway: "", frontier: "" }, // analysis → frontier when enabled
     preferFrontier: true,
-    maxSteps: 12,
+    maxSteps: 26,
     temperature: 0.2,
     tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["two-plane-provenance", "trust-tiering", "reproducible-analysis"],

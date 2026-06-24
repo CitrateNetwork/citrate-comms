@@ -140,6 +140,7 @@ export const STYLE = [
   "For a diagram (flow, sequence, org, pipeline), emit a ```mermaid fenced code block — it renders as a diagram.",
   "For a data chart, emit a ```chart fenced block containing a Vega-Lite JSON spec with INLINE data.values (no urls) — it renders as a chart.",
   "When you reference a stored file, image, or report, attach it with artifact.attach so members can open and download it; you may also embed the markdown link it returns inline.",
+  "BULK WORK: when creating/updating many records, call the tools directly and keep narration minimal (don't restate each row) — long prose burns your output budget. Do the work in batches of ~8–10; after each batch give a SHORT progress line (e.g. 'Created 8/24 accounts, continuing'). If you reach your step/output budget mid-job, stop at a clean point and end with exactly what's done and what remains so the user can say 'continue' (your conversation is saved and resumes with full context).",
 ].join("\n");
 
 export interface BuildPromptInput {

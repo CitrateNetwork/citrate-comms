@@ -111,13 +111,13 @@ export async function seedDefaultPersonas(workspaceId: string, createdBy: string
     }
     seeded++;
   }
-  // Keep the org TEMPLATE personas synced to the current default toolset (now: every tool).
-  // Only `isTemplate: true` rows are touched — user CLONES (isTemplate: false) keep any
-  // customized/narrowed tool list. To restrict an agent, clone a template and edit the clone.
+  // Keep the org TEMPLATE personas synced to the current defaults (every tool + the current
+  // step budget). Only `isTemplate: true` rows are touched — user CLONES (isTemplate: false)
+  // keep their customized tool list + budgets. To customize an agent, clone a template + edit.
   for (const t of DEFAULT_PERSONA_LIST) {
     await db()
       .update(agentPersonas)
-      .set({ toolsJson: t.tools }) // tools only — don't clobber a tuned maxSteps/temperature
+      .set({ toolsJson: t.tools, maxSteps: t.maxSteps })
       .where(and(eq(agentPersonas.workspaceId, workspaceId), eq(agentPersonas.key, t.key), eq(agentPersonas.isTemplate, true)));
   }
   if (seeded > 0) {
@@ -308,7 +308,7 @@ export async function updatePersona(workspaceId: string, personaId: string, patc
   if (patch.name !== undefined) set.name = patch.name.trim();
   if (patch.model !== undefined) set.modelJson = { gateway: patch.model.gateway, frontier: patch.model.frontier, preferFrontier: patch.model.preferFrontier ?? false };
   if (patch.tools !== undefined) set.toolsJson = patch.tools.filter((t) => ALL_TOOL_NAMES.includes(t));
-  if (patch.maxSteps !== undefined) set.maxSteps = Math.max(1, Math.min(20, Math.round(patch.maxSteps)));
+  if (patch.maxSteps !== undefined) set.maxSteps = Math.max(1, Math.min(50, Math.round(patch.maxSteps)));
   if (patch.temperature !== undefined) set.temperature = Math.max(0, Math.min(100, Math.round(patch.temperature * 100)));
   if (patch.enabled !== undefined) set.enabled = patch.enabled;
   if (Object.keys(set).length === 0) return;
@@ -438,7 +438,7 @@ export async function importPersona(workspaceId: string, data: PersonaImport, by
       baseTemplate: data.baseTemplate || "executive-assistant",
       modelJson: { gateway: data.model?.gateway ?? "", frontier: data.model?.frontier ?? "", preferFrontier: data.model?.preferFrontier ?? false },
       toolsJson: tools,
-      maxSteps: Math.max(1, Math.min(20, data.maxSteps ?? 8)),
+      maxSteps: Math.max(1, Math.min(50, data.maxSteps ?? 18)),
       temperature: Math.max(0, Math.min(100, Math.round((data.temperature ?? 0.3) * 100))),
       isTemplate: false,
       createdBy: by,
