@@ -138,14 +138,20 @@ export async function listThreadMessages(workspaceId: string, threadId: string):
   }));
 }
 
-/** Recent threads for a user (the agent panel's history list). */
-export async function listAgentThreads(workspaceId: string, sub: string, limit = 30): Promise<AgentThreadRow[]> {
+/** Recent threads for a user (the agent panel's history list), optionally per persona. */
+export async function listAgentThreads(
+  workspaceId: string,
+  sub: string,
+  opts: { personaId?: string; limit?: number } = {},
+): Promise<AgentThreadRow[]> {
+  const conds = [eq(agentThreads.workspaceId, workspaceId), eq(agentThreads.invokedBySub, sub)];
+  if (opts.personaId) conds.push(eq(agentThreads.personaId, opts.personaId));
   const rows = await db()
     .select()
     .from(agentThreads)
-    .where(and(eq(agentThreads.workspaceId, workspaceId), eq(agentThreads.invokedBySub, sub)))
+    .where(and(...conds))
     .orderBy(desc(agentThreads.createdAt))
-    .limit(limit);
+    .limit(opts.limit ?? 30);
   return rows.map((r) => ({
     id: r.id,
     personaId: r.personaId,

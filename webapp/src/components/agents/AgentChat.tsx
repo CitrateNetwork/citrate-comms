@@ -137,9 +137,48 @@ export function AgentChat({
     [workspaceId, persona.id],
   );
 
-  const { messages, sendMessage, status, error } = useChat({ transport });
+  const { messages, sendMessage, status, error, setMessages } = useChat({ transport });
   const busy = status === "submitted" || status === "streaming";
   const [showCaps, setShowCaps] = useState(false);
+
+  // CH-0: conversation history (the caller's own threads for this persona) + resume.
+  const [showHistory, setShowHistory] = useState(false);
+  const [threads, setThreads] = useState<{ id: string; title: string; createdAt: string }[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  async function openHistory() {
+    setShowHistory((v) => !v);
+    if (threads.length > 0) return;
+    setLoadingHistory(true);
+    try {
+      const r = await fetch(`/api/workspaces/${workspaceId}/agents/threads?personaId=${persona.id}`);
+      const j = (await r.json()) as { threads?: { id: string; title: string; createdAt: string }[] };
+      setThreads(j.threads ?? []);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  async function resumeThread(threadId: string) {
+    const r = await fetch(`/api/workspaces/${workspaceId}/agents/threads/${threadId}/messages`);
+    if (!r.ok) return;
+    const j = (await r.json()) as { messages?: { id: string; role: string; content: string }[] };
+    const mapped = (j.messages ?? [])
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ id: m.id, role: m.role as "user" | "assistant", parts: [{ type: "text" as const, text: m.content }] }));
+    convIdRef.current = threadId;
+    setMessages(mapped as unknown as Parameters<typeof setMessages>[0]);
+    setShowHistory(false);
+  }
+
+  function newChat() {
+    convIdRef.current = newConvId();
+    setMessages([]);
+    setThreads([]); // refetch next open so the prior chat shows up
+    setShowHistory(false);
+  }
 
   // Stick the transcript to the bottom while streaming, unless the user scrolled up.
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -175,6 +214,12 @@ export function AgentChat({
           </div>
         </div>
         <div className={styles.headRight}>
+          <button className={styles.capsBtn} onClick={newChat} title="Start a new conversation">
+            <Icon name="plus" size={12} /> New
+          </button>
+          <button className={styles.capsBtn} onClick={openHistory} aria-expanded={showHistory}>
+            <Icon name="clock" size={12} /> History
+          </button>
           <button className={styles.capsBtn} onClick={() => setShowCaps((v) => !v)} aria-expanded={showCaps}>
             <Icon name="shield" size={12} /> What can it do?
           </button>
@@ -211,6 +256,26 @@ export function AgentChat({
             Every action is written to the audit trail. It reads with tools before it answers, and any write or
             sandbox action is queued for your approval — it can’t change records or membership on its own.
           </div>
+        </div>
+      )}
+
+      {showHistory && (
+        <div className={styles.caps}>
+          <div className={styles.capsTitle}>Your conversations with {persona.name}</div>
+          {loadingHistory ? (
+            <div className={styles.capsNote}>Loading…</div>
+          ) : threads.length === 0 ? (
+            <div className={styles.capsNote}>No past conversations yet.</div>
+          ) : (
+            <div className={styles.histList}>
+              {threads.map((t) => (
+                <button key={t.id} className={styles.histItem} onClick={() => resumeThread(t.id)}>
+                  <span className={styles.histTitle}>{t.title}</span>
+                  <span className={styles.histWhen}>{new Date(t.createdAt).toLocaleDateString()}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
