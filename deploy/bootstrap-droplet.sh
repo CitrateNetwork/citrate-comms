@@ -26,6 +26,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 # clang/libclang: rocksdb's bindgen needs them. The rest: build-essential + tooling.
 apt-get install -y build-essential clang libclang-dev pkg-config libssl-dev \
+	libdbus-1-dev \
 	curl git ca-certificates debian-keyring debian-archive-keyring apt-transport-https
 
 if ! command -v caddy >/dev/null 2>&1; then
@@ -77,9 +78,25 @@ systemctl daemon-reload
 systemctl enable --now comms-relay
 systemctl restart comms-relay
 
-log "Installing the Caddyfile for $DOMAIN"
+log "Installing the Caddyfile for $DOMAIN (append-safe; co-located host)"
+# Caddy runs as the `caddy` user; the Caddyfile's `log { output file ... }` directive
+# needs a log dir it can write, or Caddy fails to (re)start with "permission denied".
 mkdir -p /var/log/caddy
-sed "s|comms.example.com|$DOMAIN|g" "$SRC/deploy/Caddyfile" >/etc/caddy/Caddyfile
+chown caddy:caddy /var/log/caddy 2>/dev/null || true
+CADDYFILE=/etc/caddy/Caddyfile
+if [[ -f "$CADDYFILE" ]] && grep -qE "^[[:space:]]*(https://)?$DOMAIN[[:space:]]*\{" "$CADDYFILE"; then
+	echo "  $DOMAIN site block already present in $CADDYFILE — leaving it untouched"
+else
+	# This droplet co-locates other production domains. NEVER overwrite the
+	# Caddyfile; back it up and APPEND the comms block instead.
+	if [[ -f "$CADDYFILE" ]]; then
+		cp -a "$CADDYFILE" "$CADDYFILE.bak-pre-comms-$(date +%Y%m%d-%H%M%S)"
+		printf '\n' >>"$CADDYFILE"
+	fi
+	sed "s|comms.example.com|$DOMAIN|g" "$SRC/deploy/Caddyfile" >>"$CADDYFILE"
+	echo "  appended $DOMAIN block to $CADDYFILE"
+fi
+caddy validate --config "$CADDYFILE" --adapter caddyfile
 systemctl reload caddy || systemctl restart caddy
 
 log "Done. Verify:"
