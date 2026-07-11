@@ -8,6 +8,7 @@ import { db } from "@/lib/db/client";
 import { notifications, channels, members } from "@/lib/db/schema";
 import { directory } from "@/lib/domain/members";
 import { parseMentions, type Mentionable } from "@/lib/mentions";
+import { emitNotify, toNotificationEvent } from "@/lib/realtime/notify-events";
 
 export interface NotificationRow {
   id: string;
@@ -41,7 +42,7 @@ export async function notifyChannelMentions(args: {
     const { members: mentioned } = parseMentions(args.body, candidates);
     const recipients = mentioned.map((m) => m.sub).filter((s) => s !== args.actorSub);
     if (recipients.length === 0) return;
-    await db()
+    const inserted = await db()
       .insert(notifications)
       .values(
         recipients.map((recipientSub) => ({
@@ -52,7 +53,27 @@ export async function notifyChannelMentions(args: {
           channelId: args.channelId,
           messageId: args.messageId,
         })),
+      )
+      .returning({ id: notifications.id, recipientSub: notifications.recipientSub, createdAt: notifications.createdAt });
+    // E-5 WP-1: push metadata (NEVER the body) to any live SSE streams on this
+    // instance. `toNotificationEvent` whitelists keys, so nothing content-bearing
+    // can ride along. Cross-instance streams reconcile via their periodic re-check.
+    const [ch] = await db().select({ name: channels.name }).from(channels).where(eq(channels.id, args.channelId)).limit(1);
+    const actorName = dir[args.actorSub]?.displayName ?? null;
+    for (const row of inserted) {
+      emitNotify(
+        args.workspaceId,
+        row.recipientSub,
+        toNotificationEvent({
+          id: row.id,
+          kind: "mention",
+          actorName,
+          channelId: args.channelId,
+          channelName: ch?.name ?? null,
+          createdAt: row.createdAt.toISOString(),
+        }),
       );
+    }
   } catch {
     /* notifications are best-effort */
   }
