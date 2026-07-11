@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use comms_core::identity::SiweMessage;
-use comms_proto::{canonical, Envelope, GroupId, KeyPackagePublication, RoleAssertion, WalletAddress};
+use comms_proto::{canonical, Envelope, EnvelopeKind, GroupId, KeyPackagePublication, RoleAssertion, WalletAddress};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
@@ -68,6 +68,19 @@ pub enum ServerFrame {
     RatchetTree(Option<Vec<u8>>),
     Ack { seq: Option<u64> },
     Deliver(Envelope),
+    /// **E-5 WP-3 — advisory notification ping.** Pushed to each *connected* recipient
+    /// (never the sender) when a Submit is accepted, so a native client can raise an OS
+    /// notification without waiting to decrypt the envelope. Carries routing-level
+    /// metadata ONLY — group id, envelope kind, and the relay-assigned `group_seq`.
+    /// **No ciphertext, no body, no content — ever** (server-blind invariant; schema
+    /// test `notify_frame_is_metadata_only` below).
+    ///
+    /// Notify is **advisory and never ordering-relevant**: the per-group total order is
+    /// carried exclusively by `group_seq` on delivered [`Envelope`]s (formalized in
+    /// `formal/RelayCommitOrder.tla` — that spec is unchanged by this frame). A client
+    /// MUST NOT sequence, apply, or reject anything based on a Notify; dropping every
+    /// Notify frame loses no correctness, only latency.
+    Notify { group_id: GroupId, kind: EnvelopeKind, group_seq: u64 },
     Error { message: String },
 }
 
@@ -269,11 +282,15 @@ impl RelayServer {
                 // FWA-C11-01: bind the envelope's sender to THIS connection's
                 // authenticated principal — never trust the frame's sender field.
                 let Some(addr) = *authed else { return send_err(out_tx, "not authenticated") };
+                // Routing metadata for the advisory Notify fan-out (E-5 WP-3) — captured
+                // before the envelope moves into the service. Metadata only.
+                let (group_id, kind, recipients) = (env.group_id, env.kind, env.recipients.clone());
                 let r = { self.service.lock().await.submit_as(addr, env, now) };
                 match r {
                     Ok(seq) => {
                         ack(out_tx, Some(seq));
                         self.deliver_pending().await;
+                        self.notify_recipients(group_id, kind, seq, &recipients, addr).await;
                     }
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
@@ -321,6 +338,30 @@ impl RelayServer {
             }
         }
     }
+
+    /// E-5 WP-3: push an advisory [`ServerFrame::Notify`] to each *connected* recipient
+    /// of an accepted Submit, excluding the sender (whose response channel is mid
+    /// request/response and who needs no ping about their own message). Best-effort:
+    /// disconnected recipients simply miss the ping — the envelope itself still waits
+    /// in their mailbox, so nothing is lost but latency. Never ordering-relevant.
+    async fn notify_recipients(
+        &self,
+        group_id: GroupId,
+        kind: EnvelopeKind,
+        group_seq: u64,
+        recipients: &[WalletAddress],
+        sender: WalletAddress,
+    ) {
+        let registry = self.registry.lock().await;
+        for r in recipients {
+            if *r == sender {
+                continue;
+            }
+            if let Some(tx) = registry.get(r) {
+                let _ = tx.send(ServerFrame::Notify { group_id, kind, group_seq });
+            }
+        }
+    }
 }
 
 fn ack(tx: &mpsc::UnboundedSender<ServerFrame>, seq: Option<u64>) {
@@ -332,12 +373,24 @@ fn send_err(tx: &mpsc::UnboundedSender<ServerFrame>, message: &str) {
 
 // ─────────────────────────── client ───────────────────────────
 
+/// A server-pushed advisory notification (the client-side view of
+/// [`ServerFrame::Notify`]). Metadata only; see the variant's docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotifyPush {
+    pub group_id: GroupId,
+    pub kind: EnvelopeKind,
+    pub group_seq: u64,
+}
+
 /// A connector to a [`RelayServer`]. Request methods serialize one round trip; pushed
-/// envelopes arrive via [`RelayClient::next_delivered`].
+/// envelopes arrive via [`RelayClient::next_delivered`] and advisory notification
+/// pings via [`RelayClient::next_notify`] (both are routed off the request/response
+/// channel, so a push can never be mistaken for an Ack).
 pub struct RelayClient {
     out_tx: mpsc::UnboundedSender<ClientFrame>,
     resp_rx: Mutex<mpsc::UnboundedReceiver<ServerFrame>>,
     deliver_rx: Mutex<mpsc::UnboundedReceiver<Envelope>>,
+    notify_rx: Mutex<mpsc::UnboundedReceiver<NotifyPush>>,
 }
 
 impl RelayClient {
@@ -367,6 +420,7 @@ impl RelayClient {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientFrame>();
         let (resp_tx, resp_rx) = mpsc::unbounded_channel::<ServerFrame>();
         let (deliver_tx, deliver_rx) = mpsc::unbounded_channel::<Envelope>();
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel::<NotifyPush>();
 
         tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
@@ -386,6 +440,11 @@ impl RelayClient {
                                 ServerFrame::Deliver(env) => {
                                     let _ = deliver_tx.send(env);
                                 }
+                                // Server pushes ride their own channels — a Notify
+                                // arriving mid-request must never displace an Ack.
+                                ServerFrame::Notify { group_id, kind, group_seq } => {
+                                    let _ = notify_tx.send(NotifyPush { group_id, kind, group_seq });
+                                }
                                 other => {
                                     let _ = resp_tx.send(other);
                                 }
@@ -402,6 +461,7 @@ impl RelayClient {
             out_tx,
             resp_rx: Mutex::new(resp_rx),
             deliver_rx: Mutex::new(deliver_rx),
+            notify_rx: Mutex::new(notify_rx),
         };
         match client.next_response().await {
             Some(ServerFrame::Challenge { nonce }) => Ok((client, nonce)),
@@ -491,6 +551,12 @@ impl RelayClient {
     pub async fn next_delivered(&self) -> Option<Envelope> {
         self.deliver_rx.lock().await.recv().await
     }
+
+    /// Await the next advisory notification ping ([`ServerFrame::Notify`]).
+    /// Advisory only — never use it to order or gate envelope processing.
+    pub async fn next_notify(&self) -> Option<NotifyPush> {
+        self.notify_rx.lock().await.recv().await
+    }
 }
 
 #[cfg(test)]
@@ -544,6 +610,37 @@ mod tests {
             dispatch.contains("pubn.wallet != addr"),
             "TRIPWIRE: PublishKeyPackage must reject a wallet != the authenticated session"
         );
+    }
+
+    /// E-5 WP-3 **schema test (server-blind invariant)** — the advisory Notify frame
+    /// carries routing metadata ONLY. We introspect the actual wire encoding (canonical
+    /// CBOR → Value) and assert the field set is EXACTLY `{group_id, kind, group_seq}`:
+    /// no ciphertext, no body, no content — and no future field can sneak in without
+    /// consciously editing this exact-set assertion.
+    #[test]
+    fn notify_frame_is_metadata_only() {
+        let frame = ServerFrame::Notify {
+            group_id: GroupId([7; 32]),
+            kind: comms_proto::EnvelopeKind::Application,
+            group_seq: 42,
+        };
+        let bytes = canonical::to_vec(&frame).unwrap();
+        let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+
+        // serde externally-tagged enum → { "Notify": { <fields> } }.
+        let outer = value.as_map().expect("enum encodes as a map");
+        assert_eq!(outer.len(), 1);
+        let (tag, inner) = &outer[0];
+        assert_eq!(tag.as_text(), Some("Notify"));
+        let fields: Vec<&str> =
+            inner.as_map().expect("variant fields encode as a map").iter().map(|(k, _)| k.as_text().unwrap()).collect();
+
+        let mut sorted = fields.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec!["group_id", "group_seq", "kind"], "Notify must carry EXACTLY group_id/kind/group_seq");
+        for forbidden in ["ciphertext", "body", "content", "plaintext", "payload", "text", "envelope"] {
+            assert!(!fields.contains(&forbidden), "Notify must never carry `{forbidden}` (server-blind invariant)");
+        }
     }
 }
 
