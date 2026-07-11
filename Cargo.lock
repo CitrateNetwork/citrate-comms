@@ -1160,6 +1160,7 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "blake3",
+ "ciborium",
  "comms-core",
  "comms-proto",
  "futures-util",

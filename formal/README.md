@@ -14,6 +14,14 @@ that bundles the MLS Remove (crypto membership) and the superseding RoleAssertio
 keeps membership and role as separate state and proves they are always in lockstep (`OffboardAtomic`),
 matching the runtime guarantee exercised by the `offboard_atomically_revokes_role_and_future_access` test.
 
+**Deliberately NOT modeled — `ServerFrame::Notify` (E-5, advisory notification ping).** The WS transport
+pushes a metadata-only `Notify { group_id, kind, group_seq }` to connected recipients when a Submit is
+accepted. It is best-effort and **never ordering-relevant**: every total-order obligation modeled by
+`RelayCommitOrder` attaches exclusively to `group_seq` on accepted envelopes, and a client that drops
+every Notify frame observes an identical order. Adding it to the model would add states without adding
+any checkable safety property, so the spec is unchanged — see the variant docs in
+`crates/comms-relay/src/ws.rs` and `PLANSET/02` §3.5 duty 5.
+
 ## Status
 
 Authored in COMMS-S0 and consistent with the runtime implementation. **TLC model-checking is pending**
