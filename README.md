@@ -6,10 +6,18 @@
 > that can never read them, and AI agents that participate as **cryptographic members** of a
 > conversation rather than server-side wiretaps. Runs on-prem and airgapped alongside `nist-agent`.
 
-**Status:** accepted into the federation (2026-06-14). **COMMS-S0 (Foundations) prototype is complete** —
-the cryptographic + transport spine works end to end (22 tests green). This is the first internal tool our
-own team will run; if it works for us it productizes for any team on the network. Next: COMMS-S1
-(WebSocket transport + RocksDB persistence + full channels/forums/DMs).
+**Status:** accepted into the federation (2026-06-14). Two tracks are live. The **native Rust workspace**
+has shipped through the crypto + transport spine and is in UI/UX hardening (COMMS-S5 active; S0–S4 complete).
+The **customer-facing web app** is **deployed to Vercel production** at
+[`citrate-comms-web.vercel.app`](https://citrate-comms-web.vercel.app) and is engineering-mature through ~E-5:
+fail-closed OIDC auth, workspaces + RBAC, comms with the witness Ledger, a full **agentic CRM**, project
+management, agents-as-members (membership), SSE notifications, and a BLAKE3 audit chain. This is the first
+internal tool our own team runs; if it works for us it productizes for any team on the network.
+
+> **Not yet done (do not overstate):** the `https://citrate.ai/entitlement` claim is parsed but does **not**
+> yet gate access (no paid-entitlement enforcement); revenue is not live. Only an **internal self-audit**
+> (FWA-C11, 2026-06-21) has run — there is **no external / third-party audit** yet. The agent **runtime**
+> (privileged tools via `comms-agent-runner`) is not wired; the web app ships agents-as-members membership only.
 
 ## Read first
 The complete design lives in [`PLANSET/`](PLANSET/):
@@ -92,7 +100,8 @@ which engineering translates into Slint. COMMS-S2 has translated the **shell + t
 
 ## Agentile
 This repo follows the [Agentile methodology](../AGENTILE.md). Entry point: [`.agentile/AGENT_ENTRY.md`](.agentile/AGENT_ENTRY.md).
-Active sprint: `COMMS-S0` (Foundations) — see `citrate-federation/repos/citrate-comms/sprints/`.
+Active sprint: `COMMS-S5` (native-client UI/UX hardening) — see `citrate-federation/repos/citrate-comms/sprints/`.
+The web-app track (agentic CRM, deployed) is planned under `webapp/PLANSET/`.
 
 ---
 © 2026 Citrate Inc.. Licensed under Apache-2.0.
