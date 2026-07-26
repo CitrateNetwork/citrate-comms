@@ -19,9 +19,15 @@
 #![forbid(unsafe_code)]
 
 pub mod admin;
-pub mod endpoint;
 pub mod keyvault;
 pub mod ws;
+
+/// The endpoint-security guard MOVED to `comms-wire` — it governs a *client's* dial,
+/// so it belongs on the client side of the split. Re-exported unchanged so every
+/// `comms_relay::endpoint::…` path keeps resolving.
+pub mod endpoint {
+    pub use comms_wire::endpoint::*;
+}
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::Path;

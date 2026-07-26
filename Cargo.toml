@@ -9,7 +9,9 @@ resolver = "2"
 members = [
     "crates/comms-proto",
     "crates/comms-core",
+    "crates/comms-wire",
     "crates/comms-relay",
+    "crates/comms-session",
     "crates/comms-agent-bridge",
     "crates/comms-client",
     "crates/comms-client-proof",

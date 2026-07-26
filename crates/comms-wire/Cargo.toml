@@ -1,0 +1,23 @@
+[package]
+name = "comms-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms relay wire protocol — CBOR frames, the RelayClient connector, and the endpoint-security guard. Client half only: no storage engine, no admin surface, and no MLS, so a client cannot decrypt and a relay cannot be linked by accident."
+
+[dependencies]
+comms-proto = { path = "../comms-proto" }
+# default-features = false → NO `mls` and NO `store`. This crate handles ciphertext
+# and routing metadata only; the dependency graph is what makes that true rather
+# than a convention (PLANSET/02 §1).
+comms-core = { path = "../comms-core", default-features = false }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -26,7 +26,10 @@ pub fn classify_endpoint(url: &str) -> Result<EndpointClass, EndpointError> {
     let scheme = scheme.to_ascii_lowercase();
     // Authority is everything up to the first '/', '?' or '#'.
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = host_of(authority);
     if host.is_empty() {
         return Err(EndpointError::Malformed);
@@ -46,10 +49,15 @@ pub fn classify_endpoint(url: &str) -> Result<EndpointClass, EndpointError> {
 
 /// Enforce the connection policy: TLS and loopback-plaintext always pass; remote
 /// plaintext passes only when `allow_insecure` is set (trusted private network).
-pub fn enforce_endpoint_policy(url: &str, allow_insecure: bool) -> Result<EndpointClass, EndpointError> {
+pub fn enforce_endpoint_policy(
+    url: &str,
+    allow_insecure: bool,
+) -> Result<EndpointClass, EndpointError> {
     let class = classify_endpoint(url)?;
     match class {
-        EndpointClass::RemotePlaintext if !allow_insecure => Err(EndpointError::RemotePlaintextRefused),
+        EndpointClass::RemotePlaintext if !allow_insecure => {
+            Err(EndpointError::RemotePlaintextRefused)
+        }
         _ => Ok(class),
     }
 }
@@ -63,7 +71,11 @@ fn host_of(authority: &str) -> String {
         }
         return String::new();
     }
-    authority.split(':').next().unwrap_or("").to_ascii_lowercase()
+    authority
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// Loopback hosts: `localhost`, `127.0.0.0/8`, IPv6 `::1`.
@@ -96,34 +108,77 @@ mod tests {
 
     #[test]
     fn tls_is_always_allowed() {
-        assert_eq!(classify_endpoint("wss://relay.citrate.ai").unwrap(), EndpointClass::Tls);
-        assert_eq!(classify_endpoint("wss://relay.citrate.ai:443/ws").unwrap(), EndpointClass::Tls);
-        assert_eq!(enforce_endpoint_policy("wss://relay.citrate.ai", false).unwrap(), EndpointClass::Tls);
+        assert_eq!(
+            classify_endpoint("wss://relay.citrate.ai").unwrap(),
+            EndpointClass::Tls
+        );
+        assert_eq!(
+            classify_endpoint("wss://relay.citrate.ai:443/ws").unwrap(),
+            EndpointClass::Tls
+        );
+        assert_eq!(
+            enforce_endpoint_policy("wss://relay.citrate.ai", false).unwrap(),
+            EndpointClass::Tls
+        );
     }
 
     #[test]
     fn loopback_plaintext_is_allowed() {
-        for u in ["ws://127.0.0.1:8787", "ws://localhost:8787", "ws://[::1]:8787", "ws://127.0.0.5"] {
-            assert_eq!(classify_endpoint(u).unwrap(), EndpointClass::LoopbackPlaintext, "{u}");
+        for u in [
+            "ws://127.0.0.1:8787",
+            "ws://localhost:8787",
+            "ws://[::1]:8787",
+            "ws://127.0.0.5",
+        ] {
+            assert_eq!(
+                classify_endpoint(u).unwrap(),
+                EndpointClass::LoopbackPlaintext,
+                "{u}"
+            );
             assert!(enforce_endpoint_policy(u, false).is_ok(), "{u}");
         }
     }
 
     #[test]
     fn remote_plaintext_is_refused_by_default_but_opt_in_works() {
-        for u in ["ws://relay.citrate.ai:8787", "ws://10.0.0.4:8787", "ws://192.168.1.9"] {
-            assert_eq!(classify_endpoint(u).unwrap(), EndpointClass::RemotePlaintext, "{u}");
-            assert_eq!(enforce_endpoint_policy(u, false), Err(EndpointError::RemotePlaintextRefused), "{u}");
+        for u in [
+            "ws://relay.citrate.ai:8787",
+            "ws://10.0.0.4:8787",
+            "ws://192.168.1.9",
+        ] {
+            assert_eq!(
+                classify_endpoint(u).unwrap(),
+                EndpointClass::RemotePlaintext,
+                "{u}"
+            );
+            assert_eq!(
+                enforce_endpoint_policy(u, false),
+                Err(EndpointError::RemotePlaintextRefused),
+                "{u}"
+            );
             // Operator opt-in for a trusted private network.
-            assert_eq!(enforce_endpoint_policy(u, true).unwrap(), EndpointClass::RemotePlaintext, "{u}");
+            assert_eq!(
+                enforce_endpoint_policy(u, true).unwrap(),
+                EndpointClass::RemotePlaintext,
+                "{u}"
+            );
         }
     }
 
     #[test]
     fn malformed_and_unsupported_are_rejected() {
-        assert_eq!(classify_endpoint("relay.citrate.ai:8787"), Err(EndpointError::Malformed));
+        assert_eq!(
+            classify_endpoint("relay.citrate.ai:8787"),
+            Err(EndpointError::Malformed)
+        );
         assert_eq!(classify_endpoint("ws://"), Err(EndpointError::Malformed));
-        assert!(matches!(classify_endpoint("http://relay.citrate.ai"), Err(EndpointError::UnsupportedScheme(_))));
-        assert!(matches!(classify_endpoint("tcp://1.2.3.4"), Err(EndpointError::UnsupportedScheme(_))));
+        assert!(matches!(
+            classify_endpoint("http://relay.citrate.ai"),
+            Err(EndpointError::UnsupportedScheme(_))
+        ));
+        assert!(matches!(
+            classify_endpoint("tcp://1.2.3.4"),
+            Err(EndpointError::UnsupportedScheme(_))
+        ));
     }
 }

@@ -1099,6 +1099,7 @@ dependencies = [
  "comms-core",
  "comms-proto",
  "comms-relay",
+ "comms-session",
  "hex",
  "i-slint-backend-testing",
  "rustls",
@@ -1163,6 +1164,7 @@ dependencies = [
  "ciborium",
  "comms-core",
  "comms-proto",
+ "comms-wire",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -1187,6 +1189,33 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "comms-session"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "comms-core",
+ "comms-proto",
+ "comms-relay",
+ "comms-wire",
+ "rustls",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "comms-wire"
+version = "0.0.1"
+dependencies = [
+ "comms-core",
+ "comms-proto",
+ "futures-util",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
