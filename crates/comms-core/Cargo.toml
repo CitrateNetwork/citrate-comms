@@ -34,7 +34,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 openmls = { workspace = true, optional = true }
 openmls_rust_crypto = { workspace = true, optional = true }
 openmls_traits = { workspace = true, optional = true }
-openmls_basic_credential = { version = "0.3", optional = true }
+openmls_basic_credential = { version = "0.5", optional = true }
 tls_codec = { version = "0.4", optional = true }
 
 # Persistence (feature `store`).
