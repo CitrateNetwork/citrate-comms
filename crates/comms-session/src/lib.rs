@@ -317,15 +317,29 @@ impl NetSession {
 
         let mut members = vec![self.address];
         let mut epoch = group.epoch();
-        for &peer in peers {
-            let kp = self
-                .client
-                .take_key_package(peer)
-                .await
-                .map_err(NetError::Ws)?
-                .ok_or(NetError::NoKeyPackage(peer))?;
+        if !peers.is_empty() {
+            // ONE Commit for every joiner, not one per joiner.
+            //
+            // This loop used to add peers one at a time. Each add is its own epoch
+            // with its own Welcome and its own ratchet tree, but the relay keeps
+            // ONE tree per group — so with two or more peers the second joiner
+            // fetched a tree from a later epoch than its Welcome and failed with
+            // `TreeHashMismatch`. A room could have exactly two members and no
+            // more. Every test in this repo added a single peer, which is the one
+            // case the old shape got right; citrate-quorum's four-member exit gate
+            // is what surfaced it.
+            let mut key_packages = Vec::with_capacity(peers.len());
+            for &peer in peers {
+                let kp = self
+                    .client
+                    .take_key_package(peer)
+                    .await
+                    .map_err(NetError::Ws)?
+                    .ok_or(NetError::NoKeyPackage(peer))?;
+                key_packages.push(kp.key_package);
+            }
             let add = group
-                .add(&self.member, &kp.key_package)
+                .add_many(&self.member, &key_packages)
                 .map_err(|e| NetError::Mls(e.to_string()))?;
             epoch = group.epoch();
             self.client
@@ -340,27 +354,32 @@ impl NetSession {
                 })
                 .await
                 .map_err(NetError::Ws)?;
-            self.client
-                .onboard(
-                    gid,
-                    peer,
-                    // We are the channel registrar (workspace owner / trust anchor),
-                    // so no owner-signed AddMember grant is required (FWA-C11-03).
-                    None,
-                    Envelope {
-                        group_id: gid,
-                        epoch: EpochId(epoch),
-                        kind: EnvelopeKind::Welcome,
-                        sender: self.address,
-                        recipients: vec![peer],
-                        ciphertext: add.welcome,
-                        group_seq: None,
-                    },
-                    add.ratchet_tree,
-                )
-                .await
-                .map_err(NetError::Ws)?;
-            members.push(peer);
+            // One onboard per joiner, all carrying the SAME Welcome and the SAME
+            // tree — which is exactly why they now agree.
+            for &peer in peers {
+                self.client
+                    .onboard(
+                        gid,
+                        peer,
+                        // We are the channel registrar (workspace owner / trust
+                        // anchor), so no owner-signed AddMember grant is required
+                        // (FWA-C11-03).
+                        None,
+                        Envelope {
+                            group_id: gid,
+                            epoch: EpochId(epoch),
+                            kind: EnvelopeKind::Welcome,
+                            sender: self.address,
+                            recipients: vec![peer],
+                            ciphertext: add.welcome.clone(),
+                            group_seq: None,
+                        },
+                        add.ratchet_tree.clone(),
+                    )
+                    .await
+                    .map_err(NetError::Ws)?;
+                members.push(peer);
+            }
         }
         self.channel = Some(Channel {
             gid,
@@ -845,5 +864,102 @@ mod two_phase_tests {
             Err(NetError::NoSigner) => {}
             other => panic!("expected NoSigner, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod multi_member_tests {
+    use super::*;
+    use comms_relay::ws::RelayServer;
+    use comms_relay::DeliveryService;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// A room with FOUR members — the case that was broken until `add_many`.
+    ///
+    /// Adding peers one at a time gave each joiner its own epoch, its own Welcome
+    /// and its own ratchet tree, while the relay keeps one tree per group. Joiner
+    /// two fetched a tree from a later epoch than its Welcome and failed with
+    /// `TreeHashMismatch`, so a channel could have exactly two members and no
+    /// more. Every test here added a single peer — the one case the old shape got
+    /// right — and citrate-quorum's four-member exit gate is what found it.
+    #[tokio::test]
+    async fn a_channel_can_hold_more_than_two_members() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let owner_w = EthWallet::generate();
+        let service = DeliveryService::new(DOMAIN, owner_w.address(), 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        let peers: Vec<EthWallet> = (0..3).map(|_| EthWallet::generate()).collect();
+        let peer_addrs: Vec<WalletAddress> = peers.iter().map(|w| w.address()).collect();
+
+        let mut owner = NetSession::login(&url, DOMAIN, Box::new(owner_w), now_ms(), false)
+            .await
+            .unwrap();
+        let mut joined = Vec::new();
+        for w in peers {
+            let s = NetSession::login(&url, DOMAIN, Box::new(w), now_ms(), false)
+                .await
+                .unwrap();
+            s.publish_keypackage().await.unwrap();
+            joined.push(s);
+        }
+
+        let gid = owner.create_channel(&peer_addrs).await.unwrap();
+        for (i, s) in joined.iter_mut().enumerate() {
+            assert_eq!(
+                s.join_next_channel()
+                    .await
+                    .unwrap_or_else(|e| panic!("member {i} could not join: {e}")),
+                gid,
+                "member {i} joined a different group"
+            );
+        }
+
+        // And all three decrypt the same message — the point of the group.
+        owner.send_text("four in the room").await.unwrap();
+        for (i, s) in joined.iter_mut().enumerate() {
+            loop {
+                match s.recv().await.unwrap() {
+                    Inbound::Message { text, .. } if text == "four in the room" => break,
+                    _ => continue,
+                }
+            }
+            let _ = i;
+        }
+    }
+
+    /// Adding nobody is a caller bug, not a no-op: an empty commit still burns an
+    /// epoch and desynchronises nothing usefully.
+    #[tokio::test]
+    async fn creating_a_channel_with_no_peers_is_a_solo_group_not_an_empty_commit() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let owner_w = EthWallet::generate();
+        let service = DeliveryService::new(DOMAIN, owner_w.address(), 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+        let mut owner = NetSession::login(
+            &format!("ws://{addr}"),
+            DOMAIN,
+            Box::new(owner_w),
+            now_ms(),
+            false,
+        )
+        .await
+        .unwrap();
+        let _ = url;
+        assert!(
+            owner.create_channel(&[]).await.is_ok(),
+            "a room of one is legal"
+        );
+        assert!(owner.in_channel());
     }
 }
