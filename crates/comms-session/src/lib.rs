@@ -113,8 +113,10 @@ struct Channel {
 /// A live, authenticated session to a remote relay.
 pub struct NetSession {
     domain: String,
-    /// Whoever owns the wallet identity. The session never sees a secret key.
-    signer: Box<dyn SiweSigner>,
+    /// Whoever owns the wallet identity, when the caller has one that can sign on
+    /// demand. `None` when signatures come from a human — see [`PendingLogin`].
+    /// Either way the session never sees a secret key.
+    signer: Option<Box<dyn SiweSigner>>,
     /// This member's own MLS credential + group secrets. Generated in-process and
     /// never sent anywhere: MLS signatures do not go through the signer.
     member: MlsMember,
@@ -161,6 +163,32 @@ impl NetSession {
         now: u64,
         allow_insecure: bool,
     ) -> Result<Self, NetError> {
+        let pending = Self::begin(url, domain, signer.address(), now, allow_insecure).await?;
+        let sig = signer
+            .sign_siwe(pending.message())
+            .map_err(NetError::Signer)?;
+        pending.complete(sig, Some(signer)).await
+    }
+
+    /// **Phase 1 of a human-in-the-loop login.** Connect, take the relay's challenge
+    /// nonce, and build the SIWE message — signing nothing.
+    ///
+    /// [`login`](Self::login) is the whole handshake for a caller that owns its key.
+    /// A caller whose signature comes from a *human* cannot use it: the nonce only
+    /// exists after the socket is open, so the message to be signed cannot be known
+    /// in advance, and a synchronous [`SiweSigner`] cannot wait for someone to click
+    /// Approve. This pair splits the handshake either side of that wait — the
+    /// connection stays open, holding the nonce, while a person decides.
+    ///
+    /// `address` is who the caller claims to be; [`PendingLogin::complete`] refuses
+    /// the session if the relay recovers anyone else from the signature.
+    pub async fn begin(
+        url: &str,
+        domain: &str,
+        address: WalletAddress,
+        now: u64,
+        allow_insecure: bool,
+    ) -> Result<PendingLogin, NetError> {
         ensure_tls_provider(); // rustls needs a provider before any wss:// dial
         let (client, nonce) = if allow_insecure {
             RelayClient::connect_insecure(url).await
@@ -169,8 +197,7 @@ impl NetSession {
         }
         .map_err(NetError::Ws)?;
 
-        let address = signer.address();
-        let msg = SiweMessage {
+        let message = SiweMessage {
             domain: domain.into(),
             address,
             statement: "Sign in to citrate-comms".into(),
@@ -181,22 +208,10 @@ impl NetSession {
             issued_at_ms: now,
             expiration_ms: now + 600_000,
         };
-        let sig = signer.sign_siwe(&msg).map_err(NetError::Signer)?;
-        let who = client.authenticate(msg, sig).await.map_err(NetError::Ws)?;
-        // The relay recovered a different address than we believe we are. Either the
-        // signer is wrong about its own identity or something re-signed in the middle;
-        // both are reasons to refuse the session, not to continue under a name we
-        // cannot substantiate.
-        if who != address {
-            return Err(NetError::AuthMismatch);
-        }
-        let member = MlsMember::new(&address.0).map_err(|e| NetError::Mls(e.to_string()))?;
-        Ok(Self {
-            domain: domain.into(),
-            signer,
-            member,
+        Ok(PendingLogin {
             client,
-            channel: None,
+            message,
+            domain: domain.into(),
             address,
         })
     }
@@ -231,11 +246,54 @@ impl NetSession {
             mls_sig_pubkey: sig_pub.clone(),
             binding_attestation: self
                 .signer
+                .as_ref()
+                .ok_or(NetError::NoSigner)?
                 .sign_binding(&sig_pub, &self.domain, &nonce)
                 .map_err(NetError::Signer)?
                 .to_vec(),
             nonce,
             relay_domain: self.domain.clone(),
+        };
+        self.client
+            .publish_key_package(pubn)
+            .await
+            .map_err(NetError::Ws)
+    }
+
+    /// **Phase 1 of a human-signed KeyPackage publication.** Takes the relay's
+    /// single-use nonce and builds everything except the attestation.
+    ///
+    /// The attestation is what stops anyone else publishing a KeyPackage in your
+    /// name, so it is signed by the wallet identity — which, for a human, means a
+    /// second approval. Same reason as [`NetSession::begin`]: the nonce does not
+    /// exist until we ask, and a person cannot be awaited synchronously.
+    pub async fn keypackage_intent(&self) -> Result<KeyPackageIntent, NetError> {
+        let nonce = self.client.challenge().await.map_err(NetError::Ws)?;
+        Ok(KeyPackageIntent {
+            mls_sig_pubkey: self.member.sig_pubkey(),
+            relay_domain: self.domain.clone(),
+            nonce,
+            key_package: self
+                .member
+                .fresh_key_package()
+                .map_err(|e| NetError::Mls(e.to_string()))?,
+        })
+    }
+
+    /// **Phase 2.** Publish the KeyPackage with a wallet signature over the intent's
+    /// `(mls_sig_pubkey, relay_domain, nonce)`.
+    pub async fn publish_signed(
+        &self,
+        intent: KeyPackageIntent,
+        attestation: [u8; 65],
+    ) -> Result<(), NetError> {
+        let pubn = KeyPackagePublication {
+            wallet: self.address,
+            key_package: intent.key_package,
+            mls_sig_pubkey: intent.mls_sig_pubkey,
+            binding_attestation: attestation.to_vec(),
+            nonce: intent.nonce,
+            relay_domain: intent.relay_domain,
         };
         self.client
             .publish_key_package(pubn)
@@ -451,12 +509,83 @@ impl NetSession {
     }
 }
 
+/// A connected-but-unauthenticated session, waiting for a signature over
+/// [`message`](Self::message). Holding one keeps the socket — and therefore the
+/// relay's single-use nonce — alive while a human decides.
+pub struct PendingLogin {
+    client: RelayClient,
+    message: SiweMessage,
+    domain: String,
+    address: WalletAddress,
+}
+
+impl PendingLogin {
+    /// Exactly what must be signed. Show this to the human; do not reconstruct it.
+    pub fn message(&self) -> &SiweMessage {
+        &self.message
+    }
+
+    /// The address the session will claim.
+    pub fn address(&self) -> WalletAddress {
+        self.address
+    }
+
+    /// **Phase 2.** Complete the handshake with a signature over [`message`](Self::message).
+    ///
+    /// `signer` is optional and is used only for *later* signatures (the KeyPackage
+    /// binding attestation via [`NetSession::publish_keypackage`]). A caller whose
+    /// signatures come from a human passes `None` and uses the two-phase
+    /// [`NetSession::keypackage_intent`] / [`NetSession::publish_signed`] pair
+    /// instead — nothing in this crate will then ever hold its key.
+    pub async fn complete(
+        self,
+        signature: [u8; 65],
+        signer: Option<Box<dyn SiweSigner>>,
+    ) -> Result<NetSession, NetError> {
+        let who = self
+            .client
+            .authenticate(self.message, signature)
+            .await
+            .map_err(NetError::Ws)?;
+        // The relay recovered a different address than we believe we are. Either the
+        // signer is wrong about its own identity or something re-signed in the middle;
+        // both are reasons to refuse the session, not to continue under a name we
+        // cannot substantiate.
+        if who != self.address {
+            return Err(NetError::AuthMismatch);
+        }
+        let member = MlsMember::new(&self.address.0).map_err(|e| NetError::Mls(e.to_string()))?;
+        Ok(NetSession {
+            domain: self.domain,
+            signer,
+            member,
+            client: self.client,
+            channel: None,
+            address: self.address,
+        })
+    }
+}
+
+/// What a KeyPackage publication needs signed, when the signature comes from a human.
+///
+/// The relay-issued `nonce` is single-use, so this cannot be rebuilt later: the
+/// intent holds it while the human decides.
+pub struct KeyPackageIntent {
+    /// This member's MLS signature public key — the value being bound to the wallet.
+    pub mls_sig_pubkey: Vec<u8>,
+    pub relay_domain: String,
+    pub nonce: String,
+    key_package: Vec<u8>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
     #[error("relay/transport error: {0}")]
     Ws(#[source] WsError),
     #[error("could not obtain a signature: {0}")]
     Signer(#[source] SignerError),
+    #[error("this session holds no signer — use keypackage_intent/publish_signed")]
+    NoSigner,
     #[error("relay authenticated a different address than we signed with")]
     AuthMismatch,
     #[error("no KeyPackage published for {0:?} — ask them to come online first")]
@@ -612,6 +741,109 @@ mod tests {
                 assert!(text.contains("loud and clear"));
             }
             other => panic!("expected a message, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod two_phase_tests {
+    use super::*;
+    use comms_relay::ws::RelayServer;
+    use comms_relay::DeliveryService;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// The human-in-the-loop path: connect, look at what must be signed, sign it
+    /// somewhere else entirely, then complete. This is the shape citrate-quorum
+    /// needs — between `begin` and `complete` sits a signature ceremony and a
+    /// person, and the session never holds the key.
+    #[tokio::test]
+    async fn a_session_completes_from_a_signature_produced_elsewhere() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let owner = EthWallet::generate();
+        let service = DeliveryService::new(DOMAIN, owner.address(), 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        // The "vault": a key the session is never given.
+        let vault = EthWallet::generate();
+
+        let pending = NetSession::begin(&url, DOMAIN, vault.address(), now_ms(), false)
+            .await
+            .expect("phase 1");
+        // What a human would be shown, verbatim — not reconstructed.
+        assert_eq!(pending.message().address, vault.address());
+        assert_eq!(pending.message().domain, DOMAIN);
+        assert!(
+            !pending.message().nonce.is_empty(),
+            "the relay's challenge is bound in"
+        );
+
+        let signature = vault.sign_siwe(pending.message()); // ← the ceremony, in real life
+        let session = pending.complete(signature, None).await.expect("phase 2");
+        assert_eq!(session.wallet(), vault.address());
+
+        // And the KeyPackage half, same shape.
+        let intent = session.keypackage_intent().await.expect("kp intent");
+        assert_eq!(intent.mls_sig_pubkey, session.mls_sig_pubkey());
+        let attestation =
+            vault.sign_binding(&intent.mls_sig_pubkey, &intent.relay_domain, &intent.nonce);
+        session
+            .publish_signed(intent, attestation)
+            .await
+            .expect("publish");
+    }
+
+    /// A signature by the wrong key must not yield a session under the claimed
+    /// address — the relay recovers the actual signer, and we refuse the mismatch
+    /// rather than continuing under a name we cannot substantiate.
+    #[tokio::test]
+    async fn a_signature_from_another_key_is_refused() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let owner = EthWallet::generate();
+        let service = DeliveryService::new(DOMAIN, owner.address(), 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        let claimed = EthWallet::generate();
+        let impostor = EthWallet::generate();
+        let pending = NetSession::begin(&url, DOMAIN, claimed.address(), now_ms(), false)
+            .await
+            .unwrap();
+        let forged = impostor.sign_siwe(pending.message());
+        // The relay itself rejects the mismatch (the SIWE message names `claimed`
+        // while the signature recovers `impostor`), so this fails at the wire. The
+        // `AuthMismatch` arm is the belt to that braces: it also fails if a relay
+        // were ever to authenticate someone other than who we claimed.
+        assert!(pending.complete(forged, None).await.is_err());
+    }
+
+    /// A session with no signer must not silently skip the attestation.
+    #[tokio::test]
+    async fn publish_keypackage_without_a_signer_fails_loudly() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let owner = EthWallet::generate();
+        let service = DeliveryService::new(DOMAIN, owner.address(), 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        let vault = EthWallet::generate();
+        let pending = NetSession::begin(&url, DOMAIN, vault.address(), now_ms(), false)
+            .await
+            .unwrap();
+        let sig = vault.sign_siwe(pending.message());
+        let session = pending.complete(sig, None).await.unwrap();
+        match session.publish_keypackage().await {
+            Err(NetError::NoSigner) => {}
+            other => panic!("expected NoSigner, got {other:?}"),
         }
     }
 }
