@@ -9,6 +9,10 @@ description = "citrate-comms server-blind relay — WebSocket delivery service, 
 
 [dependencies]
 comms-proto = { path = "../comms-proto" }
+# The client half (RelayClient + the wire frames + the endpoint guard) lives in
+# comms-wire and is re-exported from `ws`/`endpoint`, so a client can link the
+# protocol without linking this server.
+comms-wire = { path = "../comms-wire" }
 # default-features = false → the `mls` module is NOT compiled into the relay (the
 # server-blind invariant, enforced by the dependency graph — PLANSET/02 §1). We DO
 # enable `store` for the RocksDB AES-256-GCM persistence layer.

@@ -66,7 +66,11 @@ impl MlsMember {
             credential: credential.into(),
             signature_key: signer.public().into(),
         };
-        Ok(Self { provider, signer, credential_with_key })
+        Ok(Self {
+            provider,
+            signer,
+            credential_with_key,
+        })
     }
 
     /// The MLS signature public key — bound to the wallet by the attestation.
@@ -79,7 +83,12 @@ impl MlsMember {
     /// TLS-serialized public KeyPackage to publish to the relay directory.
     pub fn fresh_key_package(&self) -> Result<Vec<u8>, MlsError> {
         let bundle = KeyPackage::builder()
-            .build(CIPHERSUITE, &self.provider, &self.signer, self.credential_with_key.clone())
+            .build(
+                CIPHERSUITE,
+                &self.provider,
+                &self.signer,
+                self.credential_with_key.clone(),
+            )
             .map_err(|e| MlsError::Crypto(format!("key package build: {e:?}")))?;
         bundle
             .key_package()
@@ -100,7 +109,11 @@ impl MlsMember {
     }
 
     /// Join a group from a Welcome + ratchet tree (the onboarding path).
-    pub fn join(&self, welcome_bytes: &[u8], ratchet_tree_bytes: &[u8]) -> Result<GroupHandle, MlsError> {
+    pub fn join(
+        &self,
+        welcome_bytes: &[u8],
+        ratchet_tree_bytes: &[u8],
+    ) -> Result<GroupHandle, MlsError> {
         let msg = MlsMessageIn::tls_deserialize_exact(welcome_bytes)
             .map_err(|e| MlsError::Codec(format!("welcome deser: {e:?}")))?;
         let welcome = match msg.extract() {
@@ -140,7 +153,11 @@ impl GroupHandle {
     /// Add a member by their published KeyPackage. Returns the Commit + Welcome +
     /// ratchet tree the relay routes. The caller (an admin) merges the commit so
     /// its own view advances to the new epoch.
-    pub fn add(&mut self, owner: &MlsMember, joiner_key_package: &[u8]) -> Result<AddOutput, MlsError> {
+    pub fn add(
+        &mut self,
+        owner: &MlsMember,
+        joiner_key_package: &[u8],
+    ) -> Result<AddOutput, MlsError> {
         let kp_in = KeyPackageIn::tls_deserialize_exact(joiner_key_package)
             .map_err(|e| MlsError::Codec(format!("kp deser: {e:?}")))?;
         let kp = kp_in
@@ -164,7 +181,69 @@ impl GroupHandle {
             .export_ratchet_tree()
             .tls_serialize_detached()
             .map_err(|e| MlsError::Codec(format!("ratchet tree serialize: {e:?}")))?;
-        Ok(AddOutput { commit, welcome, ratchet_tree })
+        Ok(AddOutput {
+            commit,
+            welcome,
+            ratchet_tree,
+        })
+    }
+
+    /// Add SEVERAL members in ONE Commit. Returns a single Commit + Welcome +
+    /// ratchet tree covering all of them.
+    ///
+    /// This is not an optimisation, it is the correct shape, and calling
+    /// [`add`](Self::add) in a loop is subtly wrong: each add produces its own
+    /// epoch, its own Welcome and its own ratchet tree, while the relay keeps ONE
+    /// tree per group. The second joiner then fetches a tree from a later epoch
+    /// than its Welcome and fails validation with `TreeHashMismatch` — so a room
+    /// with three or more members could never be joined. Found by citrate-quorum's
+    /// QRM-S3 exit gate (two humans + two agents), which is the first thing in the
+    /// federation to put four members in one group; every test before it added
+    /// exactly one peer, which is the one case the loop gets right.
+    ///
+    /// An empty `joiners` list is an error rather than a no-op commit: committing
+    /// nothing still burns an epoch, and a caller asking to add nobody has a bug.
+    pub fn add_many(
+        &mut self,
+        owner: &MlsMember,
+        joiner_key_packages: &[Vec<u8>],
+    ) -> Result<AddOutput, MlsError> {
+        if joiner_key_packages.is_empty() {
+            return Err(MlsError::Group("add_many: no joiners".into()));
+        }
+        let mut kps = Vec::with_capacity(joiner_key_packages.len());
+        for bytes in joiner_key_packages {
+            let kp_in = KeyPackageIn::tls_deserialize_exact(bytes.as_slice())
+                .map_err(|e| MlsError::Codec(format!("kp deser: {e:?}")))?;
+            kps.push(
+                kp_in
+                    .validate(owner.provider.crypto(), ProtocolVersion::Mls10)
+                    .map_err(|e| MlsError::Group(format!("kp validate: {e:?}")))?,
+            );
+        }
+        let (commit, welcome, _group_info) = self
+            .group
+            .add_members(&owner.provider, &owner.signer, &kps)
+            .map_err(|e| MlsError::Group(format!("add_members: {e:?}")))?;
+        self.group
+            .merge_pending_commit(&owner.provider)
+            .map_err(|e| MlsError::Group(format!("merge commit: {e:?}")))?;
+        let commit = commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("commit serialize: {e:?}")))?;
+        let welcome = welcome
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("welcome serialize: {e:?}")))?;
+        let ratchet_tree = self
+            .group
+            .export_ratchet_tree()
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("ratchet tree serialize: {e:?}")))?;
+        Ok(AddOutput {
+            commit,
+            welcome,
+            ratchet_tree,
+        })
     }
 
     /// Find a member's leaf index by their MLS signature public key (the value
@@ -183,7 +262,11 @@ impl GroupHandle {
     pub fn remove(&mut self, admin: &MlsMember, leaf_index: u32) -> Result<RemoveOutput, MlsError> {
         let (commit, _welcome, _group_info) = self
             .group
-            .remove_members(&admin.provider, &admin.signer, &[LeafNodeIndex::new(leaf_index)])
+            .remove_members(
+                &admin.provider,
+                &admin.signer,
+                &[LeafNodeIndex::new(leaf_index)],
+            )
             .map_err(|e| MlsError::Group(format!("remove_members: {e:?}")))?;
         self.group
             .merge_pending_commit(&admin.provider)
@@ -196,11 +279,18 @@ impl GroupHandle {
             .export_ratchet_tree()
             .tls_serialize_detached()
             .map_err(|e| MlsError::Codec(format!("ratchet tree serialize: {e:?}")))?;
-        Ok(RemoveOutput { commit, ratchet_tree })
+        Ok(RemoveOutput {
+            commit,
+            ratchet_tree,
+        })
     }
 
     /// Apply an incoming Commit (a membership/epoch change from another member).
-    pub fn process_commit(&mut self, member: &MlsMember, commit_bytes: &[u8]) -> Result<(), MlsError> {
+    pub fn process_commit(
+        &mut self,
+        member: &MlsMember,
+        commit_bytes: &[u8],
+    ) -> Result<(), MlsError> {
         let processed = self.process(member, commit_bytes)?;
         match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
@@ -209,7 +299,10 @@ impl GroupHandle {
                     .map_err(|e| MlsError::Group(format!("merge staged: {e:?}")))?;
                 Ok(())
             }
-            other => Err(MlsError::Group(format!("expected Commit, got {}", content_kind(&other)))),
+            other => Err(MlsError::Group(format!(
+                "expected Commit, got {}",
+                content_kind(&other)
+            ))),
         }
     }
 
@@ -228,7 +321,10 @@ impl GroupHandle {
         let processed = self.process(member, ciphertext)?;
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(app.into_bytes()),
-            other => Err(MlsError::Group(format!("expected Application, got {}", content_kind(&other)))),
+            other => Err(MlsError::Group(format!(
+                "expected Application, got {}",
+                content_kind(&other)
+            ))),
         }
     }
 
@@ -274,7 +370,10 @@ mod tests {
         // Document what the RustCrypto provider actually offers (informs the
         // ciphersuite reconciliation in PLANSET/00 + 02).
         println!("supported ciphersuites: {supported:?}");
-        assert!(supported.contains(&CIPHERSUITE), "provider must support {CIPHERSUITE:?}");
+        assert!(
+            supported.contains(&CIPHERSUITE),
+            "provider must support {CIPHERSUITE:?}"
+        );
     }
 
     #[test]
@@ -287,7 +386,11 @@ mod tests {
         assert_eq!(alice_group.epoch(), 0);
 
         let add = alice_group.add(&alice, &bob_kp).unwrap();
-        assert_eq!(alice_group.epoch(), 1, "epoch advances by exactly 1 after the add commit");
+        assert_eq!(
+            alice_group.epoch(),
+            1,
+            "epoch advances by exactly 1 after the add commit"
+        );
 
         let mut bob_group = bob.join(&add.welcome, &add.ratchet_tree).unwrap();
         assert_eq!(bob_group.group_id(), alice_group.group_id());
@@ -295,7 +398,10 @@ mod tests {
 
         // Alice → Bob.
         let ciphertext = alice_group.send(&alice, b"hello from alice").unwrap();
-        assert_ne!(&ciphertext, b"hello from alice", "wire bytes are ciphertext, not plaintext");
+        assert_ne!(
+            &ciphertext, b"hello from alice",
+            "wire bytes are ciphertext, not plaintext"
+        );
         let plaintext = bob_group.receive(&bob, &ciphertext).unwrap();
         assert_eq!(plaintext, b"hello from alice");
 

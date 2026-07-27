@@ -17,6 +17,10 @@ comms-core = { path = "../comms-core" }
 # The client drives an in-process server-blind relay + a real MLS group + the domain
 # store (src/backend.rs), so the screens render LIVE decrypted data, not static fixtures.
 comms-relay = { path = "../comms-relay" }
+# The member session (login / KeyPackage / channels / send / receive) lives in
+# comms-session now, so an app without a UI toolkit can hold one. `src/net.rs` is a
+# re-export; the behaviour here is unchanged.
+comms-session = { path = "../comms-session" }
 blake3 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -46,5 +50,9 @@ i-slint-backend-testing = "1.16"
 comms-proto = { path = "../comms-proto" }
 comms-core = { path = "../comms-core" }
 comms-relay = { path = "../comms-relay" }
+# The member session (login / KeyPackage / channels / send / receive) lives in
+# comms-session now, so an app without a UI toolkit can hold one. `src/net.rs` is a
+# re-export; the behaviour here is unchanged.
+comms-session = { path = "../comms-session" }
 blake3 = { workspace = true }
 tokio = { workspace = true }

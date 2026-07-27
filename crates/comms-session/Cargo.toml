@@ -1,0 +1,25 @@
+[package]
+name = "comms-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "citrate-comms member session — SIWE login, KeyPackage publication, channel create/join, and encrypted send/receive over a server-blind relay. UI-free, and it never requires the caller to hand over a private key."
+
+[dependencies]
+comms-proto = { path = "../comms-proto" }
+# `mls` ON: this crate holds group secrets and decrypts. `store` OFF: persistence
+# is the caller's business (a desktop app seals its own state).
+comms-core = { path = "../comms-core", default-features = false, features = ["mls"] }
+comms-wire = { path = "../comms-wire" }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# rustls 0.23 has no built-in default crypto provider; without installing one the
+# first wss:// dial PANICS. See `ensure_tls_provider`.
+rustls = { version = "0.23", features = ["ring"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+comms-relay = { path = "../comms-relay" }

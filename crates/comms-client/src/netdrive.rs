@@ -96,7 +96,7 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
     status(&weak, "connecting…", &endpoint, false);
 
     let wallet = load_wallet(&cfg.wallet_account);
-    let mut session = match NetSession::login(&cfg.url, &cfg.domain, wallet, now_ms(), cfg.allow_insecure).await {
+    let mut session = match NetSession::login(&cfg.url, &cfg.domain, Box::new(wallet), now_ms(), cfg.allow_insecure).await {
         Ok(s) => s,
         Err(e) => {
             system(&weak, &mut log, &format!("Could not connect to {}: {e}", cfg.url));
