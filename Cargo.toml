@@ -45,10 +45,12 @@ sha2 = "0.10"
 sha3 = "0.10"
 blake3 = "1.5"
 getrandom = "0.2"
-# E2E group messaging
-openmls = "0.6"
-openmls_rust_crypto = "0.3"
-openmls_traits = "0.3"
+# E2E group messaging. 0.8 / 0.5 because the 0.6 / 0.3 line pins hpke-rs 0.2.0,
+# which carries four advisories including RUSTSEC-2026-0071 (9.3, nonce reuse in
+# HPKE context) — the primitive MLS uses to seal a group secret to a joiner.
+openmls = "0.8"
+openmls_rust_crypto = "0.5"
+openmls_traits = "0.5"
 # storage
 rocksdb = "0.22"
 # async / transport
