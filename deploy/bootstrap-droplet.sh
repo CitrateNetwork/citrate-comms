@@ -55,7 +55,33 @@ export PATH="$CARGO_HOME/bin:$PATH"
 
 log "Building comms-relay (release, locked)"
 cd "$SRC"
+# `-p comms-relay` is LOad-BEARING, not stylistic. comms-relay depends on comms-core
+# with `default-features = false, features = ["store"]` so the MLS engine is not
+# compiled in — that is how server-blindness is enforced (PLANSET/02 §1).
+#
+# But Cargo unifies features across a build. `cargo build --workspace` resolves
+# comms-core to `mls + store` because comms-client asks for it, and the relay then
+# links THAT artifact. Measured 2026-08-01: a workspace-built relay binary carries 39
+# OpenMLS symbol references; this per-package build carries 0.
+#
+# So the guarantee depends on HOW the relay is built, and nothing used to check.
+# Changing this line to `--workspace` would silently ship the MLS engine inside the
+# server-blind relay.
 cargo build --release --locked -p comms-relay
+
+# Verify the artifact, not the intent. The dependency graph is the mechanism; this is
+# the proof that the mechanism held for the binary about to be installed.
+log "Verifying the relay binary links no MLS engine (server-blind invariant)"
+if nm -a "$SRC/target/release/comms-relay" 2>/dev/null | grep -qi "openmls" \
+	|| strings "$SRC/target/release/comms-relay" 2>/dev/null | grep -qi "openmls"; then
+	echo "FATAL: the relay binary references OpenMLS." >&2
+	echo "  The server-blind invariant is that the relay CANNOT decrypt, enforced by" >&2
+	echo "  not compiling the MLS module into it. Something re-enabled comms-core's" >&2
+	echo "  'mls' feature for this build — most likely a workspace-wide build command." >&2
+	echo "  Refusing to install. Build with: cargo build --release --locked -p comms-relay" >&2
+	exit 1
+fi
+
 install -m 0755 "$SRC/target/release/comms-relay" "$PREFIX/bin/comms-relay"
 
 log "Installing .env (generating a master key on first run)"

@@ -3,7 +3,11 @@
 #
 # Crate boundaries are real; bodies are built sprint-by-sprint per PLANSET/05.
 # The relay links comms-proto + comms-core::{store,audit} ONLY — never MLS secret
-# state — so the server-blind invariant is enforced at the dependency graph (PLANSET/02).
+# state — so the server-blind invariant is enforced at the dependency graph (PLANSET/02),
+# PROVIDED the relay is built package-scoped (`-p comms-relay`). Cargo unifies features
+# across a build, so `--workspace` compiles comms-core with `mls` and the relay links
+# it: measured 2026-08-01, 39 OpenMLS symbols vs 0. Both deploy paths are scoped, and
+# bootstrap-droplet.sh verifies the binary before installing rather than trusting that.
 [workspace]
 resolver = "2"
 members = [
