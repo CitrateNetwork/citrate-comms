@@ -30,6 +30,23 @@
 .headActions {
   display: flex;
   gap: var(--s-2);
+  align-items: center;
+}
+.importLink {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-2);
+  color: var(--fg-1);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+.importLink:hover {
+  border-color: var(--citrate-green-deep);
+  color: var(--citrate-green-deep);
 }
 .tabs {
   display: flex;

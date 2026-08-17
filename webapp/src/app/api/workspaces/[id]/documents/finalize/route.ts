@@ -4,6 +4,8 @@ import { errorResponse, readJson } from "@/lib/http";
 import { documentFinalizeSchema } from "@/lib/validation/schemas";
 import { recordExists } from "@/lib/domain/crm";
 import { ingestDocument } from "@/lib/domain/documents";
+import { ingestTable } from "@/lib/domain/import-store";
+import { isTabularFile, summarizeParsed, parseWorkbook } from "@/lib/domain/import-parse";
 import { isParseable, MAX_PARSE_BYTES } from "@/lib/attachments";
 
 export const runtime = "nodejs";
@@ -48,6 +50,28 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       } catch {
         /* parse is best-effort — store the doc regardless */
       }
+    }
+
+    // Tabular files (xlsx/csv/…) land as STRUCTURED ROWS (row store) so agents can
+    // profile/query/import them — and RAG indexes only a compact schema summary
+    // (no full-cell dump → no silent chunk-cap truncation). Non-tabular docs keep
+    // the plain text→RAG path.
+    const tabular = buffer !== undefined && isTabularFile(name, mime ?? null);
+    let batch: { batchId: string; sheets: { id: string; name: string; rowCount: number; colCount: number }[] } | null = null;
+
+    if (tabular && buffer) {
+      const parsed = await parseWorkbook(buffer, name);
+      const result = await ingestDocument({
+        workspaceId: id,
+        scope: { accountId: accountId ?? null, dealId: dealId ?? null, channelId: channelId ?? null },
+        name,
+        mime: mime ?? null,
+        blobUrl,
+        uploadedBySub: ctx.sub,
+        text: summarizeParsed(parsed), // compact summary → RAG
+      });
+      batch = await ingestTable({ workspaceId: id, documentId: result.id, filename: name, mime: mime ?? null, buffer, bySub: ctx.sub, parsed });
+      return NextResponse.json({ document: { id: result.id, name }, chunks: result.chunks, table: batch }, { status: 201 });
     }
 
     const result = await ingestDocument({

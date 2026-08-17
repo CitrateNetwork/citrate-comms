@@ -22,6 +22,9 @@ const schemaSrc = readFileSync(join(here, "schema.ts"), "utf8");
 const ALLOWED_CLEARTEXT = new Set<string>([
   "email", // members.email — a verified-email identifier (FWA-C6-01), not free-text content
   "emailVerified",
+  // import_batches.error_text / import_jobs.error_text (AGENTS_03) — parser/import
+  // DIAGNOSTIC messages shown to admins (e.g. "unreadable sheet"), not user content.
+  "errorText",
 ]);
 
 /** Column-name SEGMENTS that mark free-text content and MUST be encrypted (end in

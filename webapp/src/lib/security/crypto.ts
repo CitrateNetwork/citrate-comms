@@ -75,6 +75,18 @@ export function verifyWorkspaceSig(workspaceId: string, message: string, signatu
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * Deterministic **blind index** for a value, per workspace + domain. Equal inputs
+ * produce equal tokens (so we can dedupe encrypted PII like emails without storing
+ * plaintext), but the token is a keyed HMAC — not reversible and not guessable
+ * without the master key. Domain-separated so an email index can't collide with a
+ * phone index. Value is normalized (trim + lowercase) by the caller as appropriate.
+ */
+export function blindIndex(workspaceId: string, domain: string, value: string): string {
+  const key = Buffer.from(hkdfSync("sha256", masterKey(), Buffer.from(workspaceId, "utf8"), `comms-blind-${domain}-v1`, 32));
+  return createHmac("sha256", key).update(value).digest("hex");
+}
+
 /** Salted one-way hash for audit attribution (IP/UA). Not reversible. */
 export function hashId(value: string): string {
   const salt = process.env.COMMS_ENC_KEY ?? "citrate-comms";

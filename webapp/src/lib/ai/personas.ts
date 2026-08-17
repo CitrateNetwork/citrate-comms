@@ -32,7 +32,13 @@ export type ToolName =
   | "code.run"
   | "chart.render"
   | "documents.list"
-  | "artifact.attach";
+  | "artifact.attach"
+  | "tables.list"
+  | "tables.schema"
+  | "tables.read"
+  | "tables.query"
+  | "tables.map"
+  | "crm.import";
 
 /** Write/terminal tools that MUST pass the HITL approval gate before mutating. */
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -45,6 +51,7 @@ export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "documents.write",
   "terminal.exec",
   "code.run",
+  "crm.import",
 ]);
 
 /** Privileged tools delegated to the comms-agent-runner (not run inline in the BFF). */
@@ -64,6 +71,7 @@ export const ALL_TOOL_NAMES: ToolName[] = [
   "crm.read", "crm.write", "crm.create", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
   "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
+  "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import",
 ];
 
 export type SkillKey =
