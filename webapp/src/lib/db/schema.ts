@@ -260,11 +260,19 @@ export const contacts = pgTable(
     accountId: uuid("account_id").references(() => accounts.id),
     name: text("name").notNull(),
     emailEnc: text("email_enc"),
+    // Blind index of the normalized email = hmac(ws, "import-dedupe-v1", email).
+    // Deterministic so imports can dedupe against existing contacts without ever
+    // storing plaintext email (emailEnc is non-deterministic AES-GCM). Nullable:
+    // legacy rows fall back to (name, accountId) dedupe until they're re-touched.
+    emailKey: text("email_key"),
     title: text("title"),
     ownerSub: text("owner_sub"),
     lastTouch: timestamp("last_touch", { withTimezone: true }),
   },
-  (t) => [index("contacts_ws_account").on(t.workspaceId, t.accountId)],
+  (t) => [
+    index("contacts_ws_account").on(t.workspaceId, t.accountId),
+    index("contacts_ws_email_key").on(t.workspaceId, t.emailKey),
+  ],
 );
 
 export const deals = pgTable(
@@ -913,4 +921,126 @@ export const notifications = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("notifications_recipient").on(t.workspaceId, t.recipientSub, t.readAt)],
+);
+
+// ── Structured tabular ingest (AGENTS_03) ────────────────────────────────────
+// A dropped xlsx/csv/pdf-table lands here as STRUCTURED ROWS (parallel to the RAG
+// path), so agents can profile/read/query it in bounded windows and bulk-import it
+// into the CRM — instead of seeing only ≤20 fuzzy chunks. Sensitive cells
+// (email/phone/address) are encrypted; non-sensitive cells stay queryable.
+
+/** One uploaded tabular file. `documentId` ties it to the downloadable blob + RAG summary. */
+export const importBatches = pgTable(
+  "import_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    documentId: uuid("document_id").references(() => documents.id),
+    filename: text("filename").notNull(),
+    mime: text("mime"),
+    status: text("status").notNull().default("parsing"), // parsing|ready|failed
+    sheetCount: integer("sheet_count").notNull().default(0),
+    errorText: text("error_text"),
+    createdBySub: text("created_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("import_batches_ws").on(t.workspaceId, t.createdAt)],
+);
+
+/** A sheet/tab within a batch. */
+export const importSheets = pgTable(
+  "import_sheets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    batchId: uuid("batch_id").notNull().references(() => importBatches.id),
+    name: text("name").notNull(),
+    ord: integer("ord").notNull().default(0),
+    headerRow: integer("header_row").notNull().default(0),
+    rowCount: integer("row_count").notNull().default(0),
+    colCount: integer("col_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("import_sheets_ws_batch").on(t.workspaceId, t.batchId)],
+);
+
+/** Per-column profile: name, inferred type, sensitivity, null fraction, sample values. */
+export const importColumns = pgTable(
+  "import_columns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    sheetId: uuid("sheet_id").notNull().references(() => importSheets.id),
+    ord: integer("ord").notNull().default(0),
+    name: text("name").notNull(),
+    type: text("type").notNull().default("text"), // text|number|currency|date|email|phone|url|boolean|select
+    sensitive: boolean("sensitive").notNull().default(false), // email/phone/address → encrypted, not queryable
+    nullFrac: integer("null_frac").notNull().default(0), // 0..100 percent empty
+    sampleJson: jsonb("sample_json"), // [values] — sensitive columns store [] (never sampled)
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("import_columns_ws_sheet").on(t.workspaceId, t.sheetId)],
+);
+
+/** One data row. `cells` holds non-sensitive values (queryable jsonb); `cellsEnc`
+ *  holds the encrypted subset of sensitive columns. `dedupeKey` is a blind index. */
+export const importRows = pgTable(
+  "import_rows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    sheetId: uuid("sheet_id").notNull().references(() => importSheets.id),
+    rowIndex: integer("row_index").notNull(),
+    cells: jsonb("cells").notNull(), // { [columnName]: value } — non-sensitive only
+    cellsEnc: text("cells_enc"), // encrypted JSON of sensitive columns only
+    dedupeKey: text("dedupe_key"), // blind index for cross-row/existing-record dedupe
+    status: text("status").notNull().default("new"), // new|imported|held|skipped
+    linkedAccountId: uuid("linked_account_id"),
+    linkedContactId: uuid("linked_contact_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("import_rows_ws_sheet_idx").on(t.workspaceId, t.sheetId, t.rowIndex),
+    index("import_rows_ws_sheet_status").on(t.workspaceId, t.sheetId, t.status),
+  ],
+);
+
+/** An approved column→CRM mapping for a sheet (one active mapping per sheet). */
+export const importMappings = pgTable(
+  "import_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    sheetId: uuid("sheet_id").notNull().references(() => importSheets.id),
+    spec: jsonb("spec").notNull(), // MappingSpec (see lib/domain/import-map.ts)
+    approved: boolean("approved").notNull().default(false),
+    createdBySub: text("created_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("import_mappings_ws_sheet").on(t.workspaceId, t.sheetId)],
+);
+
+/** A resumable bulk-import job. Runs in bounded slices; `cursor` is the next rowIndex. */
+export const importJobs = pgTable(
+  "import_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    sheetId: uuid("sheet_id").notNull().references(() => importSheets.id),
+    mappingId: uuid("mapping_id").references(() => importMappings.id),
+    filterJson: jsonb("filter_json"), // optional row filter applied to the import
+    status: text("status").notNull().default("queued"), // queued|running|paused|done|failed
+    cursor: integer("cursor").notNull().default(0), // next rowIndex to process
+    total: integer("total").notNull().default(0),
+    createdCount: integer("created_count").notNull().default(0),
+    updatedCount: integer("updated_count").notNull().default(0),
+    heldCount: integer("held_count").notNull().default(0),
+    failedCount: integer("failed_count").notNull().default(0),
+    errorText: text("error_text"),
+    createdBySub: text("created_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("import_jobs_ws_status").on(t.workspaceId, t.status)],
 );

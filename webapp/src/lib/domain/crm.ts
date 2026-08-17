@@ -18,6 +18,7 @@ import {
   crmRecordTags,
 } from "@/lib/db/schema";
 import { appendAudit } from "@/lib/audit/chain";
+import { encryptField, blindIndex } from "@/lib/security/crypto";
 import { DEAL_STAGES, type DealStage } from "./enums";
 import { recordActivity } from "./crm-activity";
 import type { CrmEntity } from "./crm-enums";
@@ -299,13 +300,21 @@ export async function listContactsForAccount(workspaceId: string, accountId: str
     .orderBy(asc(contacts.name));
 }
 
+/** Normalized deterministic blind index of an email, for dedupe (see schema `email_key`). */
+export function contactEmailKey(workspaceId: string, email: string): string {
+  return blindIndex(workspaceId, "email", email.trim().toLowerCase());
+}
+
 export async function createContact(args: {
   workspaceId: string;
   name: string;
   title: string | null;
   accountId: string | null;
   ownerSub: string;
+  /** Optional email — stored encrypted (emailEnc) + as a blind index (emailKey) for dedupe. */
+  email?: string | null;
 }): Promise<ContactRow> {
+  const email = args.email?.trim() || null;
   const [row] = await db()
     .insert(contacts)
     .values({
@@ -314,6 +323,8 @@ export async function createContact(args: {
       title: args.title?.trim() || null,
       accountId: args.accountId,
       ownerSub: args.ownerSub,
+      emailEnc: email ? encryptField(args.workspaceId, email) : null,
+      emailKey: email ? contactEmailKey(args.workspaceId, email) : null,
     })
     .returning({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub });
   await recordActivity({ workspaceId: args.workspaceId, entity: "contact", recordId: row!.id, actorSub: args.ownerSub, input: { kind: "created" } });

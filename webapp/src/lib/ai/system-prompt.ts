@@ -39,10 +39,28 @@ const TOOL_BLURB: Record<ToolName, string> = {
   "terminal.exec": "run an allow-listed shell command in the sandbox (runner) — HITL-approved",
   "code.run": "run code over exported CRM data in the sandbox (runner) — HITL-approved",
   "chart.render": "render a chart artifact (runner)",
+  "tables.list": "list dropped spreadsheets/CSVs as sheets (row/col counts) + import jobs",
+  "tables.schema": "profile a sheet's columns/types/samples WITHOUT reading rows",
+  "tables.read": "read a bounded ≤50-row window of a sheet (sensitive values masked)",
+  "tables.query": "count/distinct/group-by a sheet server-side (reason at scale, no row dump)",
+  "tables.map": "get/draft the column→CRM mapping for a sheet (advisory)",
+  "crm.import": "bulk-import a sheet into the CRM via its mapping (deduped, batched) — HITL-approved",
 };
+
+/** Guidance appended when a persona can handle dropped tables — steers it away from
+ *  reading whole spreadsheets or creating records one-by-one. */
+export const TABLES_PLAYBOOK = [
+  "HANDLING DROPPED SPREADSHEETS / LARGE TABLES:",
+  "- NEVER try to read a whole table into your reply. Start with tables.list, then tables.schema to see columns/types.",
+  "- Use tables.query (count/distinct/group-by) to reason at scale; use tables.read only for small ≤50-row windows.",
+  "- To load rows into the CRM: tables.map (review/adjust the column→field mapping), then crm.import — which dedupes",
+  "  and creates accounts/contacts/deals/tasks in batches behind ONE human approval. Do NOT loop crm.create per row.",
+  "- Emails/phones/addresses are stored encrypted and shown masked; the import handles them server-side.",
+].join("\n");
 
 function capabilitiesLayer(tools: ToolName[]): string {
   const lines = tools.map((t) => `- ${t}: ${TOOL_BLURB[t]}`).join("\n");
+  const hasTables = tools.some((t) => t.startsWith("tables.") || t === "crm.import");
   return [
     "YOUR TOOLS — use them, never guess. Their names + JSON schemas are provided to you.",
     lines,
@@ -52,6 +70,7 @@ function capabilitiesLayer(tools: ToolName[]): string {
     "- Never fabricate a record, id, figure, or citation. If a tool returned nothing, say so.",
     "- Writes and terminal/code actions are HITL-gated: propose the change, it is approved by a human, then applied.",
     "- Prefer one good tool call over many speculative ones; respect your step budget.",
+    ...(hasTables ? ["", TABLES_PLAYBOOK] : []),
   ].join("\n");
 }
 

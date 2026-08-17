@@ -110,7 +110,10 @@ async function extractDocText(name: string, mime: string | null, buf: Buffer): P
 
 const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 150;
-const MAX_CHUNKS = 500;
+// Raised from 500: tabular files no longer take this path (they go to the row store
+// with a compact summary), so the remaining prose/PDF docs shouldn't silently lose
+// their tail. If a doc STILL exceeds this, we log it rather than drop it silently.
+const MAX_CHUNKS = 2000;
 
 function chunkText(text: string): string[] {
   const clean = text.replace(/\s+/g, " ").trim();
@@ -118,6 +121,10 @@ function chunkText(text: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < clean.length && out.length < MAX_CHUNKS; i += CHUNK_SIZE - CHUNK_OVERLAP) {
     out.push(clean.slice(i, i + CHUNK_SIZE));
+  }
+  const wouldBe = Math.ceil(clean.length / (CHUNK_SIZE - CHUNK_OVERLAP));
+  if (wouldBe > MAX_CHUNKS) {
+    console.warn(`[ingestDocument] text truncated for RAG: ${out.length}/${wouldBe} chunks indexed (${clean.length} chars). Large tabular data should use the row store.`);
   }
   return out;
 }
