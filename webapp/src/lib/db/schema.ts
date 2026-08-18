@@ -917,6 +917,7 @@ export const notifications = pgTable(
     actorSub: text("actor_sub"), // who triggered it (member or agent member)
     channelId: uuid("channel_id").references(() => channels.id),
     messageId: uuid("message_id"), // messages.id (no FK — messages may be pruned independently)
+    taskId: uuid("task_id"), // tasks.id for 'task_assigned' (no FK — parity with messageId)
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

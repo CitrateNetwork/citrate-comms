@@ -82,6 +82,8 @@ export const moveTaskSchema = z.object({
 export const editTaskSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   priority: z.enum(["low", "medium", "high"]).nullable().optional(),
+  // A member's sub (assign), empty string / null (unassign).
+  assigneeSub: z.string().max(200).nullable().optional(),
 });
 
 // --- Agents ---
