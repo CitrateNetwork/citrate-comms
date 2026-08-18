@@ -9,8 +9,19 @@ description = "citrate-comms domain library — MLS engine, SIWE→MLS identity 
 
 [features]
 # `mls` gates the OpenMLS-dependent client engine. The relay depends on this crate
-# with `default-features = false, features = ["store"]`, so the relay CANNOT link the
-# MLS module — the server-blind invariant is enforced at the dependency graph (PLANSET/02 §1).
+# with `default-features = false, features = ["store"]`, so a build SCOPED TO THE RELAY
+# does not compile the MLS module in — the server-blind invariant (PLANSET/02 §1).
+#
+# The scoping is load-bearing and was previously stated too absolutely. Cargo unifies
+# features across a build: `cargo build --workspace` resolves this crate to `mls +
+# store`, because comms-client asks for it, and the relay links THAT artifact.
+# Measured 2026-08-01 — workspace-built relay: 39 OpenMLS symbol references;
+# `-p comms-relay`: 0.
+#
+# This does not let the relay read anything (it holds no group secrets and never calls
+# the engine), but "cannot link it" is only true of a package-scoped build. Both deploy
+# paths use `-p comms-relay`, and `deploy/bootstrap-droplet.sh` now verifies the built
+# binary before installing it, rather than trusting the invocation.
 default = ["mls", "store"]
 mls = ["dep:openmls", "dep:openmls_rust_crypto", "dep:openmls_traits", "dep:openmls_basic_credential", "dep:tls_codec"]
 # `store` gates the RocksDB + AES-256-GCM-SIV persistence layer (used by the relay).

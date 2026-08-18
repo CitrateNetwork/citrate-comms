@@ -227,8 +227,17 @@ impl AgentBridge {
         match cmd {
             AgentOutbound::Send { text, .. } => {
                 // Fail-closed: the agent may only act under a verified owner/admin sponsor.
-                if self.sponsor.is_none() {
-                    return Err(BridgeError::Unsponsored);
+                let sponsor = self.sponsor.as_ref().ok_or(BridgeError::Unsponsored)?;
+                // ...and that sponsorship must STILL be live. This used to be
+                // `is_none()` alone, so `not_after` was consulted once at
+                // `accept_sponsor` and never again. A bridge is a long-running process:
+                // an agent sponsored for an hour kept posting for as long as the process
+                // lived, under a grant that had lapsed. An expiry the owner signs has to
+                // bind every action, not just the first.
+                if let Some(exp) = sponsor.not_after {
+                    if now >= exp {
+                        return Err(BridgeError::SponsorExpired);
+                    }
                 }
                 // The guardrail is the same rbac matrix the rest of the system uses.
                 if !can(Role::Agent, Capability::PostMessage) {
@@ -318,6 +327,8 @@ pub enum BridgeError {
     Forbidden(&'static str),
     #[error("agent has no verified sponsor grant — refusing to act (fail-closed)")]
     Unsponsored,
+    #[error("the agent's sponsor grant has expired — refusing to act (fail-closed)")]
+    SponsorExpired,
     #[error("invalid sponsor grant: {0}")]
     BadSponsor(String),
     #[error("keyring/provisioning error: {0}")]
@@ -349,6 +360,90 @@ mod tests {
         };
         let sig = w.sign_siwe(&msg);
         relay.authenticate(&msg, &sig, now).unwrap();
+    }
+
+    /// A sponsorship that has EXPIRED must stop the agent acting.
+    ///
+    /// `RoleAssertion.not_after` is expressed by the owner, signed by the owner, and
+    /// checked by `verify_role_assertion` — once, at `accept_sponsor`. After that the
+    /// bridge stored `Some(assertion)` and every subsequent action asked only
+    /// `self.sponsor.is_none()`, so the expiry the owner set was never consulted again.
+    ///
+    /// A bridge is a long-running process. An agent sponsored for an hour kept posting
+    /// for as long as the process lived — days, in a deployment — under a grant that had
+    /// lapsed. That is the opposite of what an expiry is for, and it is why an owner
+    /// bounding an agent's authority in time could not actually do so.
+    ///
+    /// `handle()` already receives `now`, so nothing had to be plumbed to fix it.
+    #[test]
+    fn an_expired_sponsorship_stops_the_agent() {
+        let now = 1_000u64;
+        let admin_w = EthWallet::generate();
+        let mut relay = DeliveryService::new(DOMAIN, admin_w.address(), 0).unwrap();
+        login(&mut relay, &admin_w, now);
+
+        let admin_m = Member::new(&admin_w.address().0).unwrap();
+        let mut agent = AgentBridge::new("did:citrate:expiring-agent").unwrap();
+        agent.authenticate(&mut relay, DOMAIN, now).unwrap();
+        agent.publish_key_package(&mut relay, DOMAIN, now).unwrap();
+
+        let mut admin_g = admin_m.create_group().unwrap();
+        let gid = GroupId(*blake3::hash(&admin_g.group_id()).as_bytes());
+        relay.register_group(gid, admin_w.address(), now).unwrap();
+        let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
+        let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
+        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
+        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
+        agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
+
+        // Sponsored for one minute.
+        let expires_at = now + 60_000;
+        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(expires_at)).unwrap();
+        agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
+
+        // Inside the window: allowed.
+        assert!(
+            agent
+                .handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "in window".into() }, now + 30_000)
+                .is_ok(),
+            "an unexpired sponsorship must still permit posting"
+        );
+
+        // AT `not_after` exactly: refused. This pins the boundary to the same semantics
+        // `verify_role_assertion` already uses (`now_ms >= exp`). If the re-check used
+        // `>` instead, the bridge and the verifier would disagree about the instant a
+        // grant dies — `accept_sponsor` would reject an assertion that `handle` still
+        // honoured, which is a worse state than either rule alone.
+        assert_eq!(
+            agent.handle(
+                &mut relay,
+                AgentOutbound::Send { group: "deals".into(), text: "exactly at expiry".into() },
+                expires_at,
+            ),
+            Err(BridgeError::SponsorExpired),
+            "expiry must bind at `not_after`, matching verify_role_assertion"
+        );
+
+        // Past `not_after`: refused. The owner set a bound; it has to mean something.
+        assert_eq!(
+            agent.handle(
+                &mut relay,
+                AgentOutbound::Send { group: "deals".into(), text: "after the grant lapsed".into() },
+                expires_at + 1,
+            ),
+            Err(BridgeError::SponsorExpired),
+            "an agent must not act under a lapsed grant"
+        );
+
+        // And it stays refused — this is not a one-shot check.
+        assert_eq!(
+            agent.handle(
+                &mut relay,
+                AgentOutbound::Send { group: "deals".into(), text: "still trying".into() },
+                expires_at + 86_400_000,
+            ),
+            Err(BridgeError::SponsorExpired)
+        );
     }
 
     /// Admin creates a channel; an agent bridge is added as a real MLS member, receives a
