@@ -1,0 +1,17 @@
+# One-off CLI deploy helper: the Vercel project's Root Directory is `webapp`,
+# so only that tree is built. Exclude the Rust workspace + docs so the upload
+# stays under Vercel's 15k-file limit.
+/target
+/crates
+/dist
+/design
+/docs
+/formal
+/PLANSET
+/deploy
+Cargo.lock
+Cargo.toml
+Dockerfile.builder
+rust-toolchain.toml
+deny.toml
+ui-debug.log
