@@ -38,7 +38,8 @@ export type ToolName =
   | "tables.read"
   | "tables.query"
   | "tables.map"
-  | "crm.import";
+  | "crm.import"
+  | "crm.ingest";
 
 /** Write/terminal tools that MUST pass the HITL approval gate before mutating. */
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -71,7 +72,7 @@ export const ALL_TOOL_NAMES: ToolName[] = [
   "crm.read", "crm.write", "crm.create", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
   "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
-  "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import",
+  "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import", "crm.ingest",
 ];
 
 export type SkillKey =

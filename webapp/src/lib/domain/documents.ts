@@ -72,7 +72,7 @@ export async function listDocuments(workspaceId: string, limit = 50): Promise<Do
 
 /** Extract text from a file buffer by type. Text formats inline; PDF via unpdf;
  *  unsupported types (e.g. docx) return null → stored as metadata-only. */
-async function extractDocText(name: string, mime: string | null, buf: Buffer): Promise<string | null> {
+export async function extractDocText(name: string, mime: string | null, buf: Buffer): Promise<string | null> {
   const lower = name.toLowerCase();
   if ((mime && mime.startsWith("text/")) || /\.(txt|md|markdown|csv|tsv|json|log)$/.test(lower)) {
     return buf.toString("utf8");
@@ -106,6 +106,22 @@ async function extractDocText(name: string, mime: string | null, buf: Buffer): P
     }
   }
   return null; // images/video/other — stored as metadata only (no RAG text)
+}
+
+/** Fetch a stored document's blob and extract its text (UDI ingest source).
+ *  Returns null if the doc is missing, unreachable, or an unsupported type. */
+export async function getDocumentText(workspaceId: string, id: string): Promise<{ name: string; text: string } | null> {
+  const doc = await getDocument(workspaceId, id);
+  if (!doc?.blobUrl) return null;
+  try {
+    const res = await fetch(doc.blobUrl);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const text = await extractDocText(doc.name, doc.mime, buf);
+    return text && text.trim() ? { name: doc.name, text } : null;
+  } catch {
+    return null;
+  }
 }
 
 const CHUNK_SIZE = 1200;

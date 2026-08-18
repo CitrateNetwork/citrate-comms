@@ -56,25 +56,45 @@ export async function approveMapping(workspaceId: string, mappingId: string): Pr
 
 type RowVals = Record<string, string>;
 
-async function loadRows(workspaceId: string, sheetId: string, offset: number, limit: number): Promise<RowVals[]> {
+/** A loaded row: its id + extraction confidence (null = trusted structured source)
+ *  alongside the decrypted value map. The id/confidence drive the confidence gate
+ *  and per-row status writes; preview ignores them. */
+interface LoadedRow {
+  id: string;
+  confidence: number | null;
+  vals: RowVals;
+}
+
+async function loadRows(workspaceId: string, sheetId: string, offset: number, limit: number): Promise<LoadedRow[]> {
   const rows = await db()
-    .select({ cells: importRows.cells, cellsEnc: importRows.cellsEnc })
+    .select({ id: importRows.id, confidence: importRows.confidence, cells: importRows.cells, cellsEnc: importRows.cellsEnc })
     .from(importRows)
     .where(and(eq(importRows.workspaceId, workspaceId), eq(importRows.sheetId, sheetId)))
     .orderBy(asc(importRows.rowIndex))
     .offset(offset)
     .limit(limit);
   return rows.map((r) => {
-    const v: RowVals = { ...(r.cells as RowVals) };
+    const vals: RowVals = { ...(r.cells as RowVals) };
     if (r.cellsEnc) {
       try {
-        Object.assign(v, JSON.parse(decryptField(workspaceId, r.cellsEnc)) as RowVals);
+        Object.assign(vals, JSON.parse(decryptField(workspaceId, r.cellsEnc)) as RowVals);
       } catch {
         /* skip */
       }
     }
-    return v;
+    return { id: r.id, confidence: r.confidence, vals };
   });
+}
+
+/** The confidence gate (ADR-UDI-03), pure + exported for test. A row is held when
+ *  the job sets a threshold AND the row carries a confidence below it. Structured
+ *  rows (confidence null) and jobs with no threshold (null) always pass. */
+export function heldByConfidence(minConfidence: number | null, rowConfidence: number | null): boolean {
+  return minConfidence != null && rowConfidence != null && rowConfidence < minConfidence;
+}
+
+async function setRowStatus(rowId: string, status: "imported" | "held" | "skipped"): Promise<void> {
+  await db().update(importRows).set({ status }).where(eq(importRows.id, rowId));
 }
 
 // ── upserter abstraction (shared by preview + execute) ───────────────────────
@@ -304,9 +324,9 @@ export async function previewImport(workspaceId: string, sheetId: string, spec: 
   const counts: PreviewCounts = { rows: 0, created: 0, updated: 0, held: 0, newAccounts: 0, newContacts: 0, newDeals: 0, newTasks: 0 };
   const up = dryUpserter(maps, spec, counts);
   const rows = await loadRows(workspaceId, sheetId, 0, sampleLimit);
-  for (const v of rows) {
+  for (const r of rows) {
     counts.rows++;
-    const outcome = await resolveRow(spec, v, up);
+    const outcome = await resolveRow(spec, r.vals, up);
     counts[outcome]++;
   }
   return counts;
@@ -314,14 +334,23 @@ export async function previewImport(workspaceId: string, sheetId: string, spec: 
 
 // ── job (resumable execution) ────────────────────────────────────────────────
 
-export async function createImportJob(args: { workspaceId: string; sheetId: string; mappingId: string; filter?: unknown; bySub: string }): Promise<string> {
+export async function createImportJob(args: {
+  workspaceId: string;
+  sheetId: string;
+  mappingId: string;
+  filter?: unknown;
+  bySub: string;
+  /** UDI: rows with confidence below this are held for review instead of written.
+   *  Omit/null to write every row (tabular + JSON, which carry no confidence). */
+  minConfidence?: number | null;
+}): Promise<string> {
   const [{ total } = { total: 0 }] = await db()
     .select({ total: sql<number>`count(*)::int` })
     .from(importRows)
     .where(and(eq(importRows.workspaceId, args.workspaceId), eq(importRows.sheetId, args.sheetId)));
   const [row] = await db()
     .insert(importJobs)
-    .values({ workspaceId: args.workspaceId, sheetId: args.sheetId, mappingId: args.mappingId, filterJson: args.filter ?? null, status: "queued", total: Number(total) || 0, createdBySub: args.bySub })
+    .values({ workspaceId: args.workspaceId, sheetId: args.sheetId, mappingId: args.mappingId, filterJson: args.filter ?? null, minConfidence: args.minConfidence ?? null, status: "queued", total: Number(total) || 0, createdBySub: args.bySub })
     .returning({ id: importJobs.id });
   return row!.id;
 }
@@ -356,15 +385,27 @@ export async function runImportSlice(workspaceId: string, jobId: string, maxRows
   const up = realUpserter(workspaceId, job.createdBySub, maps, spec);
 
   const rows = await loadRows(workspaceId, job.sheetId, job.cursor, maxRows);
+  const minConf = job.minConfidence;
   let created = 0, updated = 0, held = 0, failed = 0;
-  for (const v of rows) {
+  for (const r of rows) {
+    // UDI confidence gate: a model-extracted row below the job threshold is NOT
+    // written — it is held for HITL review (status 'held', flushable on approval).
+    if (heldByConfidence(minConf, r.confidence)) {
+      held++;
+      await setRowStatus(r.id, "held");
+      continue;
+    }
     try {
-      const o = await resolveRow(spec, v, up);
+      const o = await resolveRow(spec, r.vals, up);
       if (o === "created") created++;
       else if (o === "updated") updated++;
       else held++;
+      // 'held' from resolveRow = unmappable (no account/contact); park as 'skipped'
+      // so a review flush doesn't keep re-holding rows that can never resolve.
+      await setRowStatus(r.id, o === "held" ? "skipped" : "imported");
     } catch {
       failed++;
+      await setRowStatus(r.id, "skipped");
     }
   }
 
@@ -401,6 +442,61 @@ export async function runImportSlice(workspaceId: string, jobId: string, maxRows
 export async function getJob(workspaceId: string, jobId: string): Promise<JobProgress | null> {
   const [job] = await db().select().from(importJobs).where(and(eq(importJobs.workspaceId, workspaceId), eq(importJobs.id, jobId))).limit(1);
   return job ? brief(job) : null;
+}
+
+/** Count rows a job held for confidence review (status 'held') on its sheet. */
+export async function countHeldRows(workspaceId: string, jobId: string): Promise<number> {
+  const [job] = await db().select({ sheetId: importJobs.sheetId }).from(importJobs).where(and(eq(importJobs.workspaceId, workspaceId), eq(importJobs.id, jobId))).limit(1);
+  if (!job) return 0;
+  const [{ n } = { n: 0 }] = await db()
+    .select({ n: sql<number>`count(*)::int` })
+    .from(importRows)
+    .where(and(eq(importRows.workspaceId, workspaceId), eq(importRows.sheetId, job.sheetId), eq(importRows.status, "held")));
+  return Number(n) || 0;
+}
+
+/** HITL flush: a human approved the held rows — write them regardless of confidence.
+ *  Bounded to one slice; safe to call repeatedly until it returns 0 remaining. */
+export async function flushHeldRows(workspaceId: string, jobId: string, maxRows = IMPORT_SLICE): Promise<{ written: number; remaining: number }> {
+  const [job] = await db().select().from(importJobs).where(and(eq(importJobs.workspaceId, workspaceId), eq(importJobs.id, jobId))).limit(1);
+  if (!job) throw new Error("job not found");
+  const spec = job.mappingId ? ((await db().select().from(importMappings).where(eq(importMappings.id, job.mappingId)).limit(1))[0]?.spec as MappingSpec | undefined) : undefined;
+  if (!spec) throw new Error("mapping missing");
+
+  const held = await db()
+    .select({ id: importRows.id, confidence: importRows.confidence, cells: importRows.cells, cellsEnc: importRows.cellsEnc })
+    .from(importRows)
+    .where(and(eq(importRows.workspaceId, workspaceId), eq(importRows.sheetId, job.sheetId), eq(importRows.status, "held")))
+    .orderBy(asc(importRows.rowIndex))
+    .limit(maxRows);
+
+  const maps = await loadExisting(workspaceId);
+  const up = realUpserter(workspaceId, job.createdBySub, maps, spec);
+  let written = 0, created = 0, updated = 0;
+  for (const r of held) {
+    const vals: RowVals = { ...(r.cells as RowVals) };
+    if (r.cellsEnc) {
+      try { Object.assign(vals, JSON.parse(decryptField(workspaceId, r.cellsEnc)) as RowVals); } catch { /* skip */ }
+    }
+    try {
+      const o = await resolveRow(spec, vals, up);
+      await setRowStatus(r.id, o === "held" ? "skipped" : "imported");
+      if (o === "created") created++;
+      else if (o === "updated") updated++;
+      if (o !== "held") written++;
+    } catch {
+      await setRowStatus(r.id, "skipped");
+    }
+  }
+
+  await db()
+    .update(importJobs)
+    .set({ createdCount: job.createdCount + created, updatedCount: job.updatedCount + updated, heldCount: Math.max(0, job.heldCount - written), updatedAt: new Date() })
+    .where(eq(importJobs.id, jobId));
+
+  const remaining = await countHeldRows(workspaceId, jobId);
+  await appendAudit({ workspaceId, actorSub: job.createdBySub, event: "ingest_review_flush", target: `${jobId}:${written}` });
+  return { written, remaining };
 }
 
 /** Queued/running jobs across all workspaces — for the unattended cron tick. */

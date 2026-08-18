@@ -45,6 +45,7 @@ const TOOL_BLURB: Record<ToolName, string> = {
   "tables.query": "count/distinct/group-by a sheet server-side (reason at scale, no row dump)",
   "tables.map": "get/draft the column→CRM mapping for a sheet (advisory)",
   "crm.import": "bulk-import a sheet into the CRM via its mapping (deduped, batched) — HITL-approved",
+  "crm.ingest": "ingest a document/PDF/text block → extract CRM entities with confidence; high-confidence auto-writes, low-confidence held for review",
 };
 
 /** Guidance appended when a persona can handle dropped tables — steers it away from
@@ -56,11 +57,13 @@ export const TABLES_PLAYBOOK = [
   "- To load rows into the CRM: tables.map (review/adjust the column→field mapping), then crm.import — which dedupes",
   "  and creates accounts/contacts/deals/tasks in batches behind ONE human approval. Do NOT loop crm.create per row.",
   "- Emails/phones/addresses are stored encrypted and shown masked; the import handles them server-side.",
+  "- For PROSE, PDFs, or pasted notes (not clean tables): use crm.ingest — it extracts entities with a confidence",
+  "  score, auto-writes what it is sure about, and queues the rest for a human. Don't hand-transcribe a PDF into crm.create.",
 ].join("\n");
 
 function capabilitiesLayer(tools: ToolName[]): string {
   const lines = tools.map((t) => `- ${t}: ${TOOL_BLURB[t]}`).join("\n");
-  const hasTables = tools.some((t) => t.startsWith("tables.") || t === "crm.import");
+  const hasTables = tools.some((t) => t.startsWith("tables.") || t === "crm.import" || t === "crm.ingest");
   return [
     "YOUR TOOLS — use them, never guess. Their names + JSON schemas are provided to you.",
     lines,

@@ -21,6 +21,7 @@ import { listMessages } from "@/lib/domain/messages";
 import { listTasks, listProjects } from "@/lib/domain/pm";
 import { listTables, getSheetSchema, readRows, queryTable } from "@/lib/domain/tables-repo";
 import { getMapping, saveMapping, previewImport } from "@/lib/domain/import-engine";
+import { ingestText, ingestDocument } from "@/lib/domain/ingest";
 import { suggestMapping, type MappingSpec } from "@/lib/domain/import-map";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
 import { searchWeb } from "@/lib/research/search";
@@ -499,6 +500,26 @@ export function citrateCommsTools(ctx: ToolContext) {
         };
       },
     }),
+    "crm.ingest": tool({
+      description:
+        "INGEST unstructured or semi-structured data into the CRM: pass a stored `documentId` (PDF, text, docx, " +
+        "spreadsheet) OR a free-form `text` block (meeting notes, an email, a JSON snippet). Extracts CRM entities " +
+        "(account, key contact + title/email/phone, deal + value, next-step task) with a confidence score. " +
+        "HIGH-confidence records write to the CRM automatically; LOW-confidence records are held and queued for your " +
+        "human review. Use this for prose/PDFs; use crm.import for clean spreadsheets. Returns what was written vs held.",
+      inputSchema: z.object({
+        documentId: z.string().uuid().optional().describe("a stored document to ingest"),
+        text: z.string().min(1).max(50_000).optional().describe("a raw text block to ingest (if no documentId)"),
+        hint: z.string().max(300).optional().describe("optional context, e.g. 'this is a sales call summary'"),
+      }),
+      execute: audited("crm.ingest", Capability.CreateRecord, async (a: { documentId?: string; text?: string; hint?: string }) => {
+        if (!a.documentId && !a.text) return { status: "error", message: "Provide a documentId or a text block to ingest." };
+        const summary = a.documentId
+          ? await ingestDocument({ workspaceId: ctx.workspaceId, documentId: a.documentId, bySub: ctx.invokedBySub, hint: a.hint })
+          : await ingestText({ workspaceId: ctx.workspaceId, text: a.text!, bySub: ctx.invokedBySub, hint: a.hint });
+        return { status: summary.held > 0 ? "partial_pending_review" : "done", ...summary };
+      }),
+    }),
     "thread.summarize": tool({
       description:
         "Read a channel's recent messages so you can summarize them and extract action items. Returns the " +
@@ -699,4 +720,5 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "tables.query",
   "tables.map",
   "crm.import",
+  "crm.ingest",
 ];

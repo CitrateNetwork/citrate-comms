@@ -27,6 +27,7 @@ import {
   text,
   boolean,
   integer,
+  real,
   bigint,
   bigserial,
   timestamp,
@@ -996,6 +997,9 @@ export const importRows = pgTable(
     cellsEnc: text("cells_enc"), // encrypted JSON of sensitive columns only
     dedupeKey: text("dedupe_key"), // blind index for cross-row/existing-record dedupe
     status: text("status").notNull().default("new"), // new|imported|held|skipped
+    // UDI (PLANSET 10): extraction confidence ∈ [0,1]. NULL = a structured source
+    // (tabular/JSON) that is trusted 1.0; set only for model-extracted rows.
+    confidence: real("confidence"),
     linkedAccountId: uuid("linked_account_id"),
     linkedContactId: uuid("linked_contact_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1031,6 +1035,9 @@ export const importJobs = pgTable(
     sheetId: uuid("sheet_id").notNull().references(() => importSheets.id),
     mappingId: uuid("mapping_id").references(() => importMappings.id),
     filterJson: jsonb("filter_json"), // optional row filter applied to the import
+    // UDI (PLANSET 10): rows with confidence below this auto-write threshold are
+    // held for HITL review instead of being written. NULL = write everything.
+    minConfidence: real("min_confidence"),
     status: text("status").notNull().default("queued"), // queued|running|paused|done|failed
     cursor: integer("cursor").notNull().default(0), // next rowIndex to process
     total: integer("total").notNull().default(0),
