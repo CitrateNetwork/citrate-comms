@@ -23,7 +23,7 @@ import { terminalExec, codeRun } from "@/lib/ai/runner";
 import { ingestDocument } from "./documents";
 import { witness, type WitnessKind } from "@/lib/witness/ledger";
 import { createTask } from "./pm";
-import { approveMapping, createImportJob, runImportSlice, type PreviewCounts } from "./import-engine";
+import { approveMapping, createImportJob, runImportSlice, flushHeldRows, type PreviewCounts } from "./import-engine";
 import type { CrmEntity, CrmNoteType } from "./crm-enums";
 
 /** The executable spec stored (encrypted) on an approval and applied on approve. */
@@ -38,7 +38,8 @@ export type AgentAction =
   | { kind: "documents.write"; name: string; content: string; accountId?: string; dealId?: string; channelId?: string }
   | { kind: "ledger.write"; channelId: string; ledgerKind: WitnessKind; text: string; owner?: string; due?: string }
   | { kind: "pm.write"; title: string; projectId?: string; priority?: "low" | "medium" | "high" }
-  | { kind: "crm.import"; sheetId: string; mappingId: string; sheetName: string; preview: PreviewCounts };
+  | { kind: "crm.import"; sheetId: string; mappingId: string; sheetName: string; preview: PreviewCounts }
+  | { kind: "crm.ingest_review"; jobId: string; sheetName: string; held: number };
 
 export type Risk = "low" | "medium" | "high";
 
@@ -54,6 +55,7 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "ledger.write": "medium",
   "pm.write": "low",
   "crm.import": "high",
+  "crm.ingest_review": "high",
 };
 
 export interface EnqueueArgs {
@@ -135,6 +137,8 @@ function describe(action: AgentAction): string {
       return `Create task: ${truncate(action.title)}`;
     case "crm.import":
       return `Import “${action.sheetName}” → CRM: ${action.preview.created} new · ${action.preview.updated} updated · ${action.preview.held} held (${action.preview.rows} rows)`;
+    case "crm.ingest_review":
+      return `Review ${action.held} low-confidence record(s) extracted from “${action.sheetName}” — approve to write them to the CRM`;
   }
 }
 function truncate(s: string, n = 140): string {
@@ -330,6 +334,11 @@ async function executeAction(
       const jobId = await createImportJob({ workspaceId, sheetId: action.sheetId, mappingId: action.mappingId, bySub: by.bySub });
       const progress = await runImportSlice(workspaceId, jobId);
       return { jobId, progress };
+    }
+    case "crm.ingest_review": {
+      // A human approved the held low-confidence records — flush them to the CRM.
+      const flush = await flushHeldRows(workspaceId, action.jobId);
+      return { jobId: action.jobId, ...flush };
     }
   }
 }
