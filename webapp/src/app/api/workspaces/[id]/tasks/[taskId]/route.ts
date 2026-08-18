@@ -14,7 +14,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const ctx = await requireCapability(req, id, Capability.CreateRecord);
     const parsed = editTaskSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
-    await updateTask(id, taskId, parsed.data);
+    await updateTask(id, taskId, parsed.data, ctx.sub);
     await appendAudit({ workspaceId: id, actorSub: ctx.sub, event: "task_edited", target: taskId });
     return NextResponse.json({ ok: true });
   } catch (e) {

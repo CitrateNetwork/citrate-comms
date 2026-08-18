@@ -6,6 +6,7 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { projects, tasks, boards, boardColumns } from "@/lib/db/schema";
+import { notifyTaskAssigned } from "./notifications";
 import { TASK_STATUSES, type TaskStatus } from "./enums";
 
 export { TASK_STATUSES };
@@ -68,6 +69,8 @@ export async function createTask(args: {
   title: string;
   assigneeSub?: string | null;
   priority?: string | null;
+  /** Who created it — used to ping the assignee (skips self-assignment). */
+  actorSub?: string;
 }): Promise<TaskRow> {
   const [row] = await db()
     .insert(tasks)
@@ -80,6 +83,9 @@ export async function createTask(args: {
       priority: args.priority ?? null,
     })
     .returning();
+  if (args.assigneeSub && args.actorSub) {
+    await notifyTaskAssigned({ workspaceId: args.workspaceId, taskId: row!.id, assigneeSub: args.assigneeSub, actorSub: args.actorSub });
+  }
   return {
     id: row!.id,
     projectId: row!.projectId,
@@ -101,17 +107,34 @@ export async function moveTask(workspaceId: string, taskId: string, status: Task
     .where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
 }
 
-/** Edit a task's content (Member+). */
+/** Edit a task's content (Member+). When `assigneeSub` changes to a new member,
+ *  pings them in their inbox (skipping self-assignment). `actorSub` = who edited. */
 export async function updateTask(
   workspaceId: string,
   taskId: string,
-  patch: { title?: string; priority?: string | null },
+  patch: { title?: string; priority?: string | null; assigneeSub?: string | null },
+  actorSub?: string,
 ): Promise<void> {
   const set: Record<string, unknown> = {};
   if (patch.title !== undefined) set.title = patch.title.trim();
   if (patch.priority !== undefined) set.priority = patch.priority || null;
+
+  let newAssignee: string | null = null;
+  if (patch.assigneeSub !== undefined) {
+    const next = patch.assigneeSub || null;
+    set.assigneeSub = next;
+    if (next) {
+      const [cur] = await db().select({ a: tasks.assigneeSub }).from(tasks).where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId))).limit(1);
+      if ((cur?.a ?? null) !== next) newAssignee = next;
+    }
+  }
+
   if (Object.keys(set).length === 0) return;
   await db().update(tasks).set(set).where(and(eq(tasks.workspaceId, workspaceId), eq(tasks.id, taskId)));
+
+  if (newAssignee && actorSub) {
+    await notifyTaskAssigned({ workspaceId, taskId, assigneeSub: newAssignee, actorSub });
+  }
 }
 
 /** Delete a task (Owner/Admin). */

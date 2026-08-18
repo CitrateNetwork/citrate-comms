@@ -76,8 +76,11 @@ const ALLOWED_CLEARTEXT: Record<string, string> = {
   // trade-off has been agreed. Each is personal data or free text in a product that
   // encrypts message bodies beside it. See docs/QA_2026-08-01_COMMS.md.
   "members.display_name": "OWNER DECISION PENDING — a person's name, held in cleartext",
+  // OWNER DECISION 2026-08-18: ENCRYPT these two. Scheduled as a follow-up sprint
+  // (adds *_enc columns + blind indexes, and reworks server-side search/sort) — kept
+  // as a recorded decision here so #44 merges green and the intent is on record.
   "contacts.name":
-    "OWNER DECISION PENDING — a contact's name is the CRM's most identifying field, and its email IS encrypted beside it",
+    "OWNER DECISION 2026-08-18: ENCRYPT (scheduled follow-up) — CRM's most identifying field; email beside it is already encrypted",
   "contacts.title": "OWNER DECISION PENDING — job title; personal data under GDPR Art.4",
   "channels.topic": "OWNER DECISION PENDING — free text, unlike channels.name",
   "threads.title": "OWNER DECISION PENDING — free text, often the substance of the thread",
@@ -86,7 +89,14 @@ const ALLOWED_CLEARTEXT: Record<string, string> = {
   "agent_threads.title": "OWNER DECISION PENDING — free text summarising an agent conversation",
   "agent_resources.title": "OWNER DECISION PENDING — free text naming an attached resource",
   "documents.name":
-    "OWNER DECISION PENDING — a filename frequently reveals its contents ('Q3-layoffs.xlsx')",
+    "OWNER DECISION 2026-08-18: ENCRYPT (scheduled follow-up) — a filename frequently reveals its contents ('Q3-layoffs.xlsx')",
+
+  // ── Columns added after the 2026-08-01 sweep (Feature C + UDI ingest) ─────────
+  "import_batches.error_text": "parser/import DIAGNOSTIC shown to admins (e.g. 'unreadable sheet'), not user content",
+  "import_jobs.error_text": "import-job DIAGNOSTIC shown to admins, not user content",
+  "import_sheets.name": "a sheet/tab name (structural header, e.g. 'Sheet1'/'extracted'); listed server-side",
+  "import_columns.name": "a spreadsheet COLUMN HEADER (schema profile), not a stored value",
+  "contacts.email_key": "a keyed BLIND INDEX (HMAC) over the email for dedupe — non-reversible, not the address",
 };
 
 /**

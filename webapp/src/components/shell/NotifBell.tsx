@@ -13,17 +13,8 @@ import { useRouter } from "next/navigation";
 import { Icon } from "@/components/primitives";
 import { NotifFeed } from "@/lib/realtime/notif-feed";
 import type { NotifyEvent } from "@/lib/realtime/notify-events";
+import { groupNotifs, type NotifItem as Notif } from "@/lib/notif-group";
 import styles from "./NotifBell.module.css";
-
-interface Notif {
-  id: string;
-  kind: string;
-  actorName: string | null;
-  channelId: string | null;
-  channelName: string | null;
-  read: boolean;
-  createdAt: string;
-}
 
 const POLL_MS = 20000;
 
@@ -33,6 +24,7 @@ export function NotifBell({ workspaceId, workspaceSlug }: { workspaceId: string;
   const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
   const [items, setItems] = useState<Notif[]>([]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const ref = useRef<HTMLDivElement>(null);
   // One feed per mount: dedups notification ids across SSE ⇄ poll switches.
   const feedRef = useRef<NotifFeed | null>(null);
@@ -129,7 +121,21 @@ export function NotifBell({ workspaceId, workspaceSlug }: { workspaceId: string;
 
   function go(n: Notif) {
     setOpen(false);
-    if (n.channelId) router.push(`/w/${workspaceSlug}/comms/${n.channelId}`);
+    if (n.kind === "task_assigned") {
+      router.push(`/w/${workspaceSlug}/pm${n.taskId ? `?task=${n.taskId}` : ""}`);
+    } else if (n.channelId) {
+      router.push(`/w/${workspaceSlug}/comms/${n.channelId}`);
+    }
+  }
+
+  const groups = groupNotifs(items);
+  function toggleGroup(key: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }
 
   return (
@@ -145,16 +151,33 @@ export function NotifBell({ workspaceId, workspaceSlug }: { workspaceId: string;
             <div className={styles.empty}>No notifications yet.</div>
           ) : (
             <div className={styles.list}>
-              {items.map((n) => (
-                <button key={n.id} className={`${styles.item} ${n.read ? "" : styles.unreadItem}`} onClick={() => go(n)}>
-                  <Icon name="at" size={13} />
-                  <span className={styles.text}>
-                    <strong>{n.actorName ?? "Someone"}</strong> mentioned you
-                    {n.channelName ? <> in #{n.channelName}</> : null}
-                  </span>
-                  <span className={styles.when}>{new Date(n.createdAt).toLocaleDateString()}</span>
-                </button>
-              ))}
+              {groups.map((g) => {
+                const isCollapsed = collapsed.has(g.key);
+                return (
+                  <div key={g.key} className={styles.group}>
+                    <button className={styles.groupHead} onClick={() => toggleGroup(g.key)} aria-expanded={!isCollapsed}>
+                      <span className={styles.caret} aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
+                      <Icon name={g.icon} size={13} />
+                      <span className={styles.groupName}>{g.name}</span>
+                      {g.unread > 0 && <span className={styles.groupCount}>{g.unread}</span>}
+                    </button>
+                    {!isCollapsed &&
+                      g.items.map((n) => (
+                        <button key={n.id} className={`${styles.item} ${n.read ? "" : styles.unreadItem}`} onClick={() => go(n)}>
+                          <Icon name={n.kind === "task_assigned" ? "projects" : "at"} size={13} />
+                          <span className={styles.text}>
+                            {n.kind === "task_assigned" ? (
+                              <><strong>{n.actorName ?? "Someone"}</strong> assigned you a task</>
+                            ) : (
+                              <><strong>{n.actorName ?? "Someone"}</strong> mentioned you</>
+                            )}
+                          </span>
+                          <span className={styles.when}>{new Date(n.createdAt).toLocaleDateString()}</span>
+                        </button>
+                      ))}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

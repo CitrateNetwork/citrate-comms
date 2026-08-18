@@ -108,6 +108,9 @@ export function CrmScreen({
         </div>
         {canEdit && (
           <div className={s.headActions}>
+            <Link href={`/w/${workspaceSlug}/crm/imports`} className={s.importLink}>
+              Import data
+            </Link>
             <Btn variant="ghost" icon="plus" onClick={() => setNewAccount(true)}>
               New account
             </Btn>

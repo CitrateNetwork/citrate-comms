@@ -27,12 +27,16 @@ export default async function PmPage({ params }: { params: Promise<{ slug: strin
       canEdit={can(ctx.role, Capability.CreateRecord)}
       canDelete={can(ctx.role, Capability.DeleteRecord)}
       projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+      members={Object.entries(dir)
+        .filter(([, e]) => !e.isAgent)
+        .map(([sub, e]) => ({ sub, name: e.displayName }))}
       tasks={tasks.map((t) => ({
         id: t.id,
         column: t.status,
         projectId: t.projectId,
         title: t.title,
         priority: t.priority,
+        assigneeSub: t.assigneeSub,
         assigneeName: t.assigneeSub ? dir[t.assigneeSub]?.displayName ?? null : null,
       }))}
     />

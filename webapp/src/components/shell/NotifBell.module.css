@@ -91,3 +91,53 @@
   font-size: var(--t-xs);
   color: var(--fg-3);
 }
+.group {
+  border-bottom: 1px solid var(--border-2);
+}
+.group:last-child {
+  border-bottom: none;
+}
+.groupHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  border: none;
+  background: var(--paper-2);
+  cursor: pointer;
+  text-align: left;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-2);
+}
+.groupHead:hover {
+  background: var(--stone-100);
+}
+.caret {
+  width: 12px;
+  color: var(--fg-3);
+}
+.groupName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.groupCount {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--citrate-green-deep);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.item {
+  padding-left: var(--s-5);
+}

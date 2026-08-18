@@ -18,6 +18,7 @@ export interface NotificationRow {
   channelId: string | null;
   channelName: string | null;
   messageId: string | null;
+  taskId: string | null;
   read: boolean;
   createdAt: string;
 }
@@ -87,6 +88,7 @@ export async function listNotifications(workspaceId: string, sub: string, limit 
       actorSub: notifications.actorSub,
       channelId: notifications.channelId,
       messageId: notifications.messageId,
+      taskId: notifications.taskId,
       readAt: notifications.readAt,
       createdAt: notifications.createdAt,
       channelName: channels.name,
@@ -106,9 +108,52 @@ export async function listNotifications(workspaceId: string, sub: string, limit 
     channelId: r.channelId,
     channelName: r.channelName ?? null,
     messageId: r.messageId,
+    taskId: r.taskId,
     read: r.readAt != null,
     createdAt: r.createdAt.toISOString(),
   }));
+}
+
+/**
+ * Notify a member that a task was assigned to them. No content stored (parity with
+ * mentions) — the recipient follows the link to the board. Skips self-assignment.
+ * Best-effort: never breaks the task write.
+ */
+export async function notifyTaskAssigned(args: {
+  workspaceId: string;
+  taskId: string;
+  assigneeSub: string;
+  actorSub: string;
+}): Promise<void> {
+  try {
+    if (!args.assigneeSub || args.assigneeSub === args.actorSub) return;
+    const [row] = await db()
+      .insert(notifications)
+      .values({
+        workspaceId: args.workspaceId,
+        recipientSub: args.assigneeSub,
+        kind: "task_assigned",
+        actorSub: args.actorSub,
+        taskId: args.taskId,
+      })
+      .returning({ id: notifications.id, createdAt: notifications.createdAt });
+    const dir = await directory(args.workspaceId);
+    emitNotify(
+      args.workspaceId,
+      args.assigneeSub,
+      toNotificationEvent({
+        id: row!.id,
+        kind: "task_assigned",
+        actorName: dir[args.actorSub]?.displayName ?? null,
+        channelId: null,
+        channelName: null,
+        taskId: args.taskId,
+        createdAt: row!.createdAt.toISOString(),
+      }),
+    );
+  } catch {
+    /* notifications are best-effort */
+  }
 }
 
 export async function unreadCount(workspaceId: string, sub: string): Promise<number> {

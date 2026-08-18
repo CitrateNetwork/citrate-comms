@@ -36,6 +36,7 @@
     "react-markdown": "^10.1.0",
     "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
+    "resend": "^6.18.1",
     "unpdf": "^1.6.2",
     "vega": "^6.2.0",
     "vega-embed": "^7.1.0",

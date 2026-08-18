@@ -72,7 +72,7 @@ export async function listDocuments(workspaceId: string, limit = 50): Promise<Do
 
 /** Extract text from a file buffer by type. Text formats inline; PDF via unpdf;
  *  unsupported types (e.g. docx) return null → stored as metadata-only. */
-async function extractDocText(name: string, mime: string | null, buf: Buffer): Promise<string | null> {
+export async function extractDocText(name: string, mime: string | null, buf: Buffer): Promise<string | null> {
   const lower = name.toLowerCase();
   if ((mime && mime.startsWith("text/")) || /\.(txt|md|markdown|csv|tsv|json|log)$/.test(lower)) {
     return buf.toString("utf8");
@@ -108,9 +108,28 @@ async function extractDocText(name: string, mime: string | null, buf: Buffer): P
   return null; // images/video/other — stored as metadata only (no RAG text)
 }
 
+/** Fetch a stored document's blob and extract its text (UDI ingest source).
+ *  Returns null if the doc is missing, unreachable, or an unsupported type. */
+export async function getDocumentText(workspaceId: string, id: string): Promise<{ name: string; text: string } | null> {
+  const doc = await getDocument(workspaceId, id);
+  if (!doc?.blobUrl) return null;
+  try {
+    const res = await fetch(doc.blobUrl);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const text = await extractDocText(doc.name, doc.mime, buf);
+    return text && text.trim() ? { name: doc.name, text } : null;
+  } catch {
+    return null;
+  }
+}
+
 const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 150;
-const MAX_CHUNKS = 500;
+// Raised from 500: tabular files no longer take this path (they go to the row store
+// with a compact summary), so the remaining prose/PDF docs shouldn't silently lose
+// their tail. If a doc STILL exceeds this, we log it rather than drop it silently.
+const MAX_CHUNKS = 2000;
 
 function chunkText(text: string): string[] {
   const clean = text.replace(/\s+/g, " ").trim();
@@ -118,6 +137,10 @@ function chunkText(text: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < clean.length && out.length < MAX_CHUNKS; i += CHUNK_SIZE - CHUNK_OVERLAP) {
     out.push(clean.slice(i, i + CHUNK_SIZE));
+  }
+  const wouldBe = Math.ceil(clean.length / (CHUNK_SIZE - CHUNK_OVERLAP));
+  if (wouldBe > MAX_CHUNKS) {
+    console.warn(`[ingestDocument] text truncated for RAG: ${out.length}/${wouldBe} chunks indexed (${clean.length} chars). Large tabular data should use the row store.`);
   }
   return out;
 }

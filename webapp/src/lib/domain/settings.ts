@@ -11,12 +11,16 @@ export interface WorkspaceSettings {
   notifications?: Record<string, "all" | "mentions" | "mute">;
   automation?: { autoWitness: boolean };
   appearance?: { density?: "cinematic" | "compact"; accent?: string; reducedMotion?: boolean };
+  /** UDI (PLANSET 10): the confidence at/above which an extracted CRM record
+   *  auto-writes; below it, the row is held for HITL review. Conservative default. */
+  ingest?: { autoWriteConfidence: number };
 }
 
 const DEFAULTS: WorkspaceSettings = {
   notifications: {},
   automation: { autoWitness: false },
   appearance: { density: "cinematic", accent: "green", reducedMotion: false },
+  ingest: { autoWriteConfidence: 0.85 },
 };
 
 export async function getSettings(workspaceId: string): Promise<WorkspaceSettings> {
@@ -35,6 +39,7 @@ export async function updateSettings(workspaceId: string, patch: Partial<Workspa
     notifications: { ...current.notifications, ...patch.notifications },
     automation: { ...current.automation, ...patch.automation } as WorkspaceSettings["automation"],
     appearance: { ...current.appearance, ...patch.appearance },
+    ingest: { ...current.ingest, ...patch.ingest } as WorkspaceSettings["ingest"],
   };
   await db()
     .insert(workspaceSettings)

@@ -5,8 +5,8 @@
  * task between columns to change its status (persisted + audited). Tasks can belong
  * to a project; the project filter scopes the board.
  */
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Avatar, Btn, Icon, RiskBadge } from "@/components/primitives";
 import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
 import type { TaskStatus } from "@/lib/domain/enums";
@@ -22,7 +22,12 @@ export interface UiTask {
   projectId: string | null;
   title: string;
   priority: string | null;
+  assigneeSub: string | null;
   assigneeName: string | null;
+}
+export interface UiMember {
+  sub: string;
+  name: string;
 }
 
 const CARD_BTN: React.CSSProperties = {
@@ -51,15 +56,24 @@ export function PmScreen({
   canEdit,
   canDelete = false,
   projects,
+  members = [],
   tasks,
 }: {
   workspaceId: string;
   canEdit: boolean;
   canDelete?: boolean;
   projects: UiProject[];
+  members?: UiMember[];
   tasks: UiTask[];
 }) {
   const router = useRouter();
+  // Inbox "task_assigned" links land here as ?task=<id> — focus + highlight that card.
+  const focusId = useSearchParams()?.get("task") ?? null;
+  useEffect(() => {
+    if (!focusId) return;
+    const el = document.getElementById(`task-card-${focusId}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusId]);
   const [taskList, setTaskList] = useState<UiTask[]>(tasks);
   const [filter, setFilter] = useState<string>("all");
   const [newProject, setNewProject] = useState(false);
@@ -142,7 +156,18 @@ export function PmScreen({
         emptyHint="No tasks"
         onMove={canEdit ? move : () => {}}
         renderCard={(t) => (
-          <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
+          <div
+            id={`task-card-${t.id}`}
+            style={{
+              position: "relative",
+              display: "flex",
+              flexDirection: "column",
+              gap: "var(--s-2)",
+              ...(t.id === focusId
+                ? { outline: "2px solid var(--citrate-green-deep)", outlineOffset: 3, borderRadius: "var(--r-1)" }
+                : null),
+            }}
+          >
             <div style={{ fontWeight: 600, fontSize: "var(--t-sm)", paddingRight: canEdit || canDelete ? 40 : 0 }}>{t.title}</div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               {t.priority ? <RiskBadge level={t.priority as "low" | "medium" | "high"} /> : <span />}
@@ -207,6 +232,7 @@ export function PmScreen({
         <TaskEditDialog
           workspaceId={workspaceId}
           task={editTask}
+          members={members}
           onClose={() => setEditTask(null)}
           onSaved={(patch) => {
             setTaskList((prev) => prev.map((t) => (t.id === editTask.id ? { ...t, ...patch } : t)));
@@ -221,30 +247,36 @@ export function PmScreen({
 function TaskEditDialog({
   workspaceId,
   task,
+  members,
   onClose,
   onSaved,
 }: {
   workspaceId: string;
   task: UiTask;
+  members: UiMember[];
   onClose: () => void;
-  onSaved: (patch: { title: string; priority: string | null }) => void;
+  onSaved: (patch: { title: string; priority: string | null; assigneeSub: string | null; assigneeName: string | null }) => void;
 }) {
   const [title, setTitle] = useState(task.title);
   const [priority, setPriority] = useState<string>(task.priority ?? "");
+  const [assigneeSub, setAssigneeSub] = useState<string>(task.assigneeSub ?? "");
   const [busy, setBusy] = useState(false);
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim() || busy) return;
     setBusy(true);
-    const body = { title: title.trim(), priority: priority || null };
+    const body = { title: title.trim(), priority: priority || null, assigneeSub: assigneeSub || null };
     const r = await fetch(`/api/workspaces/${workspaceId}/tasks/${task.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     setBusy(false);
-    if (r.ok) onSaved(body);
+    if (r.ok) {
+      const assigneeName = assigneeSub ? members.find((m) => m.sub === assigneeSub)?.name ?? null : null;
+      onSaved({ ...body, assigneeName });
+    }
   }
 
   return (
@@ -264,6 +296,16 @@ function TaskEditDialog({
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+          </label>
+          <label className={s.field}>
+            <span className={s.fieldLabel}>Assignee</span>
+            <select className={s.input} value={assigneeSub} onChange={(e) => setAssigneeSub(e.target.value)}>
+              <option value="">Unassigned</option>
+              {members.map((m) => (
+                <option key={m.sub} value={m.sub}>{m.name}</option>
+              ))}
+            </select>
+            <span className={s.fieldHint}>Assigning a member drops a task in their inbox.</span>
           </label>
           <div className={s.dialogFoot}>
             <Btn variant="quiet" type="button" onClick={onClose}>
@@ -356,7 +398,7 @@ function TaskDialog({
     setBusy(false);
     if (r.ok) {
       const { task } = (await r.json()) as { task: { id: string; projectId: string | null; title: string; priority: string | null } };
-      onCreated({ id: task.id, column: "Backlog", projectId: task.projectId, title: task.title, priority: task.priority, assigneeName: null });
+      onCreated({ id: task.id, column: "Backlog", projectId: task.projectId, title: task.title, priority: task.priority, assigneeSub: null, assigneeName: null });
     }
   }
   return (

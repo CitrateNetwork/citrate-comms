@@ -19,6 +19,10 @@ import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
 import { listMessages } from "@/lib/domain/messages";
 import { listTasks, listProjects } from "@/lib/domain/pm";
+import { listTables, getSheetSchema, readRows, queryTable } from "@/lib/domain/tables-repo";
+import { getMapping, saveMapping, previewImport } from "@/lib/domain/import-engine";
+import { ingestText, ingestDocument } from "@/lib/domain/ingest";
+import { suggestMapping, type MappingSpec } from "@/lib/domain/import-map";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
 import { searchWeb } from "@/lib/research/search";
 import { fetchReadable } from "@/lib/research/fetch";
@@ -378,7 +382,142 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({ projectId: z.string().uuid().optional() }),
       execute: audited("pm.read", Capability.ReadChannel, async (a: { projectId?: string }) => {
         const [projects, tasks] = await Promise.all([listProjects(ctx.workspaceId), listTasks(ctx.workspaceId, a.projectId)]);
-        return { projects, tasks: tasks.map((t) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority, projectId: t.projectId })) };
+        // Bound the result so a large board can't flood the model's context.
+        const TASK_CAP = 100;
+        return {
+          projects: projects.slice(0, 50),
+          tasks: tasks.slice(0, TASK_CAP).map((t) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority, projectId: t.projectId })),
+          truncated: tasks.length > TASK_CAP ? { tasks: tasks.length } : undefined,
+        };
+      }),
+    }),
+    // ── Structured tables (AGENTS_03) — bounded reads over dropped spreadsheets ──
+    "tables.list": tool({
+      description:
+        "List uploaded data tables (dropped spreadsheets/CSVs) as datasets → sheets with row/column " +
+        "counts, plus recent import jobs and their progress. Start here when a member drops an xlsx/csv " +
+        "and asks to import it. Returns ids you pass to tables.schema / tables.read / tables.query / crm.import.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
+      execute: audited("tables.list", Capability.ReadChannel, async (a: { limit: number }) => {
+        return listTables(ctx.workspaceId, a.limit);
+      }),
+    }),
+    "tables.schema": tool({
+      description:
+        "Profile one sheet WITHOUT reading all its rows: every column's name, inferred type, whether it's " +
+        "sensitive (email/phone/address — masked), the empty-fraction, and a few sample values. Use this to " +
+        "understand a big table (e.g. 1,000 rows × 100 cols) before reading or importing — it never dumps rows.",
+      inputSchema: z.object({ sheetId: z.string().uuid() }),
+      execute: audited("tables.schema", Capability.ReadChannel, async (a: { sheetId: string }) => {
+        const s = await getSheetSchema(ctx.workspaceId, a.sheetId);
+        return s ?? { error: "sheet not found" };
+      }),
+    }),
+    "tables.read": tool({
+      description:
+        "Read a BOUNDED WINDOW of rows from a sheet (max 50 per call) — page with offset. Optionally select " +
+        "columns and filter (op eq|contains on a NON-sensitive column). Sensitive values (emails/phones) are " +
+        "MASKED. Never try to read a whole large table; profile with tables.schema, aggregate with tables.query, " +
+        "and import with crm.import instead of pulling every row.",
+      inputSchema: z.object({
+        sheetId: z.string().uuid(),
+        offset: z.number().int().min(0).default(0),
+        limit: z.number().int().min(1).max(50).default(20),
+        columns: z.array(z.string().max(120)).max(30).optional(),
+        filter: z.object({ column: z.string().max(120), op: z.enum(["eq", "contains"]), value: z.string().max(200) }).optional(),
+      }),
+      execute: audited("tables.read", Capability.ReadChannel, async (a: { sheetId: string; offset: number; limit: number; columns?: string[]; filter?: { column: string; op: "eq" | "contains"; value: string } }) => {
+        return readRows(ctx.workspaceId, a.sheetId, { offset: a.offset, limit: a.limit, columns: a.columns, filter: a.filter });
+      }),
+    }),
+    "tables.query": tool({
+      description:
+        "Aggregate a sheet server-side so you can reason at scale WITHOUT reading rows: op 'count' (optionally " +
+        "filtered), 'distinct' or 'groupby' on a NON-sensitive column (returns value→count). Use for questions " +
+        "like 'how many rows', 'which archetypes/tiers appear', 'how many in each state'.",
+      inputSchema: z.object({
+        sheetId: z.string().uuid(),
+        op: z.enum(["count", "distinct", "groupby"]),
+        column: z.string().max(120).optional(),
+        where: z.object({ column: z.string().max(120), op: z.enum(["eq", "contains"]), value: z.string().max(200) }).optional(),
+      }),
+      execute: audited("tables.query", Capability.ReadChannel, async (a: { sheetId: string; op: "count" | "distinct" | "groupby"; column?: string; where?: { column: string; op: "eq" | "contains"; value: string } }) => {
+        return queryTable(ctx.workspaceId, a.sheetId, { op: a.op, column: a.column, where: a.where });
+      }),
+    }),
+    "tables.map": tool({
+      description:
+        "Get (or draft) the column→CRM mapping for a sheet: how each column becomes an account/contact/deal/task " +
+        "field or a custom field, plus the dedupe strategy. Call with just a sheetId to get a SUGGESTED mapping to " +
+        "review; pass `spec` to save an edited draft. This is advisory — it does NOT write CRM records. When the " +
+        "mapping looks right, call crm.import to propose the actual import (human-approved).",
+      inputSchema: z.object({
+        sheetId: z.string().uuid(),
+        spec: z.record(z.string(), z.unknown()).optional().describe("an edited MappingSpec to save as the sheet's draft"),
+      }),
+      execute: audited("tables.map", Capability.CreateRecord, async (a: { sheetId: string; spec?: Record<string, unknown> }) => {
+        if (a.spec) {
+          await saveMapping({ workspaceId: ctx.workspaceId, sheetId: a.sheetId, spec: a.spec as unknown as MappingSpec, bySub: ctx.invokedBySub });
+          return { saved: true, spec: a.spec };
+        }
+        const existing = await getMapping(ctx.workspaceId, a.sheetId);
+        if (existing) return { spec: existing.spec, approved: existing.approved, source: "saved" };
+        const schema = await getSheetSchema(ctx.workspaceId, a.sheetId);
+        if (!schema) return { error: "sheet not found" };
+        const suggested = suggestMapping(schema.columns.map((c) => ({ name: c.name, type: c.type as never, sensitive: c.sensitive, nullFrac: c.nullFrac, samples: c.samples })));
+        await saveMapping({ workspaceId: ctx.workspaceId, sheetId: a.sheetId, spec: suggested, bySub: ctx.invokedBySub });
+        return { spec: suggested, approved: false, source: "suggested" };
+      }),
+    }),
+    "crm.import": tool({
+      description:
+        "Propose IMPORTING a sheet's rows into the CRM using its mapping (HITL — queued for human approval with a " +
+        "PREVIEW: N new · M updated · K held). This is how you load large tables — it dedupes and creates " +
+        "accounts/contacts (+deals/tasks) server-side in batches. Do NOT create records one-by-one with crm.create " +
+        "for a spreadsheet. Ensure a mapping exists first (tables.map).",
+      inputSchema: z.object({
+        sheetId: z.string().uuid(),
+      }),
+      execute: async (a: { sheetId: string }) => {
+        const mapping = await getMapping(ctx.workspaceId, a.sheetId);
+        if (!mapping) return { status: "error", message: "No mapping for this sheet yet. Call tables.map first, review it, then crm.import." };
+        const schema = await getSheetSchema(ctx.workspaceId, a.sheetId);
+        const preview = await previewImport(ctx.workspaceId, a.sheetId, mapping.spec);
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "crm.import",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "crm.import", sheetId: a.sheetId, mappingId: mapping.id, sheetName: schema?.sheet.name ?? "sheet", preview },
+        });
+        return {
+          status: "pending_approval",
+          approvalId,
+          risk,
+          preview,
+          message: `Queued for human approval — preview: ${preview.created} new, ${preview.updated} updated, ${preview.held} held across ${preview.rows} rows.`,
+        };
+      },
+    }),
+    "crm.ingest": tool({
+      description:
+        "INGEST unstructured or semi-structured data into the CRM: pass a stored `documentId` (PDF, text, docx, " +
+        "spreadsheet) OR a free-form `text` block (meeting notes, an email, a JSON snippet). Extracts CRM entities " +
+        "(account, key contact + title/email/phone, deal + value, next-step task) with a confidence score. " +
+        "HIGH-confidence records write to the CRM automatically; LOW-confidence records are held and queued for your " +
+        "human review. Use this for prose/PDFs; use crm.import for clean spreadsheets. Returns what was written vs held.",
+      inputSchema: z.object({
+        documentId: z.string().uuid().optional().describe("a stored document to ingest"),
+        text: z.string().min(1).max(50_000).optional().describe("a raw text block to ingest (if no documentId)"),
+        hint: z.string().max(300).optional().describe("optional context, e.g. 'this is a sales call summary'"),
+      }),
+      execute: audited("crm.ingest", Capability.CreateRecord, async (a: { documentId?: string; text?: string; hint?: string }) => {
+        if (!a.documentId && !a.text) return { status: "error", message: "Provide a documentId or a text block to ingest." };
+        const summary = a.documentId
+          ? await ingestDocument({ workspaceId: ctx.workspaceId, documentId: a.documentId, bySub: ctx.invokedBySub, hint: a.hint })
+          : await ingestText({ workspaceId: ctx.workspaceId, text: a.text!, bySub: ctx.invokedBySub, hint: a.hint });
+        return { status: summary.held > 0 ? "partial_pending_review" : "done", ...summary };
       }),
     }),
     "thread.summarize": tool({
@@ -388,7 +527,15 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({ channelId: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50) }),
       execute: audited("thread.summarize", Capability.ReadChannel, async (a: { channelId: string; limit: number }) => {
         const msgs = await listMessages(ctx.workspaceId, a.channelId, { limit: a.limit });
-        return { messages: msgs.map((m) => ({ author: m.authorSub, body: m.body, at: m.createdAt })) };
+        // Cap each body so a few very long messages can't blow the tool result.
+        const BODY_CAP = 2000;
+        return {
+          messages: msgs.map((m) => ({
+            author: m.authorSub,
+            body: m.body.length > BODY_CAP ? m.body.slice(0, BODY_CAP) + "…" : m.body,
+            at: m.createdAt,
+          })),
+        };
       }),
     }),
     "documents.write": tool({
@@ -567,4 +714,11 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "terminal.exec",
   "code.run",
   "chart.render",
+  "tables.list",
+  "tables.schema",
+  "tables.read",
+  "tables.query",
+  "tables.map",
+  "crm.import",
+  "crm.ingest",
 ];

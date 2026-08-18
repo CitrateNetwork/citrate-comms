@@ -63,8 +63,26 @@ export function AppShell({
   children,
 }: ShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [chOpen, setChOpen] = useState(true);
+  const [dmOpen, setDmOpen] = useState(true);
   const pathname = usePathname() ?? "";
   const base = `/w/${workspaceSlug}`;
+  const channels = spaces.filter((s) => s.kind !== "dm");
+  const dms = spaces.filter((s) => s.kind === "dm");
+
+  const spaceLink = (s: SpaceLink) => (
+    <Link
+      key={s.id}
+      href={`${base}/comms/${s.id}`}
+      className={styles.railItem}
+      onClick={() => setDrawerOpen(false)}
+    >
+      <Icon name={s.kind === "forum" ? "forum" : s.kind === "dm" ? "dm" : "hash"} size={15} />
+      <span className={styles.railLabel}>{s.name}</span>
+      {s.hasAgent && <SurfBadge variant="agent">AGENT</SurfBadge>}
+      {s.unread ? <span className={styles.unread}>{s.unread}</span> : null}
+    </Link>
+  );
   const nav = NAV.filter((n) => n.key !== "approvals" || canApprove);
   const active = nav.find((n) => pathname.startsWith(`${base}/${n.key}`))?.key ?? "comms";
 
@@ -100,7 +118,7 @@ export function AppShell({
         <nav className={`${styles.rail} ${drawerOpen ? styles.railOpen : ""}`}>
           <div className={styles.railSection}>
             <div className={styles.railHeadRow}>
-              <span className={styles.railHead}>Spaces</span>
+              <span className={styles.railHead}>Messages</span>
               {(canCreateChannel || canCreateDm) && (
                 <NewChannelButton
                   workspaceId={workspaceId}
@@ -111,20 +129,22 @@ export function AppShell({
                 />
               )}
             </div>
-            {spaces.length === 0 && <div className={styles.railEmpty}>No channels yet</div>}
-            {spaces.map((s) => (
-              <Link
-                key={s.id}
-                href={`${base}/comms/${s.id}`}
-                className={styles.railItem}
-                onClick={() => setDrawerOpen(false)}
-              >
-                <Icon name={s.kind === "forum" ? "forum" : s.kind === "dm" ? "dm" : "hash"} size={15} />
-                <span className={styles.railLabel}>{s.name}</span>
-                {s.hasAgent && <SurfBadge variant="agent">AGENT</SurfBadge>}
-                {s.unread ? <span className={styles.unread}>{s.unread}</span> : null}
-              </Link>
-            ))}
+
+            {/* Group chats (channels + forums), collapsible */}
+            <button className={styles.railGroupHead} onClick={() => setChOpen((v) => !v)} aria-expanded={chOpen}>
+              <span className={styles.railCaret} aria-hidden="true">{chOpen ? "▾" : "▸"}</span>
+              <span className={styles.railGroupName}>Channels</span>
+              <span className={styles.railGroupCount}>{channels.length}</span>
+            </button>
+            {chOpen && (channels.length === 0 ? <div className={styles.railEmpty}>No channels yet</div> : channels.map(spaceLink))}
+
+            {/* Direct messages, collapsible */}
+            <button className={styles.railGroupHead} onClick={() => setDmOpen((v) => !v)} aria-expanded={dmOpen}>
+              <span className={styles.railCaret} aria-hidden="true">{dmOpen ? "▾" : "▸"}</span>
+              <span className={styles.railGroupName}>Direct messages</span>
+              <span className={styles.railGroupCount}>{dms.length}</span>
+            </button>
+            {dmOpen && (dms.length === 0 ? <div className={styles.railEmpty}>No direct messages</div> : dms.map(spaceLink))}
           </div>
 
           <div className={styles.railSection}>

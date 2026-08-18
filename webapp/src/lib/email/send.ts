@@ -1,26 +1,37 @@
 /**
- * Transactional email (SMTP) for citrate-comms — currently the onboarding invite.
- * Shape follows citrate-dataroom/src/lib/email: env-driven SMTP, STARTTLS on 587 /
- * implicit TLS on 465, fail-soft for dev. Every send goes through `sendCompliant`,
- * which:
+ * Transactional email for citrate-comms — the onboarding invite.
+ *
+ * Two transports, tried in order; the first one configured wins:
+ *   1. Resend (preferred)  — set RESEND_API_KEY. HTTPS API, no SMTP AUTH to keep
+ *      alive, DKIM/SPF/DMARC handled by verifying the sending domain in Resend.
+ *   2. SMTP (legacy)       — set SMTP_HOST/SMTP_USER/SMTP_PASS. Kept as a fallback;
+ *      note Microsoft 365 is retiring Basic Auth for SMTP client submission, so this
+ *      path is fragile and should not be relied on long-term.
+ * If NEITHER is configured (dev), sends fail soft: the API hands back the invite link
+ * so the admin can share it manually.
+ *
+ * Every send goes through `sendCompliant`, which — regardless of transport:
  *   - checks the suppression list first (never email an unsubscribed address),
  *   - adds the RFC 8058 one-click unsubscribe headers (List-Unsubscribe +
  *     List-Unsubscribe-Post) so Gmail/Outlook show a native one-click button, and
  *   - appends a visible, one-click unsubscribe footer link.
  * This keeps us CAN-SPAM / CASL compliant: one click, no traps, honored permanently.
  *
- * Env (set in Vercel; the operator owns the mailbox + password):
- *   SMTP_HOST    e.g. smtp.office365.com
- *   SMTP_PORT    587 (STARTTLS, default) or 465 (implicit TLS)
- *   SMTP_SECURE  "true" for 465; STARTTLS otherwise (default false)
- *   SMTP_USER    the authenticating mailbox (e.g. larry@citrate.ai)
- *   SMTP_PASS    the mailbox/app password  ← operator sets this
- *   EMAIL_FROM   From header, e.g. "Citrate Comms <larry@citrate.ai>"
- *                (falls back to SMTP_USER). NOTE: sending From a different address
- *                than SMTP_USER requires "Send As" rights on that mailbox in M365.
- *   APP_ORIGIN   absolute base for links (e.g. https://comms.citrate.ai)
+ * Env (set in Vercel):
+ *   RESEND_API_KEY  re_… API key from resend.com  ← preferred; set this
+ *   EMAIL_FROM      From header, e.g. "Citrate Comms <invites@citrate.ai>". The domain
+ *                   (citrate.ai) must be verified in Resend. Falls back to SMTP_USER,
+ *                   then to "Citrate Comms <onboarding@resend.dev>" for first-run tests.
+ *   APP_ORIGIN      absolute base for links (e.g. https://communications.citrate.ai)
+ *   -- legacy SMTP fallback (only used when RESEND_API_KEY is unset) --
+ *   SMTP_HOST       e.g. smtp.office365.com
+ *   SMTP_PORT       587 (STARTTLS, default) or 465 (implicit TLS)
+ *   SMTP_SECURE     "true" for 465; STARTTLS otherwise (default false)
+ *   SMTP_USER       the authenticating mailbox (e.g. larry@citrate.ai)
+ *   SMTP_PASS       the mailbox/app password
  */
 import nodemailer, { type Transporter } from "nodemailer";
+import { Resend } from "resend";
 import { unsubscribeToken } from "@/lib/security/crypto";
 import { isSuppressed } from "./suppression";
 
@@ -33,6 +44,18 @@ export interface SmtpConfig {
   from: string;
 }
 
+/** Resolve the From header, shared by both transports. */
+function fromHeader(fallback?: string): string {
+  return process.env.EMAIL_FROM?.trim() || fallback || "Citrate Comms <onboarding@resend.dev>";
+}
+
+/** Resolve Resend config from env, or null when RESEND_API_KEY is unset. */
+export function resendConfig(): { apiKey: string; from: string } | null {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  if (!apiKey) return null;
+  return { apiKey, from: fromHeader() };
+}
+
 /** Resolve SMTP config from env, or null when incomplete (host+user+pass required). */
 export function smtpConfig(): SmtpConfig | null {
   const host = process.env.SMTP_HOST?.trim();
@@ -41,12 +64,20 @@ export function smtpConfig(): SmtpConfig | null {
   if (!host || !user || !pass) return null;
   const port = Number(process.env.SMTP_PORT || "587");
   const secure = process.env.SMTP_SECURE ? /^(1|true|yes)$/i.test(process.env.SMTP_SECURE) : port === 465;
-  const from = process.env.EMAIL_FROM?.trim() || user;
+  const from = fromHeader(user);
   return { host, port, secure, user, pass, from };
 }
 
+/** True when at least one transport (Resend preferred, SMTP legacy) is configured. */
 export function emailConfigured(): boolean {
-  return smtpConfig() !== null;
+  return resendConfig() !== null || smtpConfig() !== null;
+}
+
+/** Which transport a live send would use — for diagnostics/health surfaces. */
+export function emailTransport(): "resend" | "smtp" | "none" {
+  if (resendConfig()) return "resend";
+  if (smtpConfig()) return "smtp";
+  return "none";
 }
 
 function appOrigin(): string {
@@ -67,6 +98,14 @@ function transporter(cfg: SmtpConfig): Transporter {
   return t;
 }
 
+let cachedResend: { client: Resend; key: string } | null = null;
+function resendClient(apiKey: string): Resend {
+  if (cachedResend && cachedResend.key === apiKey) return cachedResend.client;
+  const client = new Resend(apiKey);
+  cachedResend = { client, key: apiKey };
+  return client;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
@@ -74,20 +113,22 @@ function escapeHtml(s: string): string {
 export interface SendOutcome {
   sent: boolean;
   suppressed?: boolean; // recipient previously unsubscribed
-  link?: string; // returned when SMTP is unconfigured (dev) so the admin can share manually
+  link?: string; // returned when no transport is configured (dev) so the admin can share manually
+  transport?: "resend" | "smtp"; // which transport delivered (set only when sent)
 }
 
 /**
  * The single send path. Suppression-checked, unsubscribe-headered, footer-appended.
- * Returns {suppressed:true} without sending if the address unsubscribed; returns
- * {sent:false, link} when SMTP is unconfigured (dev) so onboarding still works.
+ * Dispatches to Resend (preferred) then SMTP (legacy). Returns {suppressed:true}
+ * without sending if the address unsubscribed; returns {sent:false, link} when no
+ * transport is configured (dev) so onboarding still works.
  */
 async function sendCompliant(args: {
   to: string;
   subject: string;
   text: string;
   htmlBody: string;
-  /** A primary link (e.g. the invite link) surfaced to the admin if SMTP is off. */
+  /** A primary link (e.g. the invite link) surfaced to the admin if no transport is set. */
   primaryLink?: string;
 }): Promise<SendOutcome> {
   const to = args.to.trim().toLowerCase();
@@ -98,8 +139,9 @@ async function sendCompliant(args: {
   const unsubPage = `${origin}/unsubscribe?u=${encodeURIComponent(token)}`;
   const unsubPost = `${origin}/api/unsubscribe?u=${encodeURIComponent(token)}`;
 
-  const cfg = smtpConfig();
-  if (!cfg) return { sent: false, link: args.primaryLink };
+  const resendCfg = resendConfig();
+  const smtpCfg = smtpConfig();
+  if (!resendCfg && !smtpCfg) return { sent: false, link: args.primaryLink };
 
   const text = `${args.text}\n\n—\nDon't want these emails? Unsubscribe instantly: ${unsubPage}`;
   const html =
@@ -111,28 +153,57 @@ async function sendCompliant(args: {
     `no account needed.</p>` +
     `</div>`;
 
-  try {
-    await transporter(cfg).sendMail({
-      from: cfg.from,
-      to,
-      subject: args.subject,
-      text,
-      html,
-      headers: {
-        // RFC 8058 one-click: mail clients render a native "Unsubscribe" button that
-        // POSTs to the URL automatically. The mailto is the always-valid fallback.
-        "List-Unsubscribe": `<mailto:larry@citrate.ai?subject=unsubscribe>, <${unsubPost}>`,
-        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-      },
-    });
-    return { sent: true };
-  } catch (e) {
-    // SMTP auth/transport failure (e.g. password not yet set, or a transient relay
-    // error). Don't hard-fail onboarding — hand back the link so the admin can share
-    // it manually, and log for diagnosis.
-    console.error("[email] send failed; falling back to manual link:", (e as Error).message);
-    return { sent: false, link: args.primaryLink };
+  // RFC 8058 one-click headers — identical across transports. Mail clients render a
+  // native "Unsubscribe" button that POSTs to the URL automatically; the mailto is the
+  // always-valid fallback.
+  const listUnsubHeaders: Record<string, string> = {
+    "List-Unsubscribe": `<mailto:larry@citrate.ai?subject=unsubscribe>, <${unsubPost}>`,
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  };
+
+  // 1) Resend (preferred). HTTPS API — no SMTP AUTH dependency.
+  if (resendCfg) {
+    try {
+      const { data, error } = await resendClient(resendCfg.apiKey).emails.send({
+        from: resendCfg.from,
+        to,
+        subject: args.subject,
+        text,
+        html,
+        headers: listUnsubHeaders,
+      });
+      if (error) throw new Error(`${error.name}: ${error.message}`);
+      if (!data?.id) throw new Error("resend returned no message id");
+      return { sent: true, transport: "resend" };
+    } catch (e) {
+      // Resend rejected (bad key, unverified domain, rate limit). Fall through to SMTP
+      // if configured, otherwise hand back the manual link.
+      console.error("[email] resend send failed:", (e as Error).message);
+      if (!smtpCfg) return { sent: false, link: args.primaryLink };
+    }
   }
+
+  // 2) SMTP (legacy fallback).
+  if (smtpCfg) {
+    try {
+      await transporter(smtpCfg).sendMail({
+        from: smtpCfg.from,
+        to,
+        subject: args.subject,
+        text,
+        html,
+        headers: listUnsubHeaders,
+      });
+      return { sent: true, transport: "smtp" };
+    } catch (e) {
+      // SMTP auth/transport failure (e.g. password not set, or M365 SMTP AUTH disabled).
+      // Don't hard-fail onboarding — hand back the link so the admin can share it, and log.
+      console.error("[email] smtp send failed; falling back to manual link:", (e as Error).message);
+      return { sent: false, link: args.primaryLink };
+    }
+  }
+
+  return { sent: false, link: args.primaryLink };
 }
 
 export interface InviteEmail {
