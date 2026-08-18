@@ -72,24 +72,32 @@ const ALLOWED_CLEARTEXT: Record<string, string> = {
   "crm_views.name": "a saved-view name the member chose for their own navigation",
 
   // ── FLAGGED FOR AN OWNER DECISION (QA 2026-08-01) ──────────────────────────
-  // Recorded so the suite is green and the state is VISIBLE, not because the
-  // trade-off has been agreed. Each is personal data or free text in a product that
-  // encrypts message bodies beside it. See docs/QA_2026-08-01_COMMS.md.
-  "members.display_name": "OWNER DECISION PENDING — a person's name, held in cleartext",
-  // OWNER DECISION 2026-08-18: ENCRYPT these two. Scheduled as a follow-up sprint
-  // (adds *_enc columns + blind indexes, and reworks server-side search/sort) — kept
-  // as a recorded decision here so #44 merges green and the intent is on record.
+  // OWNER DECISIONS taken 2026-08-18 (interview). Two outcomes:
+  //   • "cleartext" — a final, recorded business trade-off (kept plaintext on purpose).
+  //   • "ENCRYPT (#48)" — scheduled for the encryption follow-up sprint (adds *_enc +
+  //     blind indexes and reworks server-side search/sort). Recorded here so the guard
+  //     stays green and the intent is on record until that work lands.
+  // Decision detail: docs/QA_2026-08-01_COMMS.md + issue #48.
+  "members.display_name":
+    "OWNER DECISION 2026-08-18: cleartext — an intra-workspace roster identity rendered on every message/mention; members see each other by design",
+  "contacts.title":
+    "OWNER DECISION 2026-08-18: cleartext — low-sensitivity business attribute used for server-side CRM filtering/segmentation",
+  "channels.topic":
+    "OWNER DECISION 2026-08-18: cleartext — broadcast to every member of the workspace by design, like channels.name",
   "contacts.name":
-    "OWNER DECISION 2026-08-18: ENCRYPT (scheduled follow-up) — CRM's most identifying field; email beside it is already encrypted",
-  "contacts.title": "OWNER DECISION PENDING — job title; personal data under GDPR Art.4",
-  "channels.topic": "OWNER DECISION PENDING — free text, unlike channels.name",
-  "threads.title": "OWNER DECISION PENDING — free text, often the substance of the thread",
-  "tasks.title": "OWNER DECISION PENDING — free text, often the substance of the task",
-  "tasks.description": "OWNER DECISION PENDING — free text, beside encrypted message bodies",
-  "agent_threads.title": "OWNER DECISION PENDING — free text summarising an agent conversation",
-  "agent_resources.title": "OWNER DECISION PENDING — free text naming an attached resource",
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — CRM's most identifying field; email beside it is already encrypted",
+  "threads.title":
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — often summarizes the encrypted message bodies beneath it",
+  "tasks.title":
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — often carries the substance of the work",
+  "tasks.description":
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — free-text content, directly analogous to message body_enc",
+  "agent_threads.title":
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — summarizes an agent conversation; protected like threads.title",
+  "agent_resources.title":
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — same leak shape as documents.name (a name reveals contents)",
   "documents.name":
-    "OWNER DECISION 2026-08-18: ENCRYPT (scheduled follow-up) — a filename frequently reveals its contents ('Q3-layoffs.xlsx')",
+    "OWNER DECISION 2026-08-18: ENCRYPT (#48) — a filename frequently reveals its contents ('Q3-layoffs.xlsx')",
 
   // ── Columns added after the 2026-08-01 sweep (Feature C + UDI ingest) ─────────
   "import_batches.error_text": "parser/import DIAGNOSTIC shown to admins (e.g. 'unreadable sheet'), not user content",
