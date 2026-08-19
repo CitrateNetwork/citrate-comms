@@ -16,7 +16,8 @@ import { createAccount, createContact, createDeal } from "./crm";
 import { createProject, createTask } from "./pm";
 import { listFieldDefs, createFieldDef } from "./crm-fields";
 import { setFieldValue } from "./crm-fields";
-import { columnsFor, type MappingSpec } from "./import-map";
+import { columnsFor, suggestMapping, type MappingSpec } from "./import-map";
+import { getSheetSchema } from "./tables-repo";
 import type { CrmEntity } from "./crm-enums";
 
 export const IMPORT_SLICE = 200;
@@ -33,19 +34,46 @@ export async function getMapping(workspaceId: string, sheetId: string): Promise<
 }
 
 export async function saveMapping(args: { workspaceId: string; sheetId: string; spec: MappingSpec; bySub: string; approved?: boolean }): Promise<string> {
-  const existing = await getMapping(args.workspaceId, args.sheetId);
-  if (existing) {
-    await db()
-      .update(importMappings)
-      .set({ spec: args.spec, approved: args.approved ?? existing.approved, updatedAt: new Date() })
-      .where(eq(importMappings.id, existing.id));
-    return existing.id;
-  }
+  // Race-safe upsert against the (workspace_id, sheet_id) unique index. The old
+  // read-then-insert-or-update had a TOCTOU gap: two near-simultaneous tables.map
+  // calls (or a crm.import self-heal racing tables.map) could both miss the existing
+  // row and then collide on the unique index, throwing and leaving no mapping saved —
+  // one of the ways the import chain "broke at tables.map". `approved` is only
+  // overwritten when explicitly passed, so re-saving a draft never silently un-approves
+  // (or approves) an existing mapping.
   const [row] = await db()
     .insert(importMappings)
     .values({ workspaceId: args.workspaceId, sheetId: args.sheetId, spec: args.spec, approved: args.approved ?? false, createdBySub: args.bySub })
+    .onConflictDoUpdate({
+      target: [importMappings.workspaceId, importMappings.sheetId],
+      set: { spec: args.spec, updatedAt: new Date(), ...(args.approved !== undefined ? { approved: args.approved } : {}) },
+    })
     .returning({ id: importMappings.id });
   return row!.id;
+}
+
+/**
+ * Return the sheet's mapping, generating + persisting a suggested draft if none exists
+ * yet. This makes the ingestion chain self-healing: `crm.import` no longer hard-blocks
+ * when `tables.map` was never called (or its save failed transiently) — it falls back
+ * to the same suggested mapping `tables.map` would have produced. Returns null only when
+ * the sheet genuinely doesn't exist. `autocreated` lets callers tell the user a draft
+ * was inferred so they can review it.
+ */
+export async function ensureMapping(
+  workspaceId: string,
+  sheetId: string,
+  bySub: string,
+): Promise<{ id: string; spec: MappingSpec; approved: boolean; autocreated: boolean } | null> {
+  const existing = await getMapping(workspaceId, sheetId);
+  if (existing) return { ...existing, autocreated: false };
+  const schema = await getSheetSchema(workspaceId, sheetId);
+  if (!schema) return null;
+  const spec = suggestMapping(
+    schema.columns.map((c) => ({ name: c.name, type: c.type as never, sensitive: c.sensitive, nullFrac: c.nullFrac, samples: c.samples })),
+  );
+  const id = await saveMapping({ workspaceId, sheetId, spec, bySub });
+  return { id, spec, approved: false, autocreated: true };
 }
 
 export async function approveMapping(workspaceId: string, mappingId: string): Promise<void> {

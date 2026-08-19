@@ -20,9 +20,9 @@ import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documen
 import { listMessages } from "@/lib/domain/messages";
 import { listTasks, listProjects } from "@/lib/domain/pm";
 import { listTables, getSheetSchema, readRows, queryTable } from "@/lib/domain/tables-repo";
-import { getMapping, saveMapping, previewImport } from "@/lib/domain/import-engine";
+import { saveMapping, previewImport, ensureMapping } from "@/lib/domain/import-engine";
 import { ingestText, ingestDocument } from "@/lib/domain/ingest";
-import { suggestMapping, type MappingSpec } from "@/lib/domain/import-map";
+import { type MappingSpec } from "@/lib/domain/import-map";
 import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
 import { searchWeb } from "@/lib/research/search";
 import { fetchReadable } from "@/lib/research/fetch";
@@ -460,13 +460,11 @@ export function citrateCommsTools(ctx: ToolContext) {
           await saveMapping({ workspaceId: ctx.workspaceId, sheetId: a.sheetId, spec: a.spec as unknown as MappingSpec, bySub: ctx.invokedBySub });
           return { saved: true, spec: a.spec };
         }
-        const existing = await getMapping(ctx.workspaceId, a.sheetId);
-        if (existing) return { spec: existing.spec, approved: existing.approved, source: "saved" };
-        const schema = await getSheetSchema(ctx.workspaceId, a.sheetId);
-        if (!schema) return { error: "sheet not found" };
-        const suggested = suggestMapping(schema.columns.map((c) => ({ name: c.name, type: c.type as never, sensitive: c.sensitive, nullFrac: c.nullFrac, samples: c.samples })));
-        await saveMapping({ workspaceId: ctx.workspaceId, sheetId: a.sheetId, spec: suggested, bySub: ctx.invokedBySub });
-        return { spec: suggested, approved: false, source: "suggested" };
+        // No spec → return the saved mapping, or draft+persist a suggested one. Shared
+        // with crm.import via ensureMapping so both paths agree on what "the mapping" is.
+        const m = await ensureMapping(ctx.workspaceId, a.sheetId, ctx.invokedBySub);
+        if (!m) return { error: "sheet not found" };
+        return { spec: m.spec, approved: m.approved, source: m.autocreated ? "suggested" : "saved" };
       }),
     }),
     "crm.import": tool({
@@ -479,8 +477,11 @@ export function citrateCommsTools(ctx: ToolContext) {
         sheetId: z.string().uuid(),
       }),
       execute: async (a: { sheetId: string }) => {
-        const mapping = await getMapping(ctx.workspaceId, a.sheetId);
-        if (!mapping) return { status: "error", message: "No mapping for this sheet yet. Call tables.map first, review it, then crm.import." };
+        // Self-healing: if no mapping was saved yet (or a prior tables.map save failed),
+        // fall back to a suggested draft instead of hard-blocking the whole import. Only
+        // a genuinely missing sheet stops us here.
+        const mapping = await ensureMapping(ctx.workspaceId, a.sheetId, ctx.invokedBySub);
+        if (!mapping) return { status: "error", message: "Sheet not found. Upload the spreadsheet first (tables.list shows importable sheets), then retry crm.import." };
         const schema = await getSheetSchema(ctx.workspaceId, a.sheetId);
         const preview = await previewImport(ctx.workspaceId, a.sheetId, mapping.spec);
         const { approvalId, risk } = await enqueueApproval({
@@ -491,12 +492,16 @@ export function citrateCommsTools(ctx: ToolContext) {
           threadId: ctx.threadId,
           action: { kind: "crm.import", sheetId: a.sheetId, mappingId: mapping.id, sheetName: schema?.sheet.name ?? "sheet", preview },
         });
+        const mappingNote = mapping.autocreated
+          ? " (used an auto-suggested column mapping — review it with tables.map if the preview looks off)"
+          : "";
         return {
           status: "pending_approval",
           approvalId,
           risk,
           preview,
-          message: `Queued for human approval — preview: ${preview.created} new, ${preview.updated} updated, ${preview.held} held across ${preview.rows} rows.`,
+          mappingAutocreated: mapping.autocreated,
+          message: `Queued for human approval — preview: ${preview.created} new, ${preview.updated} updated, ${preview.held} held across ${preview.rows} rows.${mappingNote}`,
         };
       },
     }),
