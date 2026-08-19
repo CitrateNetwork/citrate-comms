@@ -180,11 +180,14 @@ export const messages = pgTable(
     ciphertextHash: text("ciphertext_hash"),
     clientMsgId: text("client_msg_id"), // outbound dedupe across the bridge
     onBehalfOf: text("on_behalf_of"), // real author when posted via the web gateway
+    pinned: boolean("pinned").notNull().default(false), // pinned to the channel header
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("messages_channel_seq").on(t.workspaceId, t.channelId, t.seq),
     index("messages_thread").on(t.workspaceId, t.threadId),
+    index("messages_pinned").on(t.workspaceId, t.channelId, t.pinned),
   ],
 );
 

@@ -31,6 +31,7 @@ export interface UiMessage {
   body: string;
   seq: number;
   onBehalfOf: string | null;
+  pinned?: boolean;
   attachments?: UiAttachment[];
   createdAt: string;
 }
@@ -58,6 +59,7 @@ export interface ChannelViewProps {
   mySub: string;
   canPost: boolean;
   initialMessages: UiMessage[];
+  initialPinned?: UiMessage[];
   initialLedger: UiLedgerEntry[];
   directory: Record<string, DirEntry>;
   mentionables?: Mentionable[];
@@ -77,6 +79,24 @@ export function ChannelView(props: ChannelViewProps) {
   const [pending, setPending] = useState<UploadedDoc[]>([]);
   const [uploading, setUploading] = useState<string[]>([]);
   const [attErr, setAttErr] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<UiMessage[]>(props.initialPinned ?? []);
+  const [pinsOpen, setPinsOpen] = useState(true);
+
+  async function togglePin(m: UiMessage, next: boolean) {
+    try {
+      const r = await fetch(`/api/channels/${props.channelId}/pin`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messageId: m.id, pinned: next }),
+      });
+      if (!r.ok) return;
+      const { pinned: fresh } = (await r.json()) as { pinned: UiMessage[] };
+      setPinned(fresh);
+      setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, pinned: next } : x)));
+    } catch {
+      /* ignore — user can retry */
+    }
+  }
   const [sending, setSending] = useState(false);
   const [witnessFor, setWitnessFor] = useState<UiMessage | null>(null);
 
@@ -276,6 +296,8 @@ export function ChannelView(props: ChannelViewProps) {
     }
   }
 
+  const pinnedIds = new Set(pinned.map((p) => p.id));
+
   return (
     <div className={styles.wrap}>
       <div className={styles.main}>
@@ -288,6 +310,30 @@ export function ChannelView(props: ChannelViewProps) {
           </div>
           <SurfBadge variant="e2e">Encrypted</SurfBadge>
         </header>
+
+        {pinned.length > 0 && (
+          <div className={styles.pinnedBar}>
+            <button className={styles.pinnedHead} onClick={() => setPinsOpen((v) => !v)} aria-expanded={pinsOpen}>
+              <Icon name="anchor" size={13} /> {pinned.length} pinned
+              <Icon name={pinsOpen ? "chevD" : "chevR"} size={12} />
+            </button>
+            {pinsOpen && (
+              <div className={styles.pinnedList}>
+                {pinned.map((p) => (
+                  <div key={p.id} className={styles.pinnedItem}>
+                    <Avatar name={p.fromAgent ? "@calendar" : nameOf(p.authorSub)} size="sm" isAgent={p.fromAgent} />
+                    <span className={styles.pinnedText}>{p.body.length > 220 ? p.body.slice(0, 220) + "…" : p.body}</span>
+                    {props.canPost && (
+                      <button className={styles.pinX} title="Unpin" onClick={() => togglePin(p, false)}>
+                        <Icon name="x" size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className={styles.stream} ref={streamRef}>
           {messages.length === 0 && (
@@ -327,9 +373,14 @@ export function ChannelView(props: ChannelViewProps) {
                   )}
                 </div>
                 {props.canPost && (
-                  <button className={styles.witnessBtn} title="Witness this" onClick={() => setWitnessFor(m)}>
-                    <Icon name="check" size={14} />
-                  </button>
+                  <div className={styles.msgActions}>
+                    <button className={styles.witnessBtn} title={pinnedIds.has(m.id) ? "Unpin" : "Pin to channel"} onClick={() => togglePin(m, !pinnedIds.has(m.id))}>
+                      <Icon name="anchor" size={14} />
+                    </button>
+                    <button className={styles.witnessBtn} title="Witness this" onClick={() => setWitnessFor(m)}>
+                      <Icon name="check" size={14} />
+                    </button>
+                  </div>
                 )}
               </div>
             );

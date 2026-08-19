@@ -3,7 +3,7 @@ import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
 import { channelById, isChannelMember } from "@/lib/domain/channels";
-import { listMessages } from "@/lib/domain/messages";
+import { listMessages, listPinnedMessages } from "@/lib/domain/messages";
 import { listLedger } from "@/lib/witness/ledger";
 import { directory } from "@/lib/domain/members";
 import { listAgents } from "@/lib/domain/agents";
@@ -35,12 +35,24 @@ export default async function ChannelPage({
   const channel = await channelById(ws.id, channelId);
   if (!channel || !(await isChannelMember(channelId, sub))) notFound();
 
-  const [messages, ledger, dir, agents] = await Promise.all([
+  const [messages, pinned, ledger, dir, agents] = await Promise.all([
     listMessages(ws.id, channelId, { limit: 200 }),
+    listPinnedMessages(ws.id, channelId),
     listLedger(ws.id, channelId),
     directory(ws.id),
     listAgents(ws.id),
   ]);
+  const toUi = (m: (typeof messages)[number]) => ({
+    id: m.id,
+    authorSub: m.authorSub,
+    fromAgent: m.fromAgent,
+    body: m.body,
+    seq: m.seq,
+    onBehalfOf: m.onBehalfOf,
+    pinned: m.pinned,
+    attachments: m.attachments,
+    createdAt: m.createdAt,
+  });
 
   // MEN-0: @-mention index = human members + enabled agents. Agents post when @-pinged.
   const mentionables: Mentionable[] = [
@@ -61,16 +73,8 @@ export default async function ChannelPage({
       topic={channel.topic}
       mySub={sub}
       canPost={can(ctx.role, Capability.PostMessage)}
-      initialMessages={messages.map((m) => ({
-        id: m.id,
-        authorSub: m.authorSub,
-        fromAgent: m.fromAgent,
-        body: m.body,
-        seq: m.seq,
-        onBehalfOf: m.onBehalfOf,
-        attachments: m.attachments,
-        createdAt: m.createdAt,
-      }))}
+      initialMessages={messages.map(toUi)}
+      initialPinned={pinned.map(toUi)}
       initialLedger={ledger.map((e) => ({
         id: e.id,
         kind: e.kind,

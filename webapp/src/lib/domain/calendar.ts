@@ -16,6 +16,7 @@ import { calendarEvents, eventAttendees, eventReminders, members, workspaces, no
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { sendCalendarEmail } from "@/lib/email/send";
 import { emitNotify, toNotificationEvent } from "@/lib/realtime/notify-events";
+import { sendMessage, setMessagePinned, listPinnedMessages } from "./messages";
 
 export type RaciRole = "R" | "A" | "C" | "I";
 export type EventKind = "meeting" | "deadline" | "focus" | "external";
@@ -533,6 +534,41 @@ export async function upsertTaskDeadline(args: {
     projectId: args.projectId,
     attendees: args.attendees,
   });
+}
+
+/** Render an upcoming-events digest (plain text) — meetings + red-flagged deadlines,
+ *  each shown in its own event timezone. */
+function renderSummary(events: CalendarEvent[], days: number): string {
+  if (events.length === 0) return `📅 Upcoming — next ${days} days\n\nNothing scheduled. 🎉`;
+  const lines = [`📅 Upcoming — next ${days} days`, ""];
+  for (const e of events) {
+    const tz = e.timezone || "UTC";
+    const day = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric" }).format(new Date(e.startsAt));
+    const when = e.allDay
+      ? day
+      : `${day} ${new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(e.startsAt))}`;
+    const mark = e.kind === "deadline" ? "🔴" : "•";
+    lines.push(`${mark} ${when} — ${e.title}`);
+  }
+  lines.push("", "— @calendar (this pin updates automatically)");
+  return lines.join("\n");
+}
+
+/**
+ * Post (and pin) an upcoming-events summary from @calendar into a channel. Replaces any
+ * prior pinned summary the same agent posted in the channel, so there's always exactly
+ * one live pin. Used by the calendar.pin_summary agent tool.
+ */
+export async function postAndPinCalendarSummary(workspaceId: string, channelId: string, agentSub: string, days = 7): Promise<{ messageId: string; events: number }> {
+  const now = new Date();
+  const to = new Date(now.getTime() + days * 86400_000);
+  const events = await listWorkspaceEventsInRange(workspaceId, now.toISOString(), to.toISOString());
+  const msg = await sendMessage({ workspaceId, channelId, authorSub: agentSub, body: renderSummary(events, days), fromAgent: true });
+  // retire the agent's previous summary pin(s) in this channel, then pin the fresh one
+  const pinned = await listPinnedMessages(workspaceId, channelId);
+  for (const p of pinned) if (p.authorSub === agentSub && p.id !== msg.id) await setMessagePinned(workspaceId, channelId, p.id, false);
+  await setMessagePinned(workspaceId, channelId, msg.id, true);
+  return { messageId: msg.id, events: events.length };
 }
 
 /** Set the caller's RSVP on an event. */

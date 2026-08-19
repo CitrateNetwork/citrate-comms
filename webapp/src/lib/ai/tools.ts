@@ -15,7 +15,7 @@ import { z } from "zod";
 import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
 import { dedupeWorkspaceCrm } from "@/lib/domain/crm-dedupe";
-import { listWorkspaceEventsInRange } from "@/lib/domain/calendar";
+import { listWorkspaceEventsInRange, postAndPinCalendarSummary } from "@/lib/domain/calendar";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
@@ -665,6 +665,20 @@ export function citrateCommsTools(ctx: ToolContext) {
         return { status: "pending_approval", approvalId, risk, message: "Cancellation queued for human approval." };
       },
     }),
+    "calendar.pin_summary": tool({
+      description:
+        "Post and PIN an 'upcoming meetings & deadlines' summary from @calendar into a channel, so the team's week " +
+        "stays visible at the top. Replaces any previous summary you pinned in that channel (one live pin). Deadlines " +
+        "are flagged. Default window is the next 7 days. Not queued — this posts immediately (an informational pin).",
+      inputSchema: z.object({
+        channelId: z.string().uuid(),
+        days: z.number().int().min(1).max(60).default(7),
+      }),
+      execute: audited("calendar.pin_summary", Capability.PostMessage, async (a: { channelId: string; days: number }) => {
+        const { messageId, events } = await postAndPinCalendarSummary(ctx.workspaceId, a.channelId, ctx.invokedBySub, a.days);
+        return { status: "posted", messageId, events, message: `Pinned an upcoming-events summary (${events} event(s), next ${a.days} days).` };
+      }),
+    }),
     "thread.summarize": tool({
       description:
         "Read a channel's recent messages so you can summarize them and extract action items. Returns the " +
@@ -877,4 +891,5 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "calendar.read",
   "calendar.schedule",
   "calendar.cancel",
+  "calendar.pin_summary",
 ];

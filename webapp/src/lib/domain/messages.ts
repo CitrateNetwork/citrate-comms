@@ -5,7 +5,7 @@
  * yields no plaintext. Each message gets a per-channel monotonic `seq` (the poll/SSE
  * cursor), assigned atomically inside the INSERT.
  */
-import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { messages, messageAttachments, documents } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
@@ -28,6 +28,7 @@ export interface MessageRow {
   threadId: string | null;
   parentId: string | null;
   onBehalfOf: string | null;
+  pinned: boolean;
   attachments: MessageAttachment[];
   createdAt: string;
 }
@@ -44,6 +45,7 @@ function decode(workspaceId: string, r: typeof messages.$inferSelect): MessageRo
     threadId: r.threadId,
     parentId: r.parentId,
     onBehalfOf: r.onBehalfOf,
+    pinned: r.pinned,
     attachments: [],
     createdAt: r.createdAt.toISOString(),
   };
@@ -143,4 +145,29 @@ export async function sendMessage(input: SendInput): Promise<MessageRow> {
     })
     .returning();
   return decode(input.workspaceId, row!);
+}
+
+// ── pinned messages ──────────────────────────────────────────────────────────
+
+/** Pin or unpin a message to its channel header. Returns the new pinned state. */
+export async function setMessagePinned(workspaceId: string, channelId: string, messageId: string, pinned: boolean): Promise<boolean> {
+  await db()
+    .update(messages)
+    .set({ pinned, pinnedAt: pinned ? new Date() : null })
+    .where(and(eq(messages.workspaceId, workspaceId), eq(messages.channelId, channelId), eq(messages.id, messageId)));
+  return pinned;
+}
+
+/** The channel's pinned messages (most-recently-pinned first), decoded with attachments. */
+export async function listPinnedMessages(workspaceId: string, channelId: string): Promise<MessageRow[]> {
+  const rows = await db()
+    .select()
+    .from(messages)
+    .where(and(eq(messages.workspaceId, workspaceId), eq(messages.channelId, channelId), eq(messages.pinned, true), ne(messages.state, "deleted")))
+    .orderBy(desc(messages.pinnedAt))
+    .limit(50);
+  const decoded = rows.map((r) => decode(workspaceId, r));
+  const att = await attachmentsForMessages(workspaceId, decoded.map((m) => m.id));
+  for (const m of decoded) m.attachments = att.get(m.id) ?? [];
+  return decoded;
 }

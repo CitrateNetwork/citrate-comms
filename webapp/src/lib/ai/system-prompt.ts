@@ -25,6 +25,7 @@ const TOOL_BLURB: Record<ToolName, string> = {
   "calendar.read": "read the team calendar in a date range — meetings, deadlines, focus blocks, and who's on them",
   "calendar.schedule": "propose a calendar event (meeting/deadline/focus) with attendees + RACI — attendees are notified + emailed on approval; HITL",
   "calendar.cancel": "propose cancelling a calendar event by id (attendees are notified) — HITL-approved",
+  "calendar.pin_summary": "post + PIN an 'upcoming meetings & deadlines' summary from @calendar into a channel (replaces the old pin) — keeps the team's week visible",
   "crm.delete": "delete an account/deal/contact by id (cleans its notes/fields/activity too) — HITL-approved",
   "crm.dedupe": "find and MERGE duplicate accounts/deals/contacts into one canonical each (keeps all children) — HITL-approved",
   "crm.write": "update fields on an EXISTING record (needs its recordId) — HITL-approved",

@@ -416,3 +416,60 @@
   0%, 80%, 100% { opacity: 0.2; }
   40% { opacity: 1; }
 }
+
+/* pinned messages */
+.pinnedBar {
+  border-bottom: 1px solid var(--border-1);
+  background: var(--paper-2);
+}
+.pinnedHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 16px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.pinnedList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 12px 8px;
+}
+.pinnedItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--paper-pure);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-1);
+}
+.pinnedText {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pinX {
+  border: none;
+  background: none;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.pinX:hover {
+  color: var(--danger);
+}
+.msgActions {
+  display: flex;
+  gap: 2px;
+}

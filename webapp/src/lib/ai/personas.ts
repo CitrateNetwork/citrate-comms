@@ -44,7 +44,8 @@ export type ToolName =
   | "crm.ingest"
   | "calendar.read"
   | "calendar.schedule"
-  | "calendar.cancel";
+  | "calendar.cancel"
+  | "calendar.pin_summary";
 
 /** Write/terminal tools that MUST pass the HITL approval gate before mutating. */
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -82,7 +83,7 @@ export const ALL_TOOL_NAMES: ToolName[] = [
   "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
   "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import", "crm.ingest",
-  "calendar.read", "calendar.schedule", "calendar.cancel",
+  "calendar.read", "calendar.schedule", "calendar.cancel", "calendar.pin_summary",
 ];
 
 export type SkillKey =
