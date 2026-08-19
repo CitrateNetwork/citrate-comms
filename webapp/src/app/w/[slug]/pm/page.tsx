@@ -36,6 +36,7 @@ export default async function PmPage({ params }: { params: Promise<{ slug: strin
         projectId: t.projectId,
         title: t.title,
         priority: t.priority,
+        due: t.due,
         assigneeSub: t.assigneeSub,
         assigneeName: t.assigneeSub ? dir[t.assigneeSub]?.displayName ?? null : null,
       }))}

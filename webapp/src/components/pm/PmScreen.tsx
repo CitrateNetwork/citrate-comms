@@ -12,6 +12,13 @@ import { Kanban, type KanbanColumn } from "@/components/board/Kanban";
 import type { TaskStatus } from "@/lib/domain/enums";
 import s from "@/components/common/screen.module.css";
 
+/** ISO → value for <input type="datetime-local"> in the browser's local time ("" if none). */
+function dueToLocalInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
 export interface UiProject {
   id: string;
   name: string;
@@ -22,6 +29,7 @@ export interface UiTask {
   projectId: string | null;
   title: string;
   priority: string | null;
+  due: string | null; // ISO; mirrored to a red calendar deadline
   assigneeSub: string | null;
   assigneeName: string | null;
 }
@@ -255,18 +263,20 @@ function TaskEditDialog({
   task: UiTask;
   members: UiMember[];
   onClose: () => void;
-  onSaved: (patch: { title: string; priority: string | null; assigneeSub: string | null; assigneeName: string | null }) => void;
+  onSaved: (patch: { title: string; priority: string | null; assigneeSub: string | null; due: string | null; assigneeName: string | null }) => void;
 }) {
   const [title, setTitle] = useState(task.title);
   const [priority, setPriority] = useState<string>(task.priority ?? "");
   const [assigneeSub, setAssigneeSub] = useState<string>(task.assigneeSub ?? "");
+  const [due, setDue] = useState<string>(dueToLocalInput(task.due));
   const [busy, setBusy] = useState(false);
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim() || busy) return;
     setBusy(true);
-    const body = { title: title.trim(), priority: priority || null, assigneeSub: assigneeSub || null };
+    const dueISO = due ? new Date(due).toISOString() : null;
+    const body = { title: title.trim(), priority: priority || null, assigneeSub: assigneeSub || null, due: dueISO };
     const r = await fetch(`/api/workspaces/${workspaceId}/tasks/${task.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -306,6 +316,11 @@ function TaskEditDialog({
               ))}
             </select>
             <span className={s.fieldHint}>Assigning a member drops a task in their inbox.</span>
+          </label>
+          <label className={s.field}>
+            <span className={s.fieldLabel}>Deadline</span>
+            <input className={s.input} type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} />
+            <span className={s.fieldHint}>A deadline shows in red on the assignee&apos;s calendar and reminds them ahead of time.</span>
           </label>
           <div className={s.dialogFoot}>
             <Btn variant="quiet" type="button" onClick={onClose}>
@@ -397,8 +412,8 @@ function TaskDialog({
     });
     setBusy(false);
     if (r.ok) {
-      const { task } = (await r.json()) as { task: { id: string; projectId: string | null; title: string; priority: string | null } };
-      onCreated({ id: task.id, column: "Backlog", projectId: task.projectId, title: task.title, priority: task.priority, assigneeSub: null, assigneeName: null });
+      const { task } = (await r.json()) as { task: { id: string; projectId: string | null; title: string; priority: string | null; due?: string | null } };
+      onCreated({ id: task.id, column: "Backlog", projectId: task.projectId, title: task.title, priority: task.priority, due: task.due ?? null, assigneeSub: null, assigneeName: null });
     }
   }
   return (

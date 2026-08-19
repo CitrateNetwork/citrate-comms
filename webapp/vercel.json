@@ -4,6 +4,10 @@
     {
       "path": "/api/cron/import-tick",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

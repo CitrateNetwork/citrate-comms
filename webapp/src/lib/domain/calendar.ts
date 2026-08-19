@@ -10,7 +10,7 @@
  * @calendar agent's tools. External Google/Outlook sync (Phase 4) writes through the same
  * rows via the external_* columns.
  */
-import { and, asc, eq, gte, inArray, lte, ne, or } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { calendarEvents, eventAttendees, eventReminders, members, workspaces, notifications } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
@@ -399,6 +399,140 @@ export async function cancelEvent(workspaceId: string, eventId: string, actorSub
       "cancel",
     );
   }
+}
+
+/**
+ * Deliver all due, unsent reminders (the Vercel cron calls this). For each: an in-app
+ * notification (kind calendar_reminder) + a Resend email in the recipient's timezone,
+ * then mark it sent. Cancelled/missing events just mark the reminder sent (no send).
+ * Best-effort per row; one failure never blocks the rest.
+ */
+export async function runDueReminders(limit = 200): Promise<{ sent: number; skipped: number }> {
+  const now = new Date();
+  const due = await db()
+    .select({ id: eventReminders.id, eventId: eventReminders.eventId, sub: eventReminders.sub, workspaceId: eventReminders.workspaceId })
+    .from(eventReminders)
+    .where(and(lte(eventReminders.remindAt, now), isNull(eventReminders.sentAt)))
+    .orderBy(asc(eventReminders.remindAt))
+    .limit(limit);
+  if (due.length === 0) return { sent: 0, skipped: 0 };
+
+  const eventCache = new Map<string, CalendarEvent | null>();
+  const wsCache = new Map<string, { name: string; slug: string } | null>();
+  const memCache = new Map<string, { email: string | null; displayName: string | null; timezone: string | null } | null>();
+  const origin = (process.env.APP_ORIGIN || "https://communications.citrate.ai").replace(/\/$/, "");
+  let sent = 0;
+  let skipped = 0;
+
+  for (const r of due) {
+    try {
+      if (!eventCache.has(r.eventId)) eventCache.set(r.eventId, await getEvent(r.workspaceId, r.eventId));
+      const ev = eventCache.get(r.eventId) ?? null;
+      // mark sent regardless so a cancelled/gone event doesn't loop
+      await db().update(eventReminders).set({ sentAt: now }).where(eq(eventReminders.id, r.id));
+      if (!ev || ev.status === "cancelled" || new Date(ev.startsAt).getTime() < now.getTime() - 60_000) {
+        skipped++;
+        continue;
+      }
+      if (!wsCache.has(r.workspaceId)) {
+        const [ws] = await db().select({ name: workspaces.name, slug: workspaces.slug }).from(workspaces).where(eq(workspaces.id, r.workspaceId)).limit(1);
+        wsCache.set(r.workspaceId, ws ?? null);
+      }
+      const ws = wsCache.get(r.workspaceId);
+      const memKey = `${r.workspaceId}:${r.sub}`;
+      if (!memCache.has(memKey)) {
+        const [m] = await db().select({ email: members.email, displayName: members.displayName, timezone: members.timezone }).from(members).where(and(eq(members.workspaceId, r.workspaceId), eq(members.sub, r.sub))).limit(1);
+        memCache.set(memKey, m ?? null);
+      }
+      const m = memCache.get(memKey);
+      const tz = m?.timezone || ev.timezone || "UTC";
+      const link = ws?.slug ? `${origin}/w/${ws.slug}/calendar` : origin;
+      const raci = ev.attendees.find((a) => a.sub === r.sub)?.raciRole ?? null;
+
+      // in-app
+      const [n] = await db()
+        .insert(notifications)
+        .values({ workspaceId: r.workspaceId, recipientSub: r.sub, kind: "calendar_reminder", actorSub: ev.createdBySub, channelId: ev.channelId })
+        .returning({ id: notifications.id, createdAt: notifications.createdAt });
+      if (n) emitNotify(r.workspaceId, r.sub, toNotificationEvent({ id: n.id, kind: "calendar_reminder", actorName: null, channelId: ev.channelId, channelName: null, createdAt: n.createdAt.toISOString() }));
+
+      // email
+      if (m?.email) {
+        await sendCalendarEmail({
+          to: m.email,
+          kind: "reminder",
+          title: ev.title,
+          whenText: fmtWhenRange(ev.startsAt, ev.endsAt, tz, ev.allDay),
+          organizerName: "Citrate Calendar",
+          workspaceName: ws?.name ?? "your workspace",
+          location: ev.location,
+          notes: ev.description,
+          raciRole: raci,
+          link,
+        });
+      }
+      sent++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { sent, skipped };
+}
+
+/**
+ * Mirror a task's deadline to a RED calendar deadline event (linked by taskId), whose
+ * attendees carry RACI roles. Idempotent: creates on first sync (which notifies+emails
+ * the assignees), updates time/title + reconciles attendees on later syncs, and cancels
+ * the event if the task's due date is cleared. Called by pm.syncTaskDeadline.
+ */
+export async function upsertTaskDeadline(args: {
+  workspaceId: string;
+  taskId: string;
+  projectId: string | null;
+  title: string;
+  due: Date | null;
+  timezone: string;
+  attendees: { sub: string; raciRole: RaciRole | null }[];
+  createdBySub: string;
+}): Promise<void> {
+  const [existing] = await db()
+    .select({ id: calendarEvents.id })
+    .from(calendarEvents)
+    .where(and(eq(calendarEvents.workspaceId, args.workspaceId), eq(calendarEvents.taskId, args.taskId), eq(calendarEvents.kind, "deadline")))
+    .limit(1);
+
+  if (!args.due) {
+    if (existing) await cancelEvent(args.workspaceId, existing.id, args.createdBySub);
+    return;
+  }
+  const dueISO = args.due.toISOString();
+  const title = `Deadline: ${args.title}`;
+
+  if (existing) {
+    await updateEvent(args.workspaceId, existing.id, { title, startsAt: dueISO, endsAt: dueISO, allDay: true, timezone: args.timezone, status: "confirmed" });
+    // reconcile attendees (RACI may have changed); no re-notify on a silent update
+    await db().delete(eventAttendees).where(and(eq(eventAttendees.workspaceId, args.workspaceId), eq(eventAttendees.eventId, existing.id)));
+    const byName = new Map<string, RaciRole | null>();
+    for (const a of args.attendees) if (a.sub) byName.set(a.sub, a.raciRole ?? null);
+    const rows = [...byName.entries()].map(([sub, raciRole]) => ({ workspaceId: args.workspaceId, eventId: existing.id, sub, raciRole, response: "needsAction" as RsvpResponse }));
+    if (rows.length) await db().insert(eventAttendees).values(rows);
+    await scheduleReminders(args.workspaceId, existing.id, args.due, rows.map((r) => r.sub));
+    return;
+  }
+
+  await createEvent({
+    workspaceId: args.workspaceId,
+    createdBySub: args.createdBySub,
+    kind: "deadline",
+    title,
+    startsAt: dueISO,
+    endsAt: dueISO,
+    allDay: true,
+    timezone: args.timezone,
+    taskId: args.taskId,
+    projectId: args.projectId,
+    attendees: args.attendees,
+  });
 }
 
 /** Set the caller's RSVP on an event. */

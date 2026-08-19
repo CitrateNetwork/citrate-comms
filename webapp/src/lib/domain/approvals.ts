@@ -24,7 +24,7 @@ import { getMemoryStore, neonMemoryStore, type MemoryAnchor, type TrustTier } fr
 import { terminalExec, codeRun } from "@/lib/ai/runner";
 import { ingestDocument } from "./documents";
 import { witness, type WitnessKind } from "@/lib/witness/ledger";
-import { createTask } from "./pm";
+import { createTask, setTaskRaci } from "./pm";
 import { approveMapping, createImportJob, runImportSlice, flushHeldRows, type PreviewCounts } from "./import-engine";
 import type { CrmEntity, CrmNoteType } from "./crm-enums";
 
@@ -41,7 +41,7 @@ export type AgentAction =
   | { kind: "runner.code"; lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] }
   | { kind: "documents.write"; name: string; content: string; accountId?: string; dealId?: string; channelId?: string }
   | { kind: "ledger.write"; channelId: string; ledgerKind: WitnessKind; text: string; owner?: string; due?: string }
-  | { kind: "pm.write"; title: string; projectId?: string; priority?: "low" | "medium" | "high" }
+  | { kind: "pm.write"; title: string; projectId?: string; priority?: "low" | "medium" | "high"; assigneeSub?: string; due?: string; raci?: { sub: string; role: "R" | "A" | "C" | "I" }[] }
   | { kind: "crm.import"; sheetId: string; mappingId: string; sheetName: string; preview: PreviewCounts }
   | { kind: "crm.ingest_review"; jobId: string; sheetName: string; held: number }
   | { kind: "calendar.schedule"; title: string; eventKind: "meeting" | "deadline" | "focus"; startsAt: string; endsAt: string; timezone: string; location?: string; description?: string; attendees?: { sub: string; raciRole: "R" | "A" | "C" | "I" | null }[]; channelId?: string }
@@ -376,7 +376,16 @@ async function executeAction(
       return { ledgerId: entry.id };
     }
     case "pm.write": {
-      const task = await createTask({ workspaceId, projectId: action.projectId ?? null, title: action.title, priority: action.priority ?? null });
+      const task = await createTask({
+        workspaceId,
+        projectId: action.projectId ?? null,
+        title: action.title,
+        priority: action.priority ?? null,
+        assigneeSub: action.assigneeSub ?? null,
+        due: action.due ? new Date(action.due) : null,
+        actorSub: by.bySub,
+      });
+      if (action.raci?.length) await setTaskRaci(workspaceId, task.id, action.raci, by.bySub);
       return { taskId: task.id };
     }
     case "crm.import": {

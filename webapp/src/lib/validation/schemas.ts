@@ -70,10 +70,14 @@ export const createContactSchema = z.object({
 export const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
 });
+const raciAssignment = z.object({ sub: z.string().min(1).max(200), role: z.enum(["R", "A", "C", "I"]) });
 export const createTaskSchema = z.object({
   title: z.string().trim().min(1).max(200),
   projectId: z.string().uuid().optional(),
   priority: z.enum(["low", "medium", "high"]).optional(),
+  assigneeSub: z.string().max(200).optional(),
+  due: z.string().datetime({ offset: true }).nullable().optional(),
+  raci: z.array(raciAssignment).max(50).optional(),
 });
 export const moveTaskSchema = z.object({
   taskId: z.string().uuid(),
@@ -84,6 +88,9 @@ export const editTaskSchema = z.object({
   priority: z.enum(["low", "medium", "high"]).nullable().optional(),
   // A member's sub (assign), empty string / null (unassign).
   assigneeSub: z.string().max(200).nullable().optional(),
+  // Deadline (ISO) — mirrored to a red calendar deadline; null clears it.
+  due: z.string().datetime({ offset: true }).nullable().optional(),
+  raci: z.array(raciAssignment).max(50).optional(),
 });
 
 // --- Agents ---

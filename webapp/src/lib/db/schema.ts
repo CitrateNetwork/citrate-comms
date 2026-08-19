@@ -1154,3 +1154,17 @@ export const calendarConnections = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.sub, t.provider] })],
 );
+
+// RACI assignments per task (R=Responsible, A=Accountable, C=Consulted, I=Informed).
+// A task with a `due` date + RACI people is mirrored to a red `calendar_events` deadline
+// (linked by task_id) whose attendees carry these roles. See lib/domain/pm.syncTaskDeadline.
+export const taskRaci = pgTable(
+  "task_raci",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    taskId: uuid("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+    sub: text("sub").notNull(),
+    role: text("role").notNull(), // R|A|C|I
+  },
+  (t) => [primaryKey({ columns: [t.taskId, t.sub] }), index("task_raci_ws").on(t.workspaceId)],
+);

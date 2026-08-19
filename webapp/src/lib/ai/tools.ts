@@ -730,20 +730,26 @@ export function citrateCommsTools(ctx: ToolContext) {
       },
     }),
     "pm.write": tool({
-      description: "Propose creating a task on the board. HITL: queued for human approval.",
+      description:
+        "Propose creating a task on the board (HITL). Optionally set a `due` deadline (ISO) and `raci` " +
+        "assignments (R/A/C/I by member sub) — a task with a due date is calendared as a RED deadline for its " +
+        "RACI people (or its assignee), who are notified + emailed and reminded ahead of time.",
       inputSchema: z.object({
         title: z.string().min(1).max(200),
         projectId: z.string().uuid().optional(),
         priority: z.enum(["low", "medium", "high"]).optional(),
+        assigneeSub: z.string().max(200).optional(),
+        due: z.string().datetime({ offset: true }).optional().describe("deadline (ISO) — mirrored to a red calendar deadline"),
+        raci: z.array(z.object({ sub: z.string().min(1).max(200), role: z.enum(["R", "A", "C", "I"]) })).max(50).optional(),
       }),
-      execute: async (a: { title: string; projectId?: string; priority?: "low" | "medium" | "high" }) => {
+      execute: async (a: { title: string; projectId?: string; priority?: "low" | "medium" | "high"; assigneeSub?: string; due?: string; raci?: { sub: string; role: "R" | "A" | "C" | "I" }[] }) => {
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "pm.write",
           requestedBySub: ctx.invokedBySub,
           personaId: ctx.personaId,
           threadId: ctx.threadId,
-          action: { kind: "pm.write", title: a.title, projectId: a.projectId, priority: a.priority },
+          action: { kind: "pm.write", title: a.title, projectId: a.projectId, priority: a.priority, assigneeSub: a.assigneeSub, due: a.due, raci: a.raci },
         });
         return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
       },

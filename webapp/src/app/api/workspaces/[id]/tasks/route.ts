@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { createTaskSchema, moveTaskSchema } from "@/lib/validation/schemas";
-import { listTasks, createTask, moveTask } from "@/lib/domain/pm";
+import { listTasks, createTask, moveTask, setTaskRaci } from "@/lib/domain/pm";
 import { appendAudit } from "@/lib/audit/chain";
 
 export const runtime = "nodejs";
@@ -29,7 +29,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       projectId: parsed.data.projectId ?? null,
       title: parsed.data.title,
       priority: parsed.data.priority ?? null,
+      assigneeSub: parsed.data.assigneeSub ?? null,
+      due: parsed.data.due ? new Date(parsed.data.due) : null,
+      actorSub: ctx.sub,
     });
+    if (parsed.data.raci?.length) await setTaskRaci(id, task.id, parsed.data.raci, ctx.sub);
     await appendAudit({ workspaceId: id, actorSub: ctx.sub, event: "task_created", target: task.id });
     return NextResponse.json({ task }, { status: 201 });
   } catch (e) {
