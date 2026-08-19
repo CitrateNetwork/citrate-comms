@@ -66,6 +66,10 @@ export const members = pgTable(
     kycStatus: text("kyc_status"),
     isAgent: boolean("is_agent").notNull().default(false),
     devicesCount: integer("devices_count").notNull().default(0),
+    // IANA timezone (e.g. "America/Los_Angeles"), captured from the member's browser.
+    // Used for scheduling, reminder timing, and calendar/email rendering. NULL = unknown
+    // (the UI falls back to the viewer's live browser timezone).
+    timezone: text("timezone"),
     joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.sub] }), index("members_ws_role").on(t.workspaceId, t.role)],
@@ -1054,4 +1058,99 @@ export const importJobs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("import_jobs_ws_status").on(t.workspaceId, t.status)],
+);
+
+// ── Calendar (CAL-1) ─────────────────────────────────────────────────────────
+// A native, encrypted calendar. Times are stored as UTC (timestamptz) plus the IANA
+// `timezone` the event was authored in; the UI renders in the *viewer's* timezone.
+// Title/description/location are field-encrypted (*_enc); times/status/links stay
+// cleartext so ranges are queryable and sortable. External-sync columns are present
+// from day one so Google/Outlook two-way sync slots in without a schema change.
+export const calendarEvents = pgTable(
+  "calendar_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id),
+    kind: text("kind").notNull().default("meeting"), // meeting|deadline|focus|external
+    titleEnc: text("title_enc").notNull(), // AES-256-GCM per-workspace
+    descriptionEnc: text("description_enc"),
+    locationEnc: text("location_enc"),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+    allDay: boolean("all_day").notNull().default(false),
+    timezone: text("timezone").notNull().default("UTC"), // IANA tz the event was created in
+    status: text("status").notNull().default("confirmed"), // confirmed|tentative|cancelled
+    // Optional links: what this event is about (a deadline for a task, a deal close, etc.)
+    channelId: uuid("channel_id"), // where @calendar pins/announces it
+    projectId: uuid("project_id"),
+    taskId: uuid("task_id"),
+    dealId: uuid("deal_id"),
+    recurrence: text("recurrence"), // RRULE string (reserved; single events for now)
+    // External calendar sync (Google/Outlook). NULL until linked.
+    externalProvider: text("external_provider"), // google|microsoft
+    externalCalendarId: text("external_calendar_id"),
+    externalId: text("external_id"),
+    externalEtag: text("external_etag"),
+    externalUpdatedAt: timestamp("external_updated_at", { withTimezone: true }),
+    createdBySub: text("created_by_sub").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("calendar_events_ws_start").on(t.workspaceId, t.startsAt),
+    index("calendar_events_ws_task").on(t.workspaceId, t.taskId),
+    uniqueIndex("calendar_events_external").on(t.externalProvider, t.externalId),
+  ],
+);
+
+// Who's on an event, their RACI role (for deadlines/meetings), and their RSVP.
+export const eventAttendees = pgTable(
+  "event_attendees",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    eventId: uuid("event_id").notNull().references(() => calendarEvents.id, { onDelete: "cascade" }),
+    sub: text("sub").notNull(),
+    raciRole: text("raci_role"), // R|A|C|I (deadlines/RACI meetings); NULL = plain attendee
+    response: text("response").notNull().default("needsAction"), // needsAction|accepted|declined|tentative
+    notifiedAt: timestamp("notified_at", { withTimezone: true }), // booking email/notify sent
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.eventId, t.sub] }), index("event_attendees_ws_sub").on(t.workspaceId, t.sub)],
+);
+
+// Timed reminders (the reminders cron scans due, unsent rows). One per (event, recipient, offset).
+export const eventReminders = pgTable(
+  "event_reminders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    eventId: uuid("event_id").notNull().references(() => calendarEvents.id, { onDelete: "cascade" }),
+    sub: text("sub").notNull(),
+    remindAt: timestamp("remind_at", { withTimezone: true }).notNull(),
+    channel: text("channel").notNull().default("both"), // email|inapp|both
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+  },
+  (t) => [index("event_reminders_due").on(t.remindAt, t.sentAt), index("event_reminders_event").on(t.eventId)],
+);
+
+// Per-member OAuth connection to an external calendar provider. Tokens are field-
+// encrypted. One row per (workspace, member, provider). Drives Phase-4 two-way sync.
+export const calendarConnections = pgTable(
+  "calendar_connections",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    sub: text("sub").notNull(),
+    provider: text("provider").notNull(), // google|microsoft
+    accountEmailEnc: text("account_email_enc"), // external account address (PII) — encrypted at rest
+    accessTokenEnc: text("access_token_enc"),
+    refreshTokenEnc: text("refresh_token_enc"),
+    tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+    calendarId: text("calendar_id"), // the external calendar we sync to
+    syncToken: text("sync_token"), // provider incremental-sync cursor
+    channelExpiresAt: timestamp("channel_expires_at", { withTimezone: true }), // push-channel expiry
+    status: text("status").notNull().default("active"), // active|revoked|error
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.sub, t.provider] })],
 );

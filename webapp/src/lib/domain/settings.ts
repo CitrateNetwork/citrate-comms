@@ -55,3 +55,12 @@ export async function updateDisplayName(workspaceId: string, sub: string, displa
     .set({ displayName: displayName.trim() })
     .where(and(eq(members.workspaceId, workspaceId), eq(members.sub, sub)));
 }
+
+/** Persist the caller's IANA timezone (captured from their browser) for scheduling,
+ *  reminder timing, and calendar/email rendering. */
+export async function setMemberTimezone(workspaceId: string, sub: string, timezone: string): Promise<void> {
+  await db()
+    .update(members)
+    .set({ timezone })
+    .where(and(eq(members.workspaceId, workspaceId), eq(members.sub, sub)));
+}

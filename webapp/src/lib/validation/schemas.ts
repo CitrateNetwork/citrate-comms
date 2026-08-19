@@ -215,5 +215,41 @@ export const updateSettingsSchema = z.object({
     .optional(),
 });
 export const updateProfileSchema = z.object({
-  displayName: z.string().trim().min(1).max(60),
+  displayName: z.string().trim().min(1).max(60).optional(),
+  // IANA timezone id captured from the browser (e.g. "America/Los_Angeles").
+  timezone: z.string().trim().min(1).max(64).optional(),
 });
+
+// ── Calendar (CAL-1) ─────────────────────────────────────────────────────────
+const raciRole = z.enum(["R", "A", "C", "I"]);
+const attendeeInput = z.object({ sub: z.string().min(1).max(200), raciRole: raciRole.nullable().optional() });
+
+export const createEventSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(5000).nullable().optional(),
+  location: z.string().max(300).nullable().optional(),
+  startsAt: z.string().datetime({ offset: true }),
+  endsAt: z.string().datetime({ offset: true }),
+  allDay: z.boolean().optional(),
+  timezone: z.string().min(1).max(64),
+  kind: z.enum(["meeting", "deadline", "focus"]).optional(),
+  channelId: z.string().uuid().nullable().optional(),
+  projectId: z.string().uuid().nullable().optional(),
+  taskId: z.string().uuid().nullable().optional(),
+  dealId: z.string().uuid().nullable().optional(),
+  attendees: z.array(attendeeInput).max(200).optional(),
+  reminderOffsetsMin: z.array(z.number().int().min(0).max(43200)).max(6).optional(),
+});
+
+export const updateEventSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(5000).nullable().optional(),
+  location: z.string().max(300).nullable().optional(),
+  startsAt: z.string().datetime({ offset: true }).optional(),
+  endsAt: z.string().datetime({ offset: true }).optional(),
+  allDay: z.boolean().optional(),
+  timezone: z.string().min(1).max(64).optional(),
+  status: z.enum(["confirmed", "tentative", "cancelled"]).optional(),
+});
+
+export const rsvpSchema = z.object({ response: z.enum(["needsAction", "accepted", "declined", "tentative"]) });

@@ -41,6 +41,7 @@ const PATHS: Record<string, string> = {
   device: "M5 4h14v12H5zM9 20h6",
   globe: "M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18",
   clock: "M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z",
+  calendar: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4",
   wallet: "M4 7h16v11H4zM4 7l2-3h12l2 3M16 12h2",
   logout: "M14 4h5v16h-5M14 12H4M7 9l-3 3 3 3",
   user: "M12 3a4 4 0 100 8 4 4 0 000-8zM5 21v-1a7 7 0 0114 0v1",

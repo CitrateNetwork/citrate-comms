@@ -42,6 +42,7 @@ export interface ShellProps {
 const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: "crm", label: "CRM", icon: "crm" },
   { key: "pm", label: "Projects", icon: "projects" },
+  { key: "calendar", label: "Calendar", icon: "calendar" },
   { key: "agents", label: "Agents", icon: "agents" },
   { key: "approvals", label: "Approvals", icon: "bell" },
   { key: "members", label: "Members", icon: "user" },
