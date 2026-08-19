@@ -146,9 +146,14 @@ export async function mergeRecord(workspaceId: string, entity: CrmEntity, dupId:
  * Find + merge all duplicate accounts, deals, and contacts in a workspace. Deals are
  * deduped within their account. Returns counts; `dryRun` computes without writing.
  */
-export async function dedupeWorkspaceCrm(workspaceId: string, opts: { dryRun?: boolean; actorSub?: string } = {}): Promise<DedupeReport> {
+export async function dedupeWorkspaceCrm(workspaceId: string, opts: { dryRun?: boolean; actorSub?: string; maxMerges?: number } = {}): Promise<DedupeReport> {
   const dryRun = opts.dryRun ?? false;
   const actor = opts.actorSub ?? "system:dedupe";
+  // Per-call merge budget so a huge cleanup runs in resumable batches (each real merge is
+  // several queries; thousands in one request would exceed the serverless timeout). The
+  // caller loops until a run merges 0. Dry-run ignores the cap (it only counts).
+  const cap = !dryRun && opts.maxMerges && opts.maxMerges > 0 ? opts.maxMerges : Infinity;
+  let budget = cap;
   const report: DedupeReport = { accounts: { groups: 0, merged: 0 }, deals: { groups: 0, merged: 0 }, contacts: { groups: 0, merged: 0 }, dryRun };
 
   // ── accounts: canonical keyed by domain OR normalized name (transitive) ──
@@ -157,13 +162,17 @@ export async function dedupeWorkspaceCrm(workspaceId: string, opts: { dryRun?: b
     const canonBy = new Map<string, string>(); // key → canonical id
     const groupsSeen = new Set<string>();
     for (const a of accRows) {
+      if (budget <= 0) break;
       const kd = a.domain?.trim().toLowerCase() ? `d:${a.domain.trim().toLowerCase()}` : null;
       const kn = `n:${crmNormName(a.name)}`;
       const canon = (kd && canonBy.get(kd)) || canonBy.get(kn);
       if (canon) {
         groupsSeen.add(canon);
         report.accounts.merged++;
-        if (!dryRun) await mergeRecord(workspaceId, "account", a.id, canon, actor);
+        if (!dryRun) {
+          await mergeRecord(workspaceId, "account", a.id, canon, actor);
+          budget--;
+        }
         if (kd && !canonBy.has(kd)) canonBy.set(kd, canon);
       } else {
         if (kd) canonBy.set(kd, a.id);
@@ -179,12 +188,16 @@ export async function dedupeWorkspaceCrm(workspaceId: string, opts: { dryRun?: b
     const canonBy = new Map<string, string>();
     const groupsSeen = new Set<string>();
     for (const dl of dealRows) {
+      if (budget <= 0) break;
       const key = `${dl.accountId ?? ""}|${crmNormName(dl.name)}`;
       const canon = canonBy.get(key);
       if (canon) {
         groupsSeen.add(canon);
         report.deals.merged++;
-        if (!dryRun) await mergeRecord(workspaceId, "deal", dl.id, canon, actor);
+        if (!dryRun) {
+          await mergeRecord(workspaceId, "deal", dl.id, canon, actor);
+          budget--;
+        }
       } else {
         canonBy.set(key, dl.id);
       }
@@ -198,13 +211,17 @@ export async function dedupeWorkspaceCrm(workspaceId: string, opts: { dryRun?: b
     const canonBy = new Map<string, string>();
     const groupsSeen = new Set<string>();
     for (const c of ctRows) {
+      if (budget <= 0) break;
       const ke = c.emailKey ? `e:${c.emailKey}` : null;
       const kn = `n:${c.accountId ?? ""}|${crmNormName(c.name)}`;
       const canon = (ke && canonBy.get(ke)) || canonBy.get(kn);
       if (canon) {
         groupsSeen.add(canon);
         report.contacts.merged++;
-        if (!dryRun) await mergeRecord(workspaceId, "contact", c.id, canon, actor);
+        if (!dryRun) {
+          await mergeRecord(workspaceId, "contact", c.id, canon, actor);
+          budget--;
+        }
         if (ke && !canonBy.has(ke)) canonBy.set(ke, canon);
       } else {
         if (ke) canonBy.set(ke, c.id);
