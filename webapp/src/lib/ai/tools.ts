@@ -14,6 +14,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
+import { dedupeWorkspaceCrm } from "@/lib/domain/crm-dedupe";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
@@ -200,6 +201,56 @@ export function citrateCommsTools(ctx: ToolContext) {
           },
         });
         return { status: "pending_approval", approvalId, risk, message: "Queued for human approval." };
+      },
+    }),
+    "crm.delete": tool({
+      description:
+        "Propose DELETING a CRM record (account, deal, or contact) by id — queued for human approval. Deleting a " +
+        "record also removes its notes, custom field values, activity, and tags. Deleting an account re-parents " +
+        "nothing — delete or move its child deals/contacts first if you want to keep them. Use crm.dedupe to MERGE " +
+        "duplicates (keeps children); use crm.delete only to remove a record outright.",
+      inputSchema: z.object({
+        entity: entitySchema,
+        recordId: z.string().uuid(),
+      }),
+      execute: async (a: { entity: CrmEntity; recordId: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "crm.delete",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "crm.delete", entity: a.entity, recordId: a.recordId },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Deletion queued for human approval." };
+      },
+    }),
+    "crm.dedupe": tool({
+      description:
+        "Propose DE-DUPLICATING the whole CRM — finds duplicate accounts (same domain or name), deals (same name " +
+        "within an account), and contacts (same email or name+account) and MERGES each set into one canonical record, " +
+        "moving all notes/fields/activity/tags/links onto the survivor, then deleting the extras. Queued for human " +
+        "approval; call with no arguments. Use this to clean up after a messy import.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const preview = await dedupeWorkspaceCrm(ctx.workspaceId, { dryRun: true });
+        const total = preview.accounts.merged + preview.deals.merged + preview.contacts.merged;
+        if (total === 0) return { status: "noop", message: "No duplicate accounts, deals, or contacts found — nothing to merge." };
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "crm.dedupe",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "crm.dedupe" },
+        });
+        return {
+          status: "pending_approval",
+          approvalId,
+          risk,
+          preview,
+          message: `Queued for approval — would merge ${preview.accounts.merged} duplicate account(s), ${preview.deals.merged} deal(s), and ${preview.contacts.merged} contact(s).`,
+        };
       },
     }),
     "crm.write": tool({
@@ -703,6 +754,8 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "crm.read",
   "crm.write",
   "crm.create",
+  "crm.delete",
+  "crm.dedupe",
   "crm.note",
   "pm.read",
   "pm.write",

@@ -17,6 +17,8 @@ export type ToolName =
   | "crm.read"
   | "crm.write"
   | "crm.create"
+  | "crm.delete"
+  | "crm.dedupe"
   | "crm.note"
   | "pm.read"
   | "pm.write"
@@ -45,6 +47,8 @@ export type ToolName =
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "crm.write",
   "crm.create",
+  "crm.delete",
+  "crm.dedupe",
   "crm.note",
   "pm.write",
   "ledger.write",
@@ -69,7 +73,7 @@ export const RUNNER_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
  *  reads are RBAC + workspace-scoped, and the force-included guardrails apply regardless. The
  *  persona's MISSION + skills shape behavior; the tool list no longer restricts it. */
 export const ALL_TOOL_NAMES: ToolName[] = [
-  "crm.read", "crm.write", "crm.create", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
+  "crm.read", "crm.write", "crm.create", "crm.delete", "crm.dedupe", "crm.note", "pm.read", "pm.write", "ledger.write", "thread.summarize",
   "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
   "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import", "crm.ingest",

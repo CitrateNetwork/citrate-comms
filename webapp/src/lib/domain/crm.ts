@@ -3,7 +3,7 @@
  * (the locked decision: add-customer → add-deal-under-customer). The pipeline is a
  * kanban by stage. All workspace-scoped; mutations audited at the API layer.
  */
-import { and, eq, inArray, asc } from "drizzle-orm";
+import { and, eq, inArray, asc, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import {
   accounts,
@@ -329,6 +329,66 @@ export async function createContact(args: {
     .returning({ id: contacts.id, name: contacts.name, title: contacts.title, accountId: contacts.accountId, ownerSub: contacts.ownerSub });
   await recordActivity({ workspaceId: args.workspaceId, entity: "contact", recordId: row!.id, actorSub: args.ownerSub, input: { kind: "created" } });
   return row!;
+}
+
+// ── Dedupe-safe upserts (find-or-create) ────────────────────────────────────
+// Every create PATH must go through these so doubles never enter the CRM. Matching is
+// conservative: accounts by domain then normalized name; deals by account + normalized
+// name; contacts by email blind-index then normalized name + account.
+
+/** Normalize a name for dedupe matching: lowercase, collapse whitespace, drop trailing
+ *  punctuation. Conservative — catches "Acme Inc." vs "Acme  Inc" without over-merging. */
+export function crmNormName(s: string): string {
+  return s.toLowerCase().trim().replace(/\s+/g, " ").replace(/[.,;:]+$/, "");
+}
+
+/** Find an existing account by domain (preferred) or normalized name, else create one. */
+export async function upsertAccount(workspaceId: string, name: string, domain: string | null, ownerSub: string): Promise<{ row: AccountRow; created: boolean }> {
+  const dkey = domain?.trim().toLowerCase() || null;
+  const nkey = crmNormName(name || domain || "");
+  const rows = await db().select({ id: accounts.id, name: accounts.name, domain: accounts.domain, ownerSub: accounts.ownerSub }).from(accounts).where(eq(accounts.workspaceId, workspaceId));
+  if (dkey) {
+    const byDomain = rows.find((a) => a.domain && a.domain.trim().toLowerCase() === dkey);
+    if (byDomain) return { row: byDomain, created: false };
+  }
+  if (nkey) {
+    const byName = rows.find((a) => crmNormName(a.name) === nkey);
+    if (byName) return { row: byName, created: false };
+  }
+  const row = await createAccount(workspaceId, name || domain || "Untitled", domain, ownerSub);
+  return { row, created: true };
+}
+
+/** Find an existing deal on an account by normalized name, else create one. */
+export async function upsertDeal(args: { workspaceId: string; accountId: string; name: string; valueMinor: number; ownerSub: string }): Promise<{ row: DealRow; created: boolean }> {
+  const nkey = crmNormName(args.name);
+  const rows = await db().select({ id: deals.id }).from(deals).where(and(eq(deals.workspaceId, args.workspaceId), eq(deals.accountId, args.accountId), sql`lower(btrim(${deals.name})) = ${nkey}`)).limit(1);
+  if (rows[0]) {
+    const existing = await getDeal(args.workspaceId, rows[0].id);
+    if (existing) return { row: existing, created: false };
+  }
+  const row = await createDeal(args);
+  return { row, created: true };
+}
+
+/** Find an existing contact by email blind-index (preferred) or normalized name+account,
+ *  else create one. Returns the contact id. */
+export async function upsertContact(args: { workspaceId: string; name: string; title: string | null; accountId: string | null; ownerSub: string; email?: string | null }): Promise<{ id: string; created: boolean }> {
+  const email = args.email?.trim() || null;
+  if (email) {
+    const ekey = contactEmailKey(args.workspaceId, email);
+    const [byEmail] = await db().select({ id: contacts.id }).from(contacts).where(and(eq(contacts.workspaceId, args.workspaceId), eq(contacts.emailKey, ekey))).limit(1);
+    if (byEmail) return { id: byEmail.id, created: false };
+  }
+  const nkey = crmNormName(args.name);
+  const candidates = await db()
+    .select({ id: contacts.id, name: contacts.name, accountId: contacts.accountId })
+    .from(contacts)
+    .where(eq(contacts.workspaceId, args.workspaceId));
+  const match = candidates.find((c) => crmNormName(c.name) === nkey && (c.accountId ?? null) === (args.accountId ?? null));
+  if (match) return { id: match.id, created: false };
+  const row = await createContact(args);
+  return { id: row.id, created: true };
 }
 
 // ── Deletes (Owner/Admin only — auditability; CRM-depth sub-data cleaned up) ──

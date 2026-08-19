@@ -9,7 +9,7 @@
  */
 import { and, asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { importRows, importSheets, importJobs, importMappings, accounts, contacts } from "@/lib/db/schema";
+import { importRows, importSheets, importJobs, importMappings, accounts, contacts, deals } from "@/lib/db/schema";
 import { decryptField, blindIndex } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { createAccount, createContact, createDeal } from "./crm";
@@ -140,12 +140,14 @@ interface ExistingMaps {
   accByName: Map<string, string>;
   contactByEmailKey: Map<string, string>;
   contactByNameAcct: Map<string, string>;
+  dealByAcctName: Map<string, string>; // `${accountId}|${normName}` → deal id (dedupe deals)
 }
 
 async function loadExisting(workspaceId: string): Promise<ExistingMaps> {
   const accs = await db().select({ id: accounts.id, name: accounts.name, domain: accounts.domain }).from(accounts).where(eq(accounts.workspaceId, workspaceId));
   const cts = await db().select({ id: contacts.id, name: contacts.name, accountId: contacts.accountId, emailKey: contacts.emailKey }).from(contacts).where(eq(contacts.workspaceId, workspaceId));
-  const m: ExistingMaps = { accByDomain: new Map(), accByName: new Map(), contactByEmailKey: new Map(), contactByNameAcct: new Map() };
+  const dls = await db().select({ id: deals.id, name: deals.name, accountId: deals.accountId }).from(deals).where(eq(deals.workspaceId, workspaceId));
+  const m: ExistingMaps = { accByDomain: new Map(), accByName: new Map(), contactByEmailKey: new Map(), contactByNameAcct: new Map(), dealByAcctName: new Map() };
   for (const a of accs) {
     if (a.domain) m.accByDomain.set(a.domain.toLowerCase(), a.id);
     m.accByName.set(a.name.toLowerCase(), a.id);
@@ -154,7 +156,15 @@ async function loadExisting(workspaceId: string): Promise<ExistingMaps> {
     if (c.emailKey) m.contactByEmailKey.set(c.emailKey, c.id);
     m.contactByNameAcct.set(`${c.name.toLowerCase()}|${c.accountId ?? ""}`, c.id);
   }
+  for (const dl of dls) {
+    m.dealByAcctName.set(`${dl.accountId ?? ""}|${dealNorm(dl.name)}`, dl.id);
+  }
   return m;
+}
+
+/** Normalize a deal name for dedupe (mirrors crm.crmNormName). */
+function dealNorm(s: string): string {
+  return s.toLowerCase().trim().replace(/\s+/g, " ").replace(/[.,;:]+$/, "");
 }
 
 /** Real upserter — writes through to CRM + keeps dedupe maps warm within/across slices. */
@@ -201,7 +211,10 @@ function realUpserter(workspaceId: string, bySub: string, maps: ExistingMaps, sp
     },
     async createDealFor(name, valueMinor, accountId) {
       if (!accountId) return;
-      await createDeal({ workspaceId, accountId, name, valueMinor, ownerSub: bySub });
+      const key = `${accountId}|${dealNorm(name)}`;
+      if (maps.dealByAcctName.has(key)) return; // dedupe: this deal already exists on the account
+      const row = await createDeal({ workspaceId, accountId, name, valueMinor, ownerSub: bySub });
+      maps.dealByAcctName.set(key, row.id);
     },
     async createTaskFor(title, priority) {
       if (!taskProjectId) {
@@ -246,8 +259,12 @@ function dryUpserter(maps: ExistingMaps, spec: MappingSpec, counts: PreviewCount
       counts.newContacts++;
       return { id, created: true };
     },
-    async createDealFor(_name, _valueMinor, accountId) {
-      if (accountId) counts.newDeals++;
+    async createDealFor(name, _valueMinor, accountId) {
+      if (!accountId) return;
+      const key = `${accountId}|${dealNorm(name)}`;
+      if (maps.dealByAcctName.has(key)) return; // dedupe preview must match the real run
+      maps.dealByAcctName.set(key, `dry:deal:${key}`);
+      counts.newDeals++;
     },
     async createTaskFor() {
       counts.newTasks++;

@@ -21,7 +21,9 @@ import { SKILL_FRAGMENTS, type SkillKey, type ToolName } from "./personas";
 /** One-line capability blurbs for the tools a persona can use (layer 2). */
 const TOOL_BLURB: Record<ToolName, string> = {
   "crm.read": "read accounts, deals, and contacts incl. a record's full file (fields, notes, activity)",
-  "crm.create": "create a NEW account/deal/contact (no id needed; a deal needs its parent accountId) — HITL-approved",
+  "crm.create": "create a NEW account/deal/contact (no id needed; a deal needs its parent accountId) — deduped + HITL-approved",
+  "crm.delete": "delete an account/deal/contact by id (cleans its notes/fields/activity too) — HITL-approved",
+  "crm.dedupe": "find and MERGE duplicate accounts/deals/contacts into one canonical each (keeps all children) — HITL-approved",
   "crm.write": "update fields on an EXISTING record (needs its recordId) — HITL-approved",
   "crm.note": "add a note/journal/call/meeting entry to a record — HITL-approved",
   "pm.read": "read projects and tasks",
