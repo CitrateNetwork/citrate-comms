@@ -41,7 +41,10 @@ export type ToolName =
   | "tables.query"
   | "tables.map"
   | "crm.import"
-  | "crm.ingest";
+  | "crm.ingest"
+  | "calendar.read"
+  | "calendar.schedule"
+  | "calendar.cancel";
 
 /** Write/terminal tools that MUST pass the HITL approval gate before mutating. */
 export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -57,6 +60,8 @@ export const HITL_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "terminal.exec",
   "code.run",
   "crm.import",
+  "calendar.schedule",
+  "calendar.cancel",
 ]);
 
 /** Privileged tools delegated to the comms-agent-runner (not run inline in the BFF). */
@@ -77,6 +82,7 @@ export const ALL_TOOL_NAMES: ToolName[] = [
   "memory.recall", "memory.assert", "documents.read", "documents.write", "documents.list", "artifact.attach",
   "web.search", "web.fetch", "terminal.exec", "code.run", "chart.render",
   "tables.list", "tables.schema", "tables.read", "tables.query", "tables.map", "crm.import", "crm.ingest",
+  "calendar.read", "calendar.schedule", "calendar.cancel",
 ];
 
 export type SkillKey =
@@ -110,7 +116,7 @@ export interface PersonaTemplate {
   skills: SkillKey[];
 }
 
-export type PersonaKey = "executive-assistant" | "marketing-growth-engineer" | "data-scientist-notetaker";
+export type PersonaKey = "executive-assistant" | "marketing-growth-engineer" | "data-scientist-notetaker" | "calendar-coordinator";
 
 export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
   "executive-assistant": {
@@ -164,6 +170,26 @@ export const DEFAULT_PERSONAS: Record<PersonaKey, PersonaTemplate> = {
     temperature: 0.2,
     tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
     skills: ["two-plane-provenance", "trust-tiering", "reproducible-analysis"],
+  },
+  "calendar-coordinator": {
+    key: "calendar-coordinator",
+    name: "Calendar Coordinator",
+    baseTemplate: "calendar-coordinator",
+    mission:
+      "You are @calendar, the team's scheduling coordinator. You navigate and manage the team " +
+      "calendar: read what's scheduled, find open times, and — with approval — book meetings, " +
+      "reschedule, and cancel. You translate the team's work into the calendar: turn project/task " +
+      "deadlines and deal close dates into dated calendar entries (deadlines in red, assigned by " +
+      "RACI role), and keep people informed of what's coming. Always read the calendar (and the " +
+      "relevant CRM/project records) BEFORE proposing a change, state times clearly in the " +
+      "affected person's timezone, and let the human confirm anything that books or cancels. " +
+      "Everyone you put on an event is notified and emailed automatically.",
+    model: { gateway: "" }, // deployment default (fast)
+    preferFrontier: false,
+    maxSteps: 18,
+    temperature: 0.2,
+    tools: ALL_TOOL_NAMES, // all agents get every tool (HITL/RBAC/guardrails still gate each)
+    skills: ["commitment-tracking", "handoff-discipline"],
   },
 };
 

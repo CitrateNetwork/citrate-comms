@@ -22,6 +22,9 @@ import { SKILL_FRAGMENTS, type SkillKey, type ToolName } from "./personas";
 const TOOL_BLURB: Record<ToolName, string> = {
   "crm.read": "read accounts, deals, and contacts incl. a record's full file (fields, notes, activity)",
   "crm.create": "create a NEW account/deal/contact (no id needed; a deal needs its parent accountId) — deduped + HITL-approved",
+  "calendar.read": "read the team calendar in a date range — meetings, deadlines, focus blocks, and who's on them",
+  "calendar.schedule": "propose a calendar event (meeting/deadline/focus) with attendees + RACI — attendees are notified + emailed on approval; HITL",
+  "calendar.cancel": "propose cancelling a calendar event by id (attendees are notified) — HITL-approved",
   "crm.delete": "delete an account/deal/contact by id (cleans its notes/fields/activity too) — HITL-approved",
   "crm.dedupe": "find and MERGE duplicate accounts/deals/contacts into one canonical each (keeps all children) — HITL-approved",
   "crm.write": "update fields on an EXISTING record (needs its recordId) — HITL-approved",

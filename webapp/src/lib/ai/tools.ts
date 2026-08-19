@@ -15,6 +15,7 @@ import { z } from "zod";
 import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
 import { dedupeWorkspaceCrm } from "@/lib/domain/crm-dedupe";
+import { listWorkspaceEventsInRange } from "@/lib/domain/calendar";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
@@ -576,6 +577,94 @@ export function citrateCommsTools(ctx: ToolContext) {
         return { status: summary.held > 0 ? "partial_pending_review" : "done", ...summary };
       }),
     }),
+    "calendar.read": tool({
+      description:
+        "Read the team calendar in a date window. Returns events (meetings, deadlines, focus blocks) with their " +
+        "start/end (UTC ISO — convert to the relevant person's timezone when you talk about them), kind, location, " +
+        "and attendee subs. Use this to see what's scheduled, find open time, or check for conflicts BEFORE proposing " +
+        "a booking. Default window is the next 30 days.",
+      inputSchema: z.object({
+        fromISO: z.string().datetime({ offset: true }).optional().describe("window start (ISO); default: now"),
+        toISO: z.string().datetime({ offset: true }).optional().describe("window end (ISO); default: 30 days out"),
+      }),
+      execute: audited("calendar.read", Capability.ReadChannel, async (a: { fromISO?: string; toISO?: string }) => {
+        const now = new Date();
+        const from = a.fromISO ?? now.toISOString();
+        const to = a.toISO ?? new Date(now.getTime() + 30 * 86400_000).toISOString();
+        const events = await listWorkspaceEventsInRange(ctx.workspaceId, from, to);
+        return {
+          window: { from, to },
+          count: events.length,
+          events: events.slice(0, 200).map((e) => ({
+            id: e.id,
+            title: e.title,
+            kind: e.kind,
+            startsAt: e.startsAt,
+            endsAt: e.endsAt,
+            allDay: e.allDay,
+            timezone: e.timezone,
+            location: e.location,
+            attendees: e.attendees.map((at) => ({ sub: at.sub, raci: at.raciRole, rsvp: at.response })),
+          })),
+        };
+      }),
+    }),
+    "calendar.schedule": tool({
+      description:
+        "Propose scheduling a calendar event (queued for human approval). `kind`: meeting | deadline | focus " +
+        "(deadlines render in RED). Times are ISO with offset. Add `attendees` by their member `sub` (use crm.read/" +
+        "the roster to resolve people); for a deadline give each a RACI role (R/A/C/I). On approval, every attendee " +
+        "is notified in-app AND emailed in their own timezone. Read the calendar first to avoid conflicts.",
+      inputSchema: z.object({
+        title: z.string().min(1).max(200),
+        kind: z.enum(["meeting", "deadline", "focus"]).default("meeting"),
+        startsAt: z.string().datetime({ offset: true }),
+        endsAt: z.string().datetime({ offset: true }),
+        timezone: z.string().max(64).optional().describe("IANA tz the event is defined in (e.g. America/Los_Angeles)"),
+        location: z.string().max(300).optional(),
+        description: z.string().max(5000).optional(),
+        attendees: z.array(z.object({ sub: z.string().min(1).max(200), raciRole: z.enum(["R", "A", "C", "I"]).nullable().optional() })).max(100).optional(),
+        channelId: z.string().uuid().optional().describe("a channel to associate/announce the event in"),
+      }),
+      execute: async (a: { title: string; kind: "meeting" | "deadline" | "focus"; startsAt: string; endsAt: string; timezone?: string; location?: string; description?: string; attendees?: { sub: string; raciRole?: "R" | "A" | "C" | "I" | null }[]; channelId?: string }) => {
+        if (new Date(a.endsAt) < new Date(a.startsAt)) return { status: "error", message: "endsAt is before startsAt." };
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "calendar.schedule",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: {
+            kind: "calendar.schedule",
+            title: a.title,
+            eventKind: a.kind,
+            startsAt: a.startsAt,
+            endsAt: a.endsAt,
+            timezone: a.timezone ?? "UTC",
+            location: a.location,
+            description: a.description,
+            attendees: a.attendees?.map((x) => ({ sub: x.sub, raciRole: x.raciRole ?? null })),
+            channelId: a.channelId,
+          },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Event queued for human approval; attendees are emailed on approval." };
+      },
+    }),
+    "calendar.cancel": tool({
+      description: "Propose cancelling a calendar event by id (queued for human approval). Attendees are notified on approval.",
+      inputSchema: z.object({ eventId: z.string().uuid() }),
+      execute: async (a: { eventId: string }) => {
+        const { approvalId, risk } = await enqueueApproval({
+          workspaceId: ctx.workspaceId,
+          tool: "calendar.cancel",
+          requestedBySub: ctx.invokedBySub,
+          personaId: ctx.personaId,
+          threadId: ctx.threadId,
+          action: { kind: "calendar.cancel", eventId: a.eventId },
+        });
+        return { status: "pending_approval", approvalId, risk, message: "Cancellation queued for human approval." };
+      },
+    }),
     "thread.summarize": tool({
       description:
         "Read a channel's recent messages so you can summarize them and extract action items. Returns the " +
@@ -779,4 +868,7 @@ export const IMPLEMENTED_TOOLS: ToolName[] = [
   "tables.map",
   "crm.import",
   "crm.ingest",
+  "calendar.read",
+  "calendar.schedule",
+  "calendar.cancel",
 ];

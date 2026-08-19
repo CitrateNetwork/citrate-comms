@@ -18,6 +18,7 @@ import { addNote } from "./crm-notes";
 import { setFieldValue, listFieldDefs } from "./crm-fields";
 import { updateAccount, updateDeal, updateContact, upsertAccount, upsertDeal, upsertContact, deleteAccount, deleteDeal, deleteContact } from "./crm";
 import { dedupeWorkspaceCrm } from "./crm-dedupe";
+import { createEvent, cancelEvent } from "./calendar";
 import { recordActivity } from "./crm-activity";
 import { getMemoryStore, neonMemoryStore, type MemoryAnchor, type TrustTier } from "@/lib/memory";
 import { terminalExec, codeRun } from "@/lib/ai/runner";
@@ -42,7 +43,9 @@ export type AgentAction =
   | { kind: "ledger.write"; channelId: string; ledgerKind: WitnessKind; text: string; owner?: string; due?: string }
   | { kind: "pm.write"; title: string; projectId?: string; priority?: "low" | "medium" | "high" }
   | { kind: "crm.import"; sheetId: string; mappingId: string; sheetName: string; preview: PreviewCounts }
-  | { kind: "crm.ingest_review"; jobId: string; sheetName: string; held: number };
+  | { kind: "crm.ingest_review"; jobId: string; sheetName: string; held: number }
+  | { kind: "calendar.schedule"; title: string; eventKind: "meeting" | "deadline" | "focus"; startsAt: string; endsAt: string; timezone: string; location?: string; description?: string; attendees?: { sub: string; raciRole: "R" | "A" | "C" | "I" | null }[]; channelId?: string }
+  | { kind: "calendar.cancel"; eventId: string };
 
 export type Risk = "low" | "medium" | "high";
 
@@ -61,6 +64,8 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "pm.write": "low",
   "crm.import": "high",
   "crm.ingest_review": "high",
+  "calendar.schedule": "medium",
+  "calendar.cancel": "medium",
 };
 
 export interface EnqueueArgs {
@@ -148,6 +153,10 @@ function describe(action: AgentAction): string {
       return `Import “${action.sheetName}” → CRM: ${action.preview.created} new · ${action.preview.updated} updated · ${action.preview.held} held (${action.preview.rows} rows)`;
     case "crm.ingest_review":
       return `Review ${action.held} low-confidence record(s) extracted from “${action.sheetName}” — approve to write them to the CRM`;
+    case "calendar.schedule":
+      return `Schedule ${action.eventKind} “${truncate(action.title, 80)}”${action.attendees?.length ? ` with ${action.attendees.length} attendee(s)` : ""} — notifies + emails attendees`;
+    case "calendar.cancel":
+      return `Cancel calendar event (id ${action.eventId.slice(0, 8)}…) — notifies attendees`;
   }
 }
 function truncate(s: string, n = 140): string {
@@ -300,6 +309,26 @@ async function executeAction(
     case "crm.dedupe": {
       const report = await dedupeWorkspaceCrm(workspaceId, { actorSub: by.bySub });
       return { deduped: true, report };
+    }
+    case "calendar.schedule": {
+      const { id } = await createEvent({
+        workspaceId,
+        createdBySub: by.bySub,
+        kind: action.eventKind,
+        title: action.title,
+        startsAt: action.startsAt,
+        endsAt: action.endsAt,
+        timezone: action.timezone,
+        location: action.location ?? null,
+        description: action.description ?? null,
+        channelId: action.channelId ?? null,
+        attendees: action.attendees ?? [],
+      });
+      return { scheduled: true, eventId: id };
+    }
+    case "calendar.cancel": {
+      await cancelEvent(workspaceId, action.eventId, by.bySub);
+      return { cancelled: true, eventId: action.eventId };
     }
     case "memory.assert": {
       const input = {

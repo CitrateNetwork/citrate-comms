@@ -13,9 +13,10 @@ import {
 const ALL_TOOLS = ALL_TOOL_NAMES;
 
 describe("default personas", () => {
-  it("ships exactly the three org-default personas", () => {
-    expect(DEFAULT_PERSONA_LIST).toHaveLength(3);
+  it("ships exactly the four org-default personas", () => {
+    expect(DEFAULT_PERSONA_LIST).toHaveLength(4);
     expect(Object.keys(DEFAULT_PERSONAS).sort()).toEqual([
+      "calendar-coordinator",
       "data-scientist-notetaker",
       "executive-assistant",
       "marketing-growth-engineer",

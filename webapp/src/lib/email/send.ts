@@ -241,3 +241,74 @@ export async function sendInviteEmail(msg: InviteEmail): Promise<SendOutcome> {
     primaryLink: msg.link,
   });
 }
+
+export interface CalendarEmail {
+  to: string;
+  kind: "invite" | "update" | "cancel" | "reminder" | "deadline";
+  title: string;
+  whenText: string; // human, viewer/recipient-timezone-aware, e.g. "Mon, Aug 25 · 2:00–2:30 PM PDT"
+  organizerName: string;
+  workspaceName: string;
+  location?: string | null;
+  notes?: string | null;
+  raciRole?: "R" | "A" | "C" | "I" | null;
+  link: string; // deep link to the calendar / event
+}
+
+const CAL_VERB: Record<CalendarEmail["kind"], string> = {
+  invite: "invited you to",
+  update: "updated",
+  cancel: "cancelled",
+  reminder: "Reminder:",
+  deadline: "assigned you a deadline:",
+};
+const RACI_WORD: Record<"R" | "A" | "C" | "I", string> = { R: "Responsible", A: "Accountable", C: "Consulted", I: "Informed" };
+
+/** Send a calendar booking/deadline/reminder email. Suppression-checked + one-click unsubscribe. */
+export async function sendCalendarEmail(msg: CalendarEmail): Promise<SendOutcome> {
+  const isDeadline = msg.kind === "deadline";
+  const lead =
+    msg.kind === "reminder"
+      ? `Reminder — ${msg.title}`
+      : msg.kind === "cancel"
+        ? `${msg.organizerName} cancelled “${msg.title}”`
+        : isDeadline
+          ? `${msg.organizerName} assigned you a deadline: ${msg.title}`
+          : `${msg.organizerName} ${CAL_VERB[msg.kind]} ${msg.kind === "update" ? `“${msg.title}”` : `“${msg.title}”`}`;
+
+  const raciLine = msg.raciRole ? `Your role: ${RACI_WORD[msg.raciRole]} (${msg.raciRole})` : "";
+  const text = [
+    lead,
+    ``,
+    `When: ${msg.whenText}`,
+    msg.location ? `Where: ${msg.location}` : "",
+    raciLine,
+    msg.notes ? `\n${msg.notes}` : "",
+    ``,
+    `Open in ${msg.workspaceName}: ${msg.link}`,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+
+  const accent = isDeadline || msg.kind === "cancel" ? "#c2410c" : "#5a8205";
+  const htmlBody =
+    `<p style="font-size:15px;font-weight:600;color:#1f221d">${escapeHtml(lead)}</p>` +
+    `<table style="font-size:14px;color:#1f221d;border-collapse:collapse">` +
+    `<tr><td style="padding:2px 12px 2px 0;color:#84867f">When</td><td style="padding:2px 0"><strong>${escapeHtml(msg.whenText)}</strong></td></tr>` +
+    (msg.location ? `<tr><td style="padding:2px 12px 2px 0;color:#84867f">Where</td><td style="padding:2px 0">${escapeHtml(msg.location)}</td></tr>` : "") +
+    (msg.raciRole ? `<tr><td style="padding:2px 12px 2px 0;color:#84867f">Your role</td><td style="padding:2px 0"><strong style="color:${accent}">${RACI_WORD[msg.raciRole]} (${msg.raciRole})</strong></td></tr>` : "") +
+    `</table>` +
+    (msg.notes ? `<p style="font-size:13px;color:#4a4d46;margin-top:12px;white-space:pre-wrap">${escapeHtml(msg.notes)}</p>` : "") +
+    `<p style="margin:20px 0"><a href="${escapeHtml(msg.link)}" ` +
+    `style="display:inline-block;background:${accent};color:#fff;padding:12px 20px;border-radius:8px;` +
+    `text-decoration:none;font-weight:600">Open calendar</a></p>`;
+
+  const subjectPrefix = msg.kind === "cancel" ? "Cancelled: " : msg.kind === "reminder" ? "Reminder: " : isDeadline ? "Deadline: " : "";
+  return sendCompliant({
+    to: msg.to,
+    subject: `${subjectPrefix}${msg.title} — ${msg.workspaceName}`,
+    text,
+    htmlBody,
+    primaryLink: msg.link,
+  });
+}

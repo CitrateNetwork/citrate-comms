@@ -38,7 +38,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   try {
     const { id, eventId } = await params;
     const ctx = await requireCapability(req, id, Capability.CreateRecord);
-    await cancelEvent(ctx.workspaceId, eventId);
+    await cancelEvent(ctx.workspaceId, eventId, ctx.sub);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return errorResponse(e);
