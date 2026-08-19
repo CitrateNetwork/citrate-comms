@@ -149,6 +149,9 @@ export const channelMembers = pgTable(
     channelId: uuid("channel_id").notNull().references(() => channels.id),
     sub: text("sub").notNull(),
     addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+    // Read cursor: the highest message `seq` this member has seen in this channel.
+    // Unread = messages with seq > lastReadSeq (excluding the member's own). 0 = nothing read.
+    lastReadSeq: bigint("last_read_seq", { mode: "number" }).notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.channelId, t.sub] }), index("channel_members_ws").on(t.workspaceId)],
 );

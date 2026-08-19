@@ -12,6 +12,7 @@ import { ComposerAttach } from "@/components/attachments/ComposerAttach";
 import { Attachment } from "@/components/attachments/Attachment";
 import { uploadAttachment, type UploadedDoc } from "@/components/attachments/uploadAttachment";
 import { useFileDrop } from "@/components/attachments/useFileDrop";
+import { useFilePaste } from "@/components/attachments/useFilePaste";
 import type { Role } from "@/lib/rbac/matrix";
 import { type Mentionable, filterMentionables, parseMentions, toHandle } from "@/lib/mentions";
 import styles from "./ChannelView.module.css";
@@ -90,6 +91,7 @@ export function ChannelView(props: ChannelViewProps) {
     }
   }
   const { dragging, dropProps } = useFileDrop(uploadFiles);
+  const { onPaste: onComposerPaste } = useFilePaste(uploadFiles);
   const streamRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastSeq = useRef<number>(props.initialMessages.at(-1)?.seq ?? 0);
@@ -175,6 +177,28 @@ export function ChannelView(props: ChannelViewProps) {
 
   useEffect(scrollToEnd, [scrollToEnd]);
 
+  // Advance the server-side read cursor to what we've seen, so the rail's unread badges
+  // clear. Best-effort; monotonic server-side (never rewinds).
+  const markRead = useCallback(async () => {
+    const seq = lastSeq.current;
+    if (!seq) return;
+    try {
+      await fetch(`/api/channels/${props.channelId}/read`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq }),
+        keepalive: true,
+      });
+    } catch {
+      /* best-effort — a later mark-read catches up */
+    }
+  }, [props.channelId]);
+
+  // Mark read on open / channel switch (the initial load is already "seen").
+  useEffect(() => {
+    void markRead();
+  }, [markRead]);
+
   // Live poll for new messages after the last seq we hold.
   useEffect(() => {
     let alive = true;
@@ -189,6 +213,7 @@ export function ChannelView(props: ChannelViewProps) {
           lastSeq.current = fresh.at(-1)!.seq;
           setMessages((prev) => dedupe([...prev, ...fresh]));
           scrollToEnd();
+          void markRead(); // we're viewing — newly arrived messages are read
         }
       } catch {
         /* transient — next tick retries */
@@ -199,7 +224,7 @@ export function ChannelView(props: ChannelViewProps) {
       alive = false;
       clearInterval(h);
     };
-  }, [props.channelId, scrollToEnd]);
+  }, [props.channelId, scrollToEnd, markRead]);
 
   async function send() {
     const body = draft.trim();
@@ -366,6 +391,7 @@ export function ChannelView(props: ChannelViewProps) {
               className={styles.input}
               placeholder={`Message #${props.channelName} — @ to mention a teammate or agent`}
               value={draft}
+              onPaste={onComposerPaste}
               onChange={(e) => {
                 setDraft(e.target.value);
                 syncMention(e.target.value, e.target.selectionStart);

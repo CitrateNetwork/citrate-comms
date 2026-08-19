@@ -2,7 +2,7 @@ import { redirect, notFound } from "next/navigation";
 import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
-import { channelsForMember } from "@/lib/domain/channels";
+import { channelsForMember, unreadCounts } from "@/lib/domain/channels";
 import { countPendingApprovals } from "@/lib/domain/approvals";
 import { can, Capability } from "@/lib/rbac/matrix";
 import { AppShell, type SpaceLink } from "@/components/shell/AppShell";
@@ -32,7 +32,8 @@ export default async function WorkspaceLayout({
   if (!ctx) notFound(); // not a member — do not reveal the workspace
 
   const channels = await channelsForMember(ws.id, sub);
-  const spaces: SpaceLink[] = channels.map((c) => ({ id: c.id, name: c.name, kind: c.kind, hasAgent: c.hasAgent }));
+  const unread = await unreadCounts(ws.id, sub);
+  const spaces: SpaceLink[] = channels.map((c) => ({ id: c.id, name: c.name, kind: c.kind, hasAgent: c.hasAgent, unread: unread.get(c.id) || 0 }));
 
   const canApprove = can(ctx.role, Capability.CreateRecord);
   const approvalsCount = canApprove ? await countPendingApprovals(ws.id) : 0;

@@ -16,6 +16,7 @@ import { Avatar, Btn, Icon, SurfBadge } from "@/components/primitives";
 import { ComposerAttach } from "@/components/attachments/ComposerAttach";
 import { uploadAttachment, type UploadedDoc } from "@/components/attachments/uploadAttachment";
 import { useFileDrop } from "@/components/attachments/useFileDrop";
+import { useFilePaste } from "@/components/attachments/useFilePaste";
 import { Markdown } from "./Markdown";
 import styles from "./AgentChat.module.css";
 
@@ -230,6 +231,7 @@ export function AgentChat({
     }
   }
   const { dragging, dropProps } = useFileDrop(uploadFiles);
+  const { onPaste: onComposerPaste } = useFilePaste(uploadFiles);
 
   function submit() {
     const t = input.trim();
@@ -442,6 +444,7 @@ export function AgentChat({
           <textarea
             className={styles.textarea}
             value={input}
+            onPaste={onComposerPaste}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {

@@ -3,9 +3,9 @@
  * Listing is scoped to the caller's channel membership (Partner/Guest only see what
  * they're in; Owner/Admin/Member see workspace channels they belong to).
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { channels, channelMembers } from "@/lib/db/schema";
+import { channels, channelMembers, messages } from "@/lib/db/schema";
 import { appendAudit } from "@/lib/audit/chain";
 
 export interface ChannelRow {
@@ -132,4 +132,39 @@ export async function existingChannelMembers(channelId: string, subs: string[]):
     .from(channelMembers)
     .where(and(eq(channelMembers.channelId, channelId), inArray(channelMembers.sub, subs)));
   return new Set(rows.map((r) => r.sub));
+}
+
+// ── read state / unread counts ───────────────────────────────────────────────
+
+/** Advance a member's read cursor for a channel to `seq` (monotonic — never rewinds). */
+export async function markChannelRead(workspaceId: string, channelId: string, sub: string, seq: number): Promise<void> {
+  await db()
+    .update(channelMembers)
+    .set({ lastReadSeq: sql`GREATEST(${channelMembers.lastReadSeq}, ${seq})` })
+    .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId), eq(channelMembers.sub, sub)));
+}
+
+/**
+ * Unread message count per channel for a member, across all channels they belong to.
+ * Unread = live messages (not deleted) authored by someone else with seq beyond the
+ * member's read cursor. One query; channels with nothing unread come back as 0.
+ */
+export async function unreadCounts(workspaceId: string, sub: string): Promise<Map<string, number>> {
+  const rows = await db()
+    .select({ channelId: channelMembers.channelId, unread: sql<number>`count(${messages.id})::int` })
+    .from(channelMembers)
+    .leftJoin(
+      messages,
+      and(
+        eq(messages.channelId, channelMembers.channelId),
+        gt(messages.seq, channelMembers.lastReadSeq),
+        ne(messages.authorSub, sub),
+        ne(messages.state, "deleted"),
+      ),
+    )
+    .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.sub, sub)))
+    .groupBy(channelMembers.channelId);
+  const out = new Map<string, number>();
+  for (const r of rows) out.set(r.channelId, Number(r.unread) || 0);
+  return out;
 }

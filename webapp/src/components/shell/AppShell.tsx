@@ -69,6 +69,9 @@ export function AppShell({
   const base = `/w/${workspaceSlug}`;
   const channels = spaces.filter((s) => s.kind !== "dm");
   const dms = spaces.filter((s) => s.kind === "dm");
+  // Group badges show total UNREAD messages in each group (not the number of channels/DMs).
+  const channelsUnread = channels.reduce((n, s) => n + (s.unread ?? 0), 0);
+  const dmsUnread = dms.reduce((n, s) => n + (s.unread ?? 0), 0);
 
   const spaceLink = (s: SpaceLink) => (
     <Link
@@ -134,7 +137,7 @@ export function AppShell({
             <button className={styles.railGroupHead} onClick={() => setChOpen((v) => !v)} aria-expanded={chOpen}>
               <span className={styles.railCaret} aria-hidden="true">{chOpen ? "▾" : "▸"}</span>
               <span className={styles.railGroupName}>Channels</span>
-              <span className={styles.railGroupCount}>{channels.length}</span>
+              {channelsUnread > 0 ? <span className={styles.unread}>{channelsUnread}</span> : null}
             </button>
             {chOpen && (channels.length === 0 ? <div className={styles.railEmpty}>No channels yet</div> : channels.map(spaceLink))}
 
@@ -142,7 +145,7 @@ export function AppShell({
             <button className={styles.railGroupHead} onClick={() => setDmOpen((v) => !v)} aria-expanded={dmOpen}>
               <span className={styles.railCaret} aria-hidden="true">{dmOpen ? "▾" : "▸"}</span>
               <span className={styles.railGroupName}>Direct messages</span>
-              <span className={styles.railGroupCount}>{dms.length}</span>
+              {dmsUnread > 0 ? <span className={styles.unread}>{dmsUnread}</span> : null}
             </button>
             {dmOpen && (dms.length === 0 ? <div className={styles.railEmpty}>No direct messages</div> : dms.map(spaceLink))}
           </div>
