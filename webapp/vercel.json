@@ -3,11 +3,11 @@
   "crons": [
     {
       "path": "/api/cron/import-tick",
-      "schedule": "*/2 * * * *"
+      "schedule": "*/15 * * * *"
     },
     {
       "path": "/api/cron/reminders",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/15 * * * *"
     }
   ]
 }
