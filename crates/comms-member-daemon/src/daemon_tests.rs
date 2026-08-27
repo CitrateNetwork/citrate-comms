@@ -40,7 +40,6 @@ fn owner_adds_a_member_who_sends_a_message_the_owner_decrypts() {
     // Bob joins from the welcome material and sends an encrypted message to the group.
     let mut bob_g = bob_m
         .join(&add.welcome, &add.ratchet_tree)
-        .map(|g| g)
         .expect("bob joins");
     let ct = bob_g.send(&bob_m, b"hello owner").expect("bob encrypts");
     let owner_addr = owner.owner();
