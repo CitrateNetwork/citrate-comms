@@ -17,6 +17,7 @@ members = [
     "crates/comms-relay",
     "crates/comms-session",
     "crates/comms-agent-bridge",
+    "crates/comms-member-daemon",
     "crates/comms-client",
     "crates/comms-client-proof",
     "crates/comms-release",
