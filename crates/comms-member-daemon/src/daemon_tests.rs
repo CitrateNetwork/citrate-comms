@@ -69,6 +69,50 @@ fn owner_adds_a_member_who_sends_a_message_the_owner_decrypts() {
 }
 
 #[test]
+fn roster_reflects_add_assign_role_and_offboard() {
+    let domain = "relay.test";
+    let mut owner = MemberDaemon::new(EthWallet::generate(), domain, 1000).expect("owner up");
+    let gid = owner.create_group("deals").expect("create");
+
+    // Fresh group: just the owner, as Owner.
+    let r = owner.roster(gid).expect("roster");
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].0, owner.owner());
+    assert_eq!(r[0].1, Role::Owner);
+
+    // Add bob (a real member).
+    let bob_w = EthWallet::generate();
+    let bob_m = MlsMember::new(&bob_w.address().0).expect("bob mls");
+    {
+        let relay = owner.relay_mut();
+        login(relay, &bob_w, domain, 2000).expect("bob login");
+        publish_kp(relay, &bob_w, &bob_m, domain, 2001).expect("bob kp");
+    }
+    owner.add_member(gid, bob_w.address()).expect("add bob");
+    let r = owner.roster(gid).expect("roster");
+    assert_eq!(r.len(), 2);
+    assert!(r.iter().any(|(a, role)| *a == bob_w.address() && *role == Role::Member));
+
+    // Promote bob to Admin — a real owner-signed RoleAssertion.
+    let assertion = owner
+        .assign_role(gid, bob_w.address(), Role::Admin)
+        .expect("assign");
+    assert_eq!(assertion.subject, bob_w.address());
+    assert_eq!(assertion.role, Role::Admin);
+    assert!(owner
+        .roster(gid)
+        .unwrap()
+        .iter()
+        .any(|(a, role)| *a == bob_w.address() && *role == Role::Admin));
+
+    // Offboard bob — real MLS remove + relay atomic offboard; roster returns to just the owner.
+    owner.offboard(gid, bob_w.address()).expect("offboard");
+    let r = owner.roster(gid).expect("roster");
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].0, owner.owner());
+}
+
+#[test]
 fn add_member_without_a_published_key_package_is_an_honest_error() {
     let mut owner = MemberDaemon::new(EthWallet::generate(), "relay.test", 1000).expect("owner up");
     let gid = owner.create_group("deals").expect("create");

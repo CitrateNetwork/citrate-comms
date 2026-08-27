@@ -72,6 +72,18 @@ fn authenticated_client_creates_and_lists_a_group() {
         other => panic!("expected Groups, got {other:?}"),
     }
 
+    // roster the new group over the socket → just the owner, as "owner".
+    line.clear();
+    writeln!(writer, "{{\"op\":\"roster\",\"group\":\"{gid}\"}}").unwrap();
+    reader.read_line(&mut line).unwrap();
+    match serde_json::from_str::<Response>(line.trim()).unwrap() {
+        Response::Roster { members } => {
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0].role, "owner");
+        }
+        other => panic!("expected Roster, got {other:?}"),
+    }
+
     // a malformed group id is an honest Error, never a panic.
     line.clear();
     writeln!(writer, "{{\"op\":\"send\",\"group\":\"nothex\",\"text\":\"hi\"}}").unwrap();
