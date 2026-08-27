@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use comms_core::identity::EthWallet;
+use comms_member_daemon::relay::{Relay, WsRelay};
 use comms_member_daemon::{server, MemberDaemon};
 
 fn required(key: &str) -> Result<String, String> {
@@ -47,7 +48,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(1);
 
-    let daemon = MemberDaemon::new(wallet, domain, now)?;
+    // Relay transport: a shared networked relay (CITRATE_MEMBER_RELAY_URL, ws://|wss://) for
+    // cross-node groups, else a local in-process relay (single node).
+    let daemon = match env::var("CITRATE_MEMBER_RELAY_URL").ok().filter(|u| !u.is_empty()) {
+        Some(url) => {
+            let ws: Box<dyn Relay> = Box::new(WsRelay::connect(&url).map_err(|e| format!("relay {url}: {e}"))?);
+            MemberDaemon::new_with_relay(wallet, ws, domain, now)?
+        }
+        None => MemberDaemon::new(wallet, domain, now)?,
+    };
     eprintln!(
         "comms-member-daemon: owner {} serving on {}",
         hex::encode(daemon.owner().0),
