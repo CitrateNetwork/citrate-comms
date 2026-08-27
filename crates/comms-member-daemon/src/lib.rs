@@ -16,8 +16,10 @@
 
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::{GroupHandle, MlsMember};
+use comms_core::rbac;
 use comms_proto::{
-    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, WalletAddress, CITRATE_CHAIN_ID,
+    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role, RoleAssertion,
+    WalletAddress, CITRATE_CHAIN_ID,
 };
 use comms_relay::DeliveryService;
 
@@ -35,8 +37,22 @@ pub enum DaemonError {
     NoGroup(String),
     #[error("no key package published for {0}")]
     NoKeyPackage(String),
+    #[error("not a member of this group: {0}")]
+    NoMember(String),
+    #[error("rbac error: {0}")]
+    Rbac(String),
     #[error("invalid utf-8 in a decrypted message")]
     BadUtf8,
+}
+
+/// A member of a group as the daemon tracks it: the wallet, the MLS signature pubkey (to map to a
+/// leaf for removal), and the current role.
+#[derive(Debug, Clone)]
+struct MemberInfo {
+    wallet: WalletAddress,
+    /// The member's OpenMLS signature public key (from their published key package).
+    sig_pubkey: Vec<u8>,
+    role: Role,
 }
 
 /// The welcome material a newly-added member needs to join (returned so a joiner — cross-process in
@@ -64,7 +80,18 @@ struct GroupState {
     /// Current epoch (bumped on each membership commit).
     epoch: u64,
     /// Members including the owner (recipients derive from this).
-    members: Vec<WalletAddress>,
+    members: Vec<MemberInfo>,
+}
+
+impl GroupState {
+    /// The delivery recipients for a message sent by `sender` (everyone but the sender).
+    fn recipients(&self, sender: WalletAddress) -> Vec<WalletAddress> {
+        self.members
+            .iter()
+            .map(|m| m.wallet)
+            .filter(|a| *a != sender)
+            .collect()
+    }
 }
 
 /// The member daemon: the owner's wallet + MLS identity, the in-process relay, and the owner's
@@ -127,7 +154,11 @@ impl MemberDaemon {
             name: name.into(),
             handle,
             epoch: 0,
-            members: vec![self.wallet.address()],
+            members: vec![MemberInfo {
+                wallet: self.wallet.address(),
+                sig_pubkey: self.mls.sig_pubkey(),
+                role: Role::Owner,
+            }],
         });
         Ok(gid)
     }
@@ -157,12 +188,8 @@ impl MemberDaemon {
             .position(|g| g.id == gid)
             .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
         // Snapshot the recipients (existing members, minus the owner-sender) BEFORE the mutation.
-        let commit_recipients: Vec<WalletAddress> = self.groups[gi]
-            .members
-            .iter()
-            .copied()
-            .filter(|a| *a != owner)
-            .collect();
+        let commit_recipients = self.groups[gi].recipients(owner);
+        let member_sig = kp.mls_sig_pubkey.clone();
         // Disjoint field borrows: self.mls (immutable) + self.groups[gi] (mutable).
         let (commit, welcome, ratchet_tree, epoch) = {
             let mls = &self.mls;
@@ -172,7 +199,11 @@ impl MemberDaemon {
                 .add(mls, &kp.key_package)
                 .map_err(|e| DaemonError::Mls(e.to_string()))?;
             g.epoch += 1;
-            g.members.push(member);
+            g.members.push(MemberInfo {
+                wallet: member,
+                sig_pubkey: member_sig,
+                role: Role::Member,
+            });
             (out.commit, out.welcome, out.ratchet_tree, g.epoch)
         };
         // Deliver the commit to existing members, then onboard the joiner (welcome + tree).
@@ -210,8 +241,7 @@ impl MemberDaemon {
                 .handle
                 .send(mls, text.as_bytes())
                 .map_err(|e| DaemonError::Mls(e.to_string()))?;
-            let recipients: Vec<WalletAddress> =
-                g.members.iter().copied().filter(|a| *a != owner).collect();
+            let recipients = g.recipients(owner);
             (ct, g.epoch, recipients)
         };
         self.relay
@@ -258,6 +288,100 @@ impl MemberDaemon {
             });
         }
         Ok(out)
+    }
+
+    /// The group roster: `(wallet, role)` for every current member (owner first).
+    pub fn roster(&self, gid: GroupId) -> Result<Vec<(WalletAddress, Role)>, DaemonError> {
+        let g = self
+            .groups
+            .iter()
+            .find(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        Ok(g.members.iter().map(|m| (m.wallet, m.role)).collect())
+    }
+
+    /// Grant/change `member`'s role in `gid`, signed by the owner. Returns the owner-signed
+    /// [`RoleAssertion`] (the relay + clients enforce it) and updates the local roster. Refuses if
+    /// the owner may not grant that role (e.g. transferring ownership).
+    pub fn assign_role(
+        &mut self,
+        gid: GroupId,
+        member: WalletAddress,
+        role: Role,
+    ) -> Result<RoleAssertion, DaemonError> {
+        let assertion =
+            rbac::sign_role_assertion(&self.wallet, Role::Owner, member, role, Some(gid), None)
+                .map_err(|e| DaemonError::Rbac(format!("{e:?}")))?;
+        let g = self
+            .groups
+            .iter_mut()
+            .find(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        let mi = g
+            .members
+            .iter_mut()
+            .find(|m| m.wallet == member)
+            .ok_or_else(|| DaemonError::NoMember(hex::encode(member.0)))?;
+        mi.role = role;
+        Ok(assertion)
+    }
+
+    /// Offboard `member` from `gid`: a real MLS Remove commit (rotates the group secret) + the
+    /// relay-side atomic offboard (drops the roster + refreshes the tree in one epoch, so the
+    /// removed member cannot decrypt anything from the new epoch forward). The owner is the relay's
+    /// trust anchor, so no admin assertion is needed.
+    pub fn offboard(&mut self, gid: GroupId, member: WalletAddress) -> Result<(), DaemonError> {
+        let owner = self.wallet.address();
+        let now = self.tick();
+        let gi = self
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        // Map the member's wallet → their MLS leaf via the tracked signature key.
+        let sig = self.groups[gi]
+            .members
+            .iter()
+            .find(|m| m.wallet == member)
+            .map(|m| m.sig_pubkey.clone())
+            .ok_or_else(|| DaemonError::NoMember(hex::encode(member.0)))?;
+        let (remove_commit, ratchet_tree, epoch) = {
+            let mls = &self.mls;
+            let g = &mut self.groups[gi];
+            let leaf = g.handle.member_index_by_sig(&sig).ok_or_else(|| {
+                DaemonError::NoMember(format!("no MLS leaf for {}", hex::encode(member.0)))
+            })?;
+            let out = g
+                .handle
+                .remove(mls, leaf)
+                .map_err(|e| DaemonError::Mls(e.to_string()))?;
+            g.epoch += 1;
+            g.members.retain(|m| m.wallet != member);
+            (out.commit, out.ratchet_tree, g.epoch)
+        };
+        let remaining = self.groups[gi].recipients(owner);
+        self.relay
+            .offboard(
+                comms_relay::OffboardRequest {
+                    group_id: gid,
+                    admin: owner,
+                    admin_assertion: None, // owner is the relay's trust anchor
+                    removed: member,
+                    remove_commit: Envelope {
+                        group_id: gid,
+                        epoch: EpochId(epoch),
+                        kind: EnvelopeKind::Commit,
+                        sender: owner,
+                        recipients: remaining,
+                        ciphertext: remove_commit,
+                        group_seq: None,
+                    },
+                    ratchet_tree,
+                },
+                now,
+            )
+            .map_err(|e| DaemonError::Relay(e.to_string()))?;
+        Ok(())
     }
 
     /// Test/next-increment accessor: the in-process relay (a real joiner is remote and fetches from

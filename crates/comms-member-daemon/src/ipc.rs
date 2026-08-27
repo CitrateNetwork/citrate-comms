@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use comms_proto::{GroupId, WalletAddress};
+use comms_proto::{GroupId, Role, WalletAddress};
 
 use crate::MemberDaemon;
 
@@ -22,6 +22,24 @@ pub enum Request {
     Send { group: String, text: String },
     /// Drain + decrypt the owner's mailbox for a group.
     Poll { group: String },
+    /// The (wallet, role) roster of a group.
+    Roster { group: String },
+    /// Grant/change a member's role (owner-signed RoleAssertion).
+    AssignRole {
+        group: String,
+        member: String,
+        role: String,
+    },
+    /// Remove a member (MLS remove + relay atomic offboard).
+    Offboard { group: String, member: String },
+}
+
+/// One roster entry: the member address (hex) + role string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterEntry {
+    pub address: String,
+    pub role: String,
 }
 
 /// One group in a listing.
@@ -54,7 +72,32 @@ pub enum Response {
         ratchet_tree: String,
     },
     Messages { messages: Vec<MsgView> },
+    Roster { members: Vec<RosterEntry> },
     Error { message: String },
+}
+
+/// The bridge role vocabulary (matches the GroupRole DTO on the client).
+fn role_str(role: Role) -> &'static str {
+    match role {
+        Role::Owner => "owner",
+        Role::Admin => "admin",
+        Role::Member => "member",
+        Role::Partner => "partner",
+        Role::Guest => "guest",
+        Role::Agent => "agent",
+    }
+}
+
+fn parse_role(s: &str) -> Result<Role, String> {
+    match s {
+        "owner" => Ok(Role::Owner),
+        "admin" => Ok(Role::Admin),
+        "member" => Ok(Role::Member),
+        "partner" => Ok(Role::Partner),
+        "guest" => Ok(Role::Guest),
+        "agent" => Ok(Role::Agent),
+        other => Err(format!("unknown role '{other}'")),
+    }
 }
 
 fn parse_gid(hex_str: &str) -> Result<GroupId, String> {
@@ -142,6 +185,66 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                         })
                         .collect(),
                 },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::Roster { group } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.roster(gid) {
+                Ok(rows) => Response::Roster {
+                    members: rows
+                        .into_iter()
+                        .map(|(addr, role)| RosterEntry {
+                            address: hex::encode(addr.0),
+                            role: role_str(role).to_string(),
+                        })
+                        .collect(),
+                },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::AssignRole {
+            group,
+            member,
+            role,
+        } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let addr = match parse_addr(&member) {
+                Ok(a) => a,
+                Err(m) => return Response::Error { message: m },
+            };
+            let role = match parse_role(&role) {
+                Ok(r) => r,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.assign_role(gid, addr, role) {
+                Ok(_assertion) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::Offboard { group, member } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let addr = match parse_addr(&member) {
+                Ok(a) => a,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.offboard(gid, addr) {
+                Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
