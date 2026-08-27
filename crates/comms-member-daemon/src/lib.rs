@@ -21,6 +21,9 @@ use comms_proto::{
 };
 use comms_relay::DeliveryService;
 
+pub mod ipc;
+pub mod server;
+
 /// A member-daemon error. `Display` is safe to surface over the IPC.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {

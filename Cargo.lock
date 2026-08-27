@@ -1145,6 +1145,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "comms-member-daemon"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "comms-core",
+ "comms-proto",
+ "comms-relay",
+ "hex",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "comms-proto"
 version = "0.0.1"
 dependencies = [

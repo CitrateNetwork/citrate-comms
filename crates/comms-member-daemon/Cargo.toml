@@ -7,11 +7,18 @@ authors.workspace = true
 repository.workspace = true
 description = "citrate-comms member daemon — runs a wallet-owned MLS member + an in-process server-blind relay, exposing a loopback UDS JSON IPC so a lean client (citrate-core Commons) drives Groups without linking the MLS/relay tree."
 
+[[bin]]
+name = "comms-member-daemon"
+path = "src/main.rs"
+
 [dependencies]
 comms-proto = { path = "../comms-proto" }
 comms-core = { path = "../comms-core" }
 comms-relay = { path = "../comms-relay" }
 blake3 = { workspace = true }
 serde = { workspace = true }
+serde_json = "1"
 thiserror = { workspace = true }
 hex = "0.4"
+# Constant-time bearer comparison (no `==` on the loopback IPC token).
+subtle = { workspace = true }
