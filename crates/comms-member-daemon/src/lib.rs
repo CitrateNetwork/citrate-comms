@@ -21,10 +21,12 @@ use comms_proto::{
     Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role, RoleAssertion,
     WalletAddress, CITRATE_CHAIN_ID,
 };
-use comms_relay::DeliveryService;
 
 pub mod ipc;
+pub mod relay;
 pub mod server;
+
+use relay::{InProcessRelay, Relay};
 
 /// A member-daemon error. `Display` is safe to surface over the IPC.
 #[derive(Debug, thiserror::Error)]
@@ -100,24 +102,36 @@ pub struct MemberDaemon {
     domain: String,
     wallet: EthWallet,
     mls: MlsMember,
-    relay: DeliveryService,
+    relay: Box<dyn Relay>,
     groups: Vec<GroupState>,
     /// A monotonically-advancing clock (ms) so SIWE nonces/challenges stay fresh across ops.
     now: u64,
 }
 
 impl MemberDaemon {
-    /// Bring up the daemon for `wallet`: mint the MLS identity, open the in-process relay owned by
-    /// this wallet, authenticate (SIWE), and publish the owner's key package. `now` seeds the clock.
+    /// Bring up the daemon for `wallet` over a fresh IN-PROCESS relay owned by this wallet (single
+    /// node). For a networked relay, use [`Self::new_with_relay`] with a `WsRelay`.
     pub fn new(wallet: EthWallet, domain: impl Into<String>, now: u64) -> Result<Self, DaemonError> {
         let domain = domain.into();
+        let relay: Box<dyn Relay> =
+            Box::new(InProcessRelay::new(&domain, wallet.address()).map_err(DaemonError::Relay)?);
+        Self::new_with_relay(wallet, relay, domain, now)
+    }
+
+    /// Bring up the daemon for `wallet` over an INJECTED relay (in-process or a networked WS relay):
+    /// mint the MLS identity, authenticate (SIWE), and publish the owner's key package.
+    pub fn new_with_relay(
+        wallet: EthWallet,
+        mut relay: Box<dyn Relay>,
+        domain: impl Into<String>,
+        now: u64,
+    ) -> Result<Self, DaemonError> {
+        let domain = domain.into();
         let mls = MlsMember::new(&wallet.address().0).map_err(|e| DaemonError::Mls(e.to_string()))?;
-        let mut relay = DeliveryService::new(&domain, wallet.address(), 0)
-            .map_err(|e| DaemonError::Relay(e.to_string()))?;
         let mut d_now = now;
-        login(&mut relay, &wallet, &domain, d_now)?;
+        login(relay.as_mut(), &wallet, &domain, d_now)?;
         d_now += 1;
-        publish_kp(&mut relay, &wallet, &mls, &domain, d_now)?;
+        publish_kp(relay.as_mut(), &wallet, &mls, &domain, d_now)?;
         Ok(MemberDaemon {
             domain,
             wallet,
@@ -181,6 +195,7 @@ impl MemberDaemon {
         let kp = self
             .relay
             .take_key_package(&member)
+            .map_err(DaemonError::Relay)?
             .ok_or_else(|| DaemonError::NoKeyPackage(hex::encode(member.0)))?;
         let gi = self
             .groups
@@ -207,9 +222,9 @@ impl MemberDaemon {
             (out.commit, out.welcome, out.ratchet_tree, g.epoch)
         };
         // Deliver the commit to existing members, then onboard the joiner (welcome + tree).
-        submit_commit(&mut self.relay, gid, owner, epoch, commit, commit_recipients, now)?;
+        submit_commit(self.relay.as_mut(), gid, owner, epoch, commit, commit_recipients, now)?;
         onboard(
-            &mut self.relay,
+            self.relay.as_mut(),
             gid,
             owner,
             member,
@@ -360,34 +375,25 @@ impl MemberDaemon {
             (out.commit, out.ratchet_tree, g.epoch)
         };
         let remaining = self.groups[gi].recipients(owner);
+        let remove_commit_env = Envelope {
+            group_id: gid,
+            epoch: EpochId(epoch),
+            kind: EnvelopeKind::Commit,
+            sender: owner,
+            recipients: remaining,
+            ciphertext: remove_commit,
+            group_seq: None,
+        };
         self.relay
-            .offboard(
-                comms_relay::OffboardRequest {
-                    group_id: gid,
-                    admin: owner,
-                    admin_assertion: None, // owner is the relay's trust anchor
-                    removed: member,
-                    remove_commit: Envelope {
-                        group_id: gid,
-                        epoch: EpochId(epoch),
-                        kind: EnvelopeKind::Commit,
-                        sender: owner,
-                        recipients: remaining,
-                        ciphertext: remove_commit,
-                        group_seq: None,
-                    },
-                    ratchet_tree,
-                },
-                now,
-            )
-            .map_err(|e| DaemonError::Relay(e.to_string()))?;
+            .offboard(gid, owner, member, remove_commit_env, ratchet_tree, now)
+            .map_err(DaemonError::Relay)?;
         Ok(())
     }
 
-    /// Test/next-increment accessor: the in-process relay (a real joiner is remote and fetches from
-    /// it; the round-trip test drives a second member through it).
-    pub fn relay_mut(&mut self) -> &mut DeliveryService {
-        &mut self.relay
+    /// Test/next-increment accessor: the relay seam (the round-trip test drives a second member
+    /// through it).
+    pub fn relay_mut(&mut self) -> &mut dyn Relay {
+        self.relay.as_mut()
     }
     /// The relay domain (a joining member must match it in its SIWE/key-package publication).
     pub fn domain(&self) -> &str {
@@ -401,7 +407,7 @@ impl MemberDaemon {
 
 /// SIWE login: the wallet signs the relay's challenge nonce.
 pub fn login(
-    relay: &mut DeliveryService,
+    relay: &mut dyn Relay,
     w: &EthWallet,
     domain: &str,
     now: u64,
@@ -427,7 +433,7 @@ pub fn login(
 
 /// Publish `w`'s MLS key package to the relay (wallet-bound), so others can add them.
 pub fn publish_kp(
-    relay: &mut DeliveryService,
+    relay: &mut dyn Relay,
     w: &EthWallet,
     m: &MlsMember,
     domain: &str,
@@ -452,7 +458,7 @@ pub fn publish_kp(
 }
 
 fn submit_commit(
-    relay: &mut DeliveryService,
+    relay: &mut dyn Relay,
     gid: GroupId,
     admin: WalletAddress,
     epoch: u64,
@@ -480,7 +486,7 @@ fn submit_commit(
 
 #[allow(clippy::too_many_arguments)]
 fn onboard(
-    relay: &mut DeliveryService,
+    relay: &mut dyn Relay,
     gid: GroupId,
     admin: WalletAddress,
     joiner: WalletAddress,
@@ -493,7 +499,6 @@ fn onboard(
         .onboard(
             gid,
             admin,
-            None,
             joiner,
             Envelope {
                 group_id: gid,
@@ -507,7 +512,7 @@ fn onboard(
             tree,
             now,
         )
-        .map_err(|e| DaemonError::Relay(e.to_string()))
+        .map_err(DaemonError::Relay)
 }
 
 #[cfg(test)]

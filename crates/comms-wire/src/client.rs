@@ -212,6 +212,32 @@ impl RelayClient {
         }
     }
 
+    /// Atomic offboard: submit the MLS Remove commit + drop the member's roster/tree at the relay
+    /// in one epoch. `admin_assertion` is `None` when the caller is the workspace owner (the relay's
+    /// trust anchor). Returns the commit's ordered sequence.
+    pub async fn offboard(
+        &self,
+        group_id: GroupId,
+        removed: WalletAddress,
+        admin_assertion: Option<RoleAssertion>,
+        remove_commit: Envelope,
+        ratchet_tree: Vec<u8>,
+    ) -> Result<u64, WsError> {
+        match self
+            .expect_ack(ClientFrame::Offboard {
+                group_id,
+                removed,
+                admin_assertion,
+                remove_commit,
+                ratchet_tree,
+            })
+            .await?
+        {
+            Some(seq) => Ok(seq),
+            None => Err(WsError::Protocol("offboard ack missing seq")),
+        }
+    }
+
     pub async fn ratchet_tree(&self, group_id: GroupId) -> Result<Option<Vec<u8>>, WsError> {
         match self.request(ClientFrame::RatchetTree { group_id }).await? {
             ServerFrame::RatchetTree(rt) => Ok(rt),
