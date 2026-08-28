@@ -34,6 +34,10 @@ pub trait Relay: Send {
         now: u64,
     ) -> Result<(), String>;
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope>;
+    /// The public ratchet tree a joiner needs to process its Welcome.
+    fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String>;
+    /// The group's current member roster (addresses) — a joiner needs it to address messages.
+    fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String>;
     #[allow(clippy::too_many_arguments)]
     fn offboard(
         &mut self,
@@ -100,6 +104,12 @@ impl Relay for InProcessRelay {
     }
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
         self.0.fetch(wallet)
+    }
+    fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.ratchet_tree(&gid).map(|s| s.to_vec()))
+    }
+    fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String> {
+        Ok(self.0.group_members(&gid))
     }
     fn offboard(
         &mut self,
@@ -236,6 +246,16 @@ impl Relay for WsRelay {
             }
             out
         })
+    }
+    fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
+        self.rt
+            .block_on(self.client.ratchet_tree(gid))
+            .map_err(|e| e.to_string())
+    }
+    fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String> {
+        self.rt
+            .block_on(self.client.group_members(gid))
+            .map_err(|e| e.to_string())
     }
     fn offboard(
         &mut self,

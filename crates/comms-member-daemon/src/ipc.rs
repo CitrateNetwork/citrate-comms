@@ -32,6 +32,8 @@ pub enum Request {
     },
     /// Remove a member (MLS remove + relay atomic offboard).
     Offboard { group: String, member: String },
+    /// Join a group this member was added to on a shared relay (fetch welcome/tree + MLS join).
+    JoinGroup { group: String },
 }
 
 /// One roster entry: the member address (hex) + role string.
@@ -244,6 +246,18 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 Err(m) => return Response::Error { message: m },
             };
             match daemon.offboard(gid, addr) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::JoinGroup { group } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.join_group(gid, "") {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),

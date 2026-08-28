@@ -246,6 +246,18 @@ impl RelayClient {
         }
     }
 
+    /// The group's current member roster (addresses). A joiner uses it to address its messages.
+    pub async fn group_members(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Option<Vec<WalletAddress>>, WsError> {
+        match self.request(ClientFrame::GroupMembers { group_id }).await? {
+            ServerFrame::Members(m) => Ok(m),
+            ServerFrame::Error { message } => Err(WsError::Server(message)),
+            _ => Err(WsError::Protocol("expected Members")),
+        }
+    }
+
     async fn expect_ack(&self, frame: ClientFrame) -> Result<Option<u64>, WsError> {
         match self.request(frame).await? {
             ServerFrame::Ack { seq } => Ok(seq),
