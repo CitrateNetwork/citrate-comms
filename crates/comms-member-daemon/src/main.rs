@@ -6,8 +6,12 @@
 //!
 //!   CITRATE_MEMBER_SOCKET      UDS path to bind (required)
 //!   CITRATE_MEMBER_BEARER_FILE path to the 0600 bearer-token file the client wrote (required)
-//!   CITRATE_MEMBER_SEED        32-byte hex secret key for the owner wallet (required — a STABLE
-//!                              identity across restarts; citrate-core derives it from custody)
+//!   CITRATE_MEMBER_SEED_FILE   path to a 0600 file holding the 32-byte hex secret key (PREFERRED —
+//!                              the seed never crosses env/argv, which leak to `ps`; citrate-core
+//!                              seals a scoped secp256k1 comms key in the OS keyring and writes it
+//!                              here at spawn). Falls back to CITRATE_MEMBER_SEED if unset.
+//!   CITRATE_MEMBER_SEED        32-byte hex secret key inline (back-compat / tests only — a STABLE
+//!                              identity across restarts). Prefer CITRATE_MEMBER_SEED_FILE.
 //!   CITRATE_MEMBER_DOMAIN      relay domain (default relay.citrate.internal)
 
 use std::env;
@@ -36,11 +40,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let domain = env::var("CITRATE_MEMBER_DOMAIN").unwrap_or_else(|_| "relay.citrate.internal".into());
 
-    let seed_hex = required("CITRATE_MEMBER_SEED")?;
-    let seed_bytes = hex::decode(seed_hex.trim()).map_err(|_| "CITRATE_MEMBER_SEED must be hex")?;
+    // Seed: prefer a 0600 FILE (the secret never crosses env/argv, which leak to `ps`), mirroring
+    // the bearer. Fall back to the inline CITRATE_MEMBER_SEED for back-compat / tests.
+    let seed_hex = match env::var("CITRATE_MEMBER_SEED_FILE").ok().filter(|p| !p.is_empty()) {
+        Some(path) => fs::read_to_string(&path)
+            .map_err(|e| format!("reading seed file {path}: {e}"))?,
+        None => required("CITRATE_MEMBER_SEED")?,
+    };
+    let seed_hex = seed_hex.trim();
+    if seed_hex.is_empty() {
+        return Err("seed is empty (fail closed)".into());
+    }
+    let seed_bytes = hex::decode(seed_hex).map_err(|_| "seed must be hex")?;
     let seed: [u8; 32] = seed_bytes
         .try_into()
-        .map_err(|_| "CITRATE_MEMBER_SEED must be 32 bytes")?;
+        .map_err(|_| "seed must be 32 bytes")?;
     let wallet = EthWallet::from_secret_key(&seed).map_err(|e| format!("bad seed: {e}"))?;
 
     let now = SystemTime::now()
