@@ -182,6 +182,54 @@ impl MemberDaemon {
         self.groups.iter().map(|g| (g.id, g.name.clone())).collect()
     }
 
+    /// Join a group this member was ADDED to on a shared relay (cross-node). Fetches the pending
+    /// Welcome + the ratchet tree from the relay, joins the MLS group, and reconstructs the roster
+    /// from the relay (addresses only — a joiner is not the admin, so it does not learn others'
+    /// signature keys or roles). After this the member can decrypt group messages and address its own.
+    pub fn join_group(&mut self, gid: GroupId, name: impl Into<String>) -> Result<(), DaemonError> {
+        let me = self.wallet.address();
+        // The Welcome was delivered to this member's mailbox when the owner onboarded them.
+        let welcome = self
+            .relay
+            .fetch(&me)
+            .into_iter()
+            .find(|e| e.kind == EnvelopeKind::Welcome && e.group_id == gid)
+            .ok_or_else(|| {
+                DaemonError::Relay(format!("no pending welcome for group {}", hex::encode(gid.0)))
+            })?;
+        let tree = self
+            .relay
+            .ratchet_tree(gid)
+            .map_err(DaemonError::Relay)?
+            .ok_or_else(|| DaemonError::Relay("group has no ratchet tree".into()))?;
+        let handle = self
+            .mls
+            .join(&welcome.ciphertext, &tree)
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let epoch = handle.epoch();
+        let member_addrs = self
+            .relay
+            .group_members(gid)
+            .map_err(DaemonError::Relay)?
+            .unwrap_or_default();
+        let members = member_addrs
+            .into_iter()
+            .map(|w| MemberInfo {
+                wallet: w,
+                sig_pubkey: if w == me { self.mls.sig_pubkey() } else { Vec::new() },
+                role: Role::Member,
+            })
+            .collect();
+        self.groups.push(GroupState {
+            id: gid,
+            name: name.into(),
+            handle,
+            epoch,
+            members,
+        });
+        Ok(())
+    }
+
     /// Add `member` to `gid`. Requires the member to have published a key package to the relay
     /// (they do so on their own startup). Produces the real MLS commit + welcome, submits the
     /// commit to existing members, and onboards the joiner. Returns the welcome material.

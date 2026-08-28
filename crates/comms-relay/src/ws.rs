@@ -300,6 +300,10 @@ impl RelayServer {
                 };
                 let _ = out_tx.send(ServerFrame::RatchetTree(rt));
             }
+            ClientFrame::GroupMembers { group_id } => {
+                let members = self.service.lock().await.group_members(&group_id);
+                let _ = out_tx.send(ServerFrame::Members(members));
+            }
             ClientFrame::Offboard {
                 group_id,
                 removed,

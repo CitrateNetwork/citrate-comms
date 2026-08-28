@@ -42,6 +42,10 @@ pub enum ClientFrame {
     RatchetTree {
         group_id: GroupId,
     },
+    /// Query a group's current member roster (addresses) — a joiner needs it to address messages.
+    GroupMembers {
+        group_id: GroupId,
+    },
     Offboard {
         group_id: GroupId,
         removed: WalletAddress,
@@ -62,6 +66,7 @@ pub enum ServerFrame {
     },
     KeyPackage(Option<KeyPackagePublication>),
     RatchetTree(Option<Vec<u8>>),
+    Members(Option<Vec<WalletAddress>>),
     Ack {
         seq: Option<u64>,
     },
