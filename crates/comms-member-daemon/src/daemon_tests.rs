@@ -68,48 +68,97 @@ fn owner_adds_a_member_who_sends_a_message_the_owner_decrypts() {
     assert_eq!(msgs[0].group, gid);
 }
 
-#[test]
-fn roster_reflects_add_assign_role_and_offboard() {
-    let domain = "relay.test";
-    let mut owner = MemberDaemon::new(EthWallet::generate(), domain, 1000).expect("owner up");
-    let gid = owner.create_group("deals").expect("create");
-
-    // Fresh group: just the owner, as Owner.
-    let r = owner.roster(gid).expect("roster");
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].0, owner.owner());
-    assert_eq!(r[0].1, Role::Owner);
-
-    // Add bob (a real member).
-    let bob_w = EthWallet::generate();
-    let bob_m = MlsMember::new(&bob_w.address().0).expect("bob mls");
+/// Publish `member_w`'s key package to the owner's relay and add them to `gid` (real MLS).
+fn onboard_member(owner: &mut MemberDaemon, domain: &str, gid: GroupId, member_w: &EthWallet) {
+    let m = MlsMember::new(&member_w.address().0).expect("member mls");
     {
         let relay = owner.relay_mut();
-        login(relay, &bob_w, domain, 2000).expect("bob login");
-        publish_kp(relay, &bob_w, &bob_m, domain, 2001).expect("bob kp");
+        login(relay, member_w, domain, 2000).expect("member login");
+        publish_kp(relay, member_w, &m, domain, 2001).expect("member kp");
     }
-    owner.add_member(gid, bob_w.address()).expect("add bob");
-    let r = owner.roster(gid).expect("roster");
-    assert_eq!(r.len(), 2);
-    assert!(r.iter().any(|(a, role)| *a == bob_w.address() && *role == Role::Member));
+    owner.add_member(gid, member_w.address()).expect("add member");
+}
 
-    // Promote bob to Admin — a real owner-signed RoleAssertion.
-    let assertion = owner
-        .assign_role(gid, bob_w.address(), Role::Admin)
-        .expect("assign");
-    assert_eq!(assertion.subject, bob_w.address());
-    assert_eq!(assertion.role, Role::Admin);
-    assert!(owner
-        .roster(gid)
-        .unwrap()
-        .iter()
-        .any(|(a, role)| *a == bob_w.address() && *role == Role::Admin));
+/// The effective role of `who` in a roster listing, if present.
+fn role_in(roster: &[(WalletAddress, Role)], who: WalletAddress) -> Option<Role> {
+    roster.iter().find(|(a, _)| *a == who).map(|(_, r)| *r)
+}
+
+#[test]
+fn roster_reflects_add_and_offboard_with_effective_roles() {
+    let domain = "relay.test";
+    let mut owner = MemberDaemon::new(EthWallet::generate(), domain, 1000).expect("owner up");
+    let owner_addr = owner.owner();
+    let gid = owner.create_group("deals").expect("create");
+    // Fresh group: just the owner, as Owner.
+    assert_eq!(owner.roster(gid).unwrap(), vec![(owner_addr, Role::Owner)]);
+
+    let bob = EthWallet::generate();
+    onboard_member(&mut owner, domain, gid, &bob);
+    // A freshly-added member defaults to Member.
+    assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Member));
 
     // Offboard bob — real MLS remove + relay atomic offboard; roster returns to just the owner.
-    owner.offboard(gid, bob_w.address()).expect("offboard");
-    let r = owner.roster(gid).expect("roster");
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].0, owner.owner());
+    owner.offboard(gid, bob.address()).expect("offboard");
+    assert_eq!(owner.roster(gid).unwrap(), vec![(owner_addr, Role::Owner)]);
+    // A second offboard of a non-member is an honest error, never a panic.
+    assert!(matches!(
+        owner.offboard(gid, bob.address()),
+        Err(DaemonError::NoMember(_))
+    ));
+}
+
+#[test]
+fn assign_role_applies_an_owner_signed_grant_and_rejects_a_forgery() {
+    let domain = "relay.test";
+    // The daemon VERIFIES ONLY (Rule 3): the OWNER signs the grant (here, up front — the ceremony
+    // does this in prod); the daemon never signs. Sign with scope=None so it can be minted before
+    // the group id exists.
+    let owner_w = EthWallet::generate();
+    let bob = EthWallet::generate();
+    let grant =
+        rbac::sign_role_assertion(&owner_w, Role::Owner, bob.address(), Role::Admin, None, None)
+            .expect("owner signs grant");
+    // A forgery: an attacker signs but claims the owner as issuer.
+    let attacker = EthWallet::generate();
+    let mut forged =
+        rbac::sign_role_assertion(&attacker, Role::Owner, bob.address(), Role::Admin, None, None)
+            .expect("attacker signs");
+    forged.issuer = owner_w.address();
+
+    let mut owner = MemberDaemon::new(owner_w, domain, 1000).expect("owner up");
+    let gid = owner.create_group("deals").expect("create");
+    onboard_member(&mut owner, domain, gid, &bob);
+
+    // The forgery is rejected (signature doesn't recover to the claimed issuer); role unchanged.
+    assert!(matches!(owner.assign_role(gid, &forged), Err(DaemonError::Rbac(_))));
+    assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Member));
+
+    // The genuine owner-signed grant applies.
+    owner.assign_role(gid, &grant).expect("assign admin");
+    assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Admin));
+}
+
+#[test]
+fn revoke_role_demotes_via_a_signed_assertion() {
+    let domain = "relay.test";
+    let owner_w = EthWallet::generate();
+    let bob = EthWallet::generate();
+    let grant =
+        rbac::sign_role_assertion(&owner_w, Role::Owner, bob.address(), Role::Admin, None, None)
+            .expect("grant");
+    let demote =
+        rbac::sign_role_assertion(&owner_w, Role::Owner, bob.address(), Role::Member, None, None)
+            .expect("demote");
+
+    let mut owner = MemberDaemon::new(owner_w, domain, 1000).expect("owner up");
+    let gid = owner.create_group("deals").expect("create");
+    onboard_member(&mut owner, domain, gid, &bob);
+    owner.assign_role(gid, &grant).expect("assign");
+    assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Admin));
+
+    owner.revoke_role(gid, &demote).expect("revoke");
+    assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Member));
 }
 
 #[test]

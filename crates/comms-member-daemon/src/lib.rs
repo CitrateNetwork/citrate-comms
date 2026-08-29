@@ -363,18 +363,28 @@ impl MemberDaemon {
         Ok(g.members.iter().map(|m| (m.wallet, m.role)).collect())
     }
 
-    /// Grant/change `member`'s role in `gid`, signed by the owner. Returns the owner-signed
-    /// [`RoleAssertion`] (the relay + clients enforce it) and updates the local roster. Refuses if
-    /// the owner may not grant that role (e.g. transferring ownership).
+    /// Apply an owner/admin-signed role grant. The daemon VERIFIES ONLY — it never signs (Rule 3):
+    /// the caller (citrate-core's SignatureCeremony) produced the signature. Verifies the grant chain
+    /// against this group's owner, checks the assertion is scoped to this group (if scoped) and names
+    /// a current member, then records the role. Rejects any unverifiable / expired / escalating /
+    /// wrong-scope / non-member assertion (reusing comms-core `rbac`).
     pub fn assign_role(
         &mut self,
         gid: GroupId,
-        member: WalletAddress,
-        role: Role,
-    ) -> Result<RoleAssertion, DaemonError> {
-        let assertion =
-            rbac::sign_role_assertion(&self.wallet, Role::Owner, member, role, Some(gid), None)
-                .map_err(|e| DaemonError::Rbac(format!("{e:?}")))?;
+        assertion: &RoleAssertion,
+    ) -> Result<(), DaemonError> {
+        let owner = self.wallet.address();
+        let now = self.tick();
+        rbac::verify_grant_chain(assertion, assertion.subject, owner, now)
+            .map_err(|e| DaemonError::Rbac(format!("{e:?}")))?;
+        if let Some(scope) = assertion.scope {
+            if scope != gid {
+                return Err(DaemonError::Rbac(format!(
+                    "assertion scope {} is not this group",
+                    hex::encode(scope.0)
+                )));
+            }
+        }
         let g = self
             .groups
             .iter_mut()
@@ -383,10 +393,44 @@ impl MemberDaemon {
         let mi = g
             .members
             .iter_mut()
-            .find(|m| m.wallet == member)
-            .ok_or_else(|| DaemonError::NoMember(hex::encode(member.0)))?;
-        mi.role = role;
-        Ok(assertion)
+            .find(|m| m.wallet == assertion.subject)
+            .ok_or_else(|| DaemonError::NoMember(hex::encode(assertion.subject.0)))?;
+        mi.role = assertion.role;
+        Ok(())
+    }
+
+    /// Revoke/demote a subject's role via an owner/admin-signed assertion (the caller sets the
+    /// assertion's `role` to the demoted role, e.g. `Member`). Daemon VERIFIES ONLY — same grant-chain
+    /// check as `assign_role`; the verb documents intent (a demotion) while sharing the keyless path.
+    pub fn revoke_role(
+        &mut self,
+        gid: GroupId,
+        assertion: &RoleAssertion,
+    ) -> Result<(), DaemonError> {
+        let owner = self.wallet.address();
+        let now = self.tick();
+        rbac::verify_grant_chain(assertion, assertion.subject, owner, now)
+            .map_err(|e| DaemonError::Rbac(format!("{e:?}")))?;
+        if let Some(scope) = assertion.scope {
+            if scope != gid {
+                return Err(DaemonError::Rbac(format!(
+                    "assertion scope {} is not this group",
+                    hex::encode(scope.0)
+                )));
+            }
+        }
+        let g = self
+            .groups
+            .iter_mut()
+            .find(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        let mi = g
+            .members
+            .iter_mut()
+            .find(|m| m.wallet == assertion.subject)
+            .ok_or_else(|| DaemonError::NoMember(hex::encode(assertion.subject.0)))?;
+        mi.role = assertion.role;
+        Ok(())
     }
 
     /// Offboard `member` from `gid`: a real MLS Remove commit (rotates the group secret) + the

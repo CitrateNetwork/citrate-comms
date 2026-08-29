@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use comms_proto::{GroupId, Role, WalletAddress};
+use comms_proto::{GroupId, Role, RoleAssertion, WalletAddress};
 
 use crate::MemberDaemon;
 
@@ -24,11 +24,16 @@ pub enum Request {
     Poll { group: String },
     /// The (wallet, role) roster of a group.
     Roster { group: String },
-    /// Grant/change a member's role (owner-signed RoleAssertion).
+    /// Apply an owner/admin-signed role grant. The signature was produced by citrate-core's
+    /// SignatureCeremony; the daemon VERIFIES it (never signs — Rule 3).
     AssignRole {
         group: String,
-        member: String,
-        role: String,
+        assertion: RoleAssertion,
+    },
+    /// Revoke/demote a subject's role via an owner/admin-signed assertion the daemon verifies.
+    RevokeRole {
+        group: String,
+        assertion: RoleAssertion,
     },
     /// Remove a member (MLS remove + relay atomic offboard).
     Offboard { group: String, member: String },
@@ -90,17 +95,6 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn parse_role(s: &str) -> Result<Role, String> {
-    match s {
-        "owner" => Ok(Role::Owner),
-        "admin" => Ok(Role::Admin),
-        "member" => Ok(Role::Member),
-        "partner" => Ok(Role::Partner),
-        "guest" => Ok(Role::Guest),
-        "agent" => Ok(Role::Agent),
-        other => Err(format!("unknown role '{other}'")),
-    }
-}
 
 fn parse_gid(hex_str: &str) -> Result<GroupId, String> {
     let bytes = hex::decode(hex_str).map_err(|_| format!("bad group id hex: {hex_str}"))?;
@@ -212,25 +206,25 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 },
             }
         }
-        Request::AssignRole {
-            group,
-            member,
-            role,
-        } => {
+        Request::AssignRole { group, assertion } => {
             let gid = match parse_gid(&group) {
                 Ok(g) => g,
                 Err(m) => return Response::Error { message: m },
             };
-            let addr = match parse_addr(&member) {
-                Ok(a) => a,
+            match daemon.assign_role(gid, &assertion) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::RevokeRole { group, assertion } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
                 Err(m) => return Response::Error { message: m },
             };
-            let role = match parse_role(&role) {
-                Ok(r) => r,
-                Err(m) => return Response::Error { message: m },
-            };
-            match daemon.assign_role(gid, addr, role) {
-                Ok(_assertion) => Response::Ok,
+            match daemon.revoke_role(gid, &assertion) {
+                Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
