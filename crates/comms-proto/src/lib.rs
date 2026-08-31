@@ -109,6 +109,18 @@ pub struct KeyPackagePublication {
     pub relay_domain: String,
 }
 
+/// CONNECT-S1 — a pre-membership claim submitted to the relay's **server-blind** claims-inbox, so an
+/// invitee's request reaches the group owner without a manual DM/clipboard round-trip. The relay keys
+/// it by `token_hash` (BLAKE3 of the invite token — the token itself never reaches the relay) and
+/// stores `ciphertext` OPAQUELY (sealed to the invite link's ephemeral pubkey; the owner alone opens it).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ClaimSubmission {
+    /// BLAKE3 of the invite token — the inbox key. The relay never sees the token, only its hash.
+    pub token_hash: [u8; 32],
+    /// The claim sealed to the invite link's ephemeral pubkey. Opaque to the relay — never decrypted.
+    pub ciphertext: Vec<u8>,
+}
+
 /// RBAC roles (capabilities defined in `comms-core::rbac`, `PLANSET/02` §4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Role {
@@ -141,12 +153,34 @@ pub struct RoleAssertion {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AuditEvent {
     Genesis,
-    GroupCreated { group_id: GroupId, creator: WalletAddress },
-    MemberAdded { group_id: GroupId, member: WalletAddress, epoch: EpochId },
-    MemberRemoved { group_id: GroupId, member: WalletAddress, epoch: EpochId },
-    AgentAdded { group_id: GroupId, agent: WalletAddress, epoch: EpochId },
-    AgentRemoved { group_id: GroupId, agent: WalletAddress, epoch: EpochId },
-    KeyPackagePublished { wallet: WalletAddress, key_package_ref: KeyPackageRef },
+    GroupCreated {
+        group_id: GroupId,
+        creator: WalletAddress,
+    },
+    MemberAdded {
+        group_id: GroupId,
+        member: WalletAddress,
+        epoch: EpochId,
+    },
+    MemberRemoved {
+        group_id: GroupId,
+        member: WalletAddress,
+        epoch: EpochId,
+    },
+    AgentAdded {
+        group_id: GroupId,
+        agent: WalletAddress,
+        epoch: EpochId,
+    },
+    AgentRemoved {
+        group_id: GroupId,
+        agent: WalletAddress,
+        epoch: EpochId,
+    },
+    KeyPackagePublished {
+        wallet: WalletAddress,
+        key_package_ref: KeyPackageRef,
+    },
     EnvelopeReceipt {
         group_id: GroupId,
         group_seq: u64,
@@ -157,8 +191,15 @@ pub enum AuditEvent {
         ciphertext_hash: [u8; 32],
         size: u64,
     },
-    RoleAsserted { subject: WalletAddress, role: Role, scope: Option<GroupId> },
-    RoleRevoked { subject: WalletAddress, scope: Option<GroupId> },
+    RoleAsserted {
+        subject: WalletAddress,
+        role: Role,
+        scope: Option<GroupId>,
+    },
+    RoleRevoked {
+        subject: WalletAddress,
+        scope: Option<GroupId>,
+    },
 }
 
 /// One link in the BLAKE3 audit chain. `record_hash` and `previous_hash` are

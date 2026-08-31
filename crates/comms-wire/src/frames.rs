@@ -9,7 +9,8 @@
 
 use comms_core::identity::SiweMessage;
 use comms_proto::{
-    Envelope, EnvelopeKind, GroupId, KeyPackagePublication, RoleAssertion, WalletAddress,
+    ClaimSubmission, Envelope, EnvelopeKind, GroupId, KeyPackagePublication, RoleAssertion,
+    WalletAddress,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,12 @@ pub enum ClientFrame {
         remove_commit: Envelope,
         ratchet_tree: Vec<u8>,
     },
+    /// CONNECT-S1 — submit a claim to the server-blind claims-inbox (pre-membership; SIWE only).
+    SubmitClaim(ClaimSubmission),
+    /// CONNECT-S1 — poll the claims-inbox for an invite by its `token_hash` (owner-side).
+    PollClaims {
+        token_hash: [u8; 32],
+    },
 }
 
 /// A response or server-push to a client.
@@ -88,6 +95,8 @@ pub enum ServerFrame {
         kind: EnvelopeKind,
         group_seq: u64,
     },
+    /// CONNECT-S1 — the claims sealed under a polled `token_hash` (opaque ciphertexts; server-blind).
+    Claims(Vec<ClaimSubmission>),
     Error {
         message: String,
     },

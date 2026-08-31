@@ -15,15 +15,36 @@ use crate::MemberDaemon;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Request {
-    CreateGroup { name: String },
+    CreateGroup {
+        name: String,
+    },
     ListGroups,
     /// Add a member (who must have published a key package to the relay) to a group.
-    AddMember { group: String, member: String },
-    Send { group: String, text: String },
+    AddMember {
+        group: String,
+        member: String,
+    },
+    Send {
+        group: String,
+        text: String,
+    },
     /// Drain + decrypt the owner's mailbox for a group.
-    Poll { group: String },
+    Poll {
+        group: String,
+    },
     /// The (wallet, role) roster of a group.
-    Roster { group: String },
+    Roster {
+        group: String,
+    },
+    /// CONNECT-S1 — submit a sealed claim to the server-blind claims-inbox (invitee). Both hex.
+    SubmitClaim {
+        token_hash: String,
+        ciphertext: String,
+    },
+    /// CONNECT-S1 — poll the claims-inbox by invite token hash (owner). Hex.
+    PollClaims {
+        token_hash: String,
+    },
     /// Apply an owner/admin-signed role grant. The signature was produced by citrate-core's
     /// SignatureCeremony; the daemon VERIFIES it (never signs — Rule 3).
     AssignRole {
@@ -36,9 +57,14 @@ pub enum Request {
         assertion: RoleAssertion,
     },
     /// Remove a member (MLS remove + relay atomic offboard).
-    Offboard { group: String, member: String },
+    Offboard {
+        group: String,
+        member: String,
+    },
     /// Join a group this member was added to on a shared relay (fetch welcome/tree + MLS join).
-    JoinGroup { group: String },
+    JoinGroup {
+        group: String,
+    },
 }
 
 /// One roster entry: the member address (hex) + role string.
@@ -70,17 +96,31 @@ pub struct MsgView {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Response {
     Ok,
-    GroupCreated { id: String },
-    Groups { groups: Vec<GroupView> },
+    GroupCreated {
+        id: String,
+    },
+    Groups {
+        groups: Vec<GroupView>,
+    },
     /// The welcome material a REMOTE joiner needs (hex); the owner-client ignores it.
     Added {
         member: String,
         welcome: String,
         ratchet_tree: String,
     },
-    Messages { messages: Vec<MsgView> },
-    Roster { members: Vec<RosterEntry> },
-    Error { message: String },
+    Messages {
+        messages: Vec<MsgView>,
+    },
+    Roster {
+        members: Vec<RosterEntry>,
+    },
+    /// CONNECT-S1 — the polled claim ciphertexts (hex; opaque). Owner decrypts with the invite key.
+    Claims {
+        ciphertexts: Vec<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// The bridge role vocabulary (matches the GroupRole DTO on the client).
@@ -94,7 +134,6 @@ fn role_str(role: Role) -> &'static str {
         Role::Agent => "agent",
     }
 }
-
 
 fn parse_gid(hex_str: &str) -> Result<GroupId, String> {
     let bytes = hex::decode(hex_str).map_err(|_| format!("bad group id hex: {hex_str}"))?;
@@ -200,6 +239,57 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                             role: role_str(role).to_string(),
                         })
                         .collect(),
+                },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::SubmitClaim {
+            token_hash,
+            ciphertext,
+        } => {
+            let th = match hex::decode(&token_hash)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(t) => t,
+                None => {
+                    return Response::Error {
+                        message: "tokenHash must be 32-byte hex".into(),
+                    }
+                }
+            };
+            let ct = match hex::decode(&ciphertext) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Response::Error {
+                        message: "ciphertext must be hex".into(),
+                    }
+                }
+            };
+            match daemon.submit_claim(th, ct) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::PollClaims { token_hash } => {
+            let th = match hex::decode(&token_hash)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(t) => t,
+                None => {
+                    return Response::Error {
+                        message: "tokenHash must be 32-byte hex".into(),
+                    }
+                }
+            };
+            match daemon.poll_claims(th) {
+                Ok(cts) => Response::Claims {
+                    ciphertexts: cts.into_iter().map(hex::encode).collect(),
                 },
                 Err(e) => Response::Error {
                     message: e.to_string(),

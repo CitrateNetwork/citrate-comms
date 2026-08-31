@@ -173,6 +173,7 @@ impl RelayServer {
                 | ClientFrame::RegisterGroup { .. }
                 | ClientFrame::Onboard { .. }
                 | ClientFrame::Submit(_)
+                | ClientFrame::SubmitClaim(_)
                 | ClientFrame::Offboard { .. }
         );
         if mutating && self.is_paused() {
@@ -225,6 +226,28 @@ impl RelayServer {
             ClientFrame::TakeKeyPackage { wallet } => {
                 let kp = { self.service.lock().await.take_key_package(&wallet) };
                 let _ = out_tx.send(ServerFrame::KeyPackage(kp));
+            }
+            ClientFrame::SubmitClaim(sub) => {
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = { self.service.lock().await.submit_claim(&addr, sub) };
+                match r {
+                    Ok(_) => ack(out_tx, None),
+                    Err(e) => send_err(out_tx, &e.to_string()),
+                }
+            }
+            ClientFrame::PollClaims { token_hash } => {
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = { self.service.lock().await.poll_claims(&addr, &token_hash) };
+                match r {
+                    Ok(claims) => {
+                        let _ = out_tx.send(ServerFrame::Claims(claims));
+                    }
+                    Err(e) => send_err(out_tx, &e.to_string()),
+                }
             }
             ClientFrame::RegisterGroup { group_id } => {
                 let Some(addr) = *authed else {

@@ -7,7 +7,7 @@
 //! (the daemon already surfaces relay failures as strings).
 
 use comms_core::identity::SiweMessage;
-use comms_proto::{Envelope, GroupId, KeyPackagePublication, WalletAddress};
+use comms_proto::{ClaimSubmission, Envelope, GroupId, KeyPackagePublication, WalletAddress};
 use comms_relay::{DeliveryService, OffboardRequest};
 
 /// A server-blind relay the daemon talks to. Every op the [`crate::MemberDaemon`] needs; the owner
@@ -20,8 +20,24 @@ pub trait Relay: Send {
         &mut self,
         wallet: &WalletAddress,
     ) -> Result<Option<KeyPackagePublication>, String>;
-    fn register_group(&mut self, gid: GroupId, owner: WalletAddress, now: u64)
-        -> Result<(), String>;
+    /// CONNECT-S1 — submit a sealed claim to the relay's server-blind claims-inbox (pre-membership).
+    fn submit_claim(
+        &mut self,
+        submitter: WalletAddress,
+        submission: ClaimSubmission,
+    ) -> Result<(), String>;
+    /// CONNECT-S1 — poll the relay's claims-inbox by invite token hash (owner-side).
+    fn poll_claims(
+        &mut self,
+        poller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<Vec<ClaimSubmission>, String>;
+    fn register_group(
+        &mut self,
+        gid: GroupId,
+        owner: WalletAddress,
+        now: u64,
+    ) -> Result<(), String>;
     fn submit_as(&mut self, sender: WalletAddress, env: Envelope, now: u64) -> Result<u64, String>;
     #[allow(clippy::too_many_arguments)]
     fn onboard(
@@ -67,10 +83,16 @@ impl Relay for InProcessRelay {
         self.0.issue_challenge(now)
     }
     fn authenticate(&mut self, msg: &SiweMessage, sig: &[u8; 65], now: u64) -> Result<(), String> {
-        self.0.authenticate(msg, sig, now).map(|_| ()).map_err(|e| e.to_string())
+        self.0
+            .authenticate(msg, sig, now)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
     fn publish_key_package(&mut self, pubn: KeyPackagePublication, now: u64) -> Result<(), String> {
-        self.0.publish_key_package(pubn, now).map(|_| ()).map_err(|e| e.to_string())
+        self.0
+            .publish_key_package(pubn, now)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
     fn take_key_package(
         &mut self,
@@ -78,16 +100,38 @@ impl Relay for InProcessRelay {
     ) -> Result<Option<KeyPackagePublication>, String> {
         Ok(self.0.take_key_package(wallet))
     }
+    fn submit_claim(
+        &mut self,
+        submitter: WalletAddress,
+        submission: ClaimSubmission,
+    ) -> Result<(), String> {
+        self.0
+            .submit_claim(&submitter, submission)
+            .map_err(|e| e.to_string())
+    }
+    fn poll_claims(
+        &mut self,
+        poller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<Vec<ClaimSubmission>, String> {
+        self.0
+            .poll_claims(&poller, &token_hash)
+            .map_err(|e| e.to_string())
+    }
     fn register_group(
         &mut self,
         gid: GroupId,
         owner: WalletAddress,
         now: u64,
     ) -> Result<(), String> {
-        self.0.register_group(gid, owner, now).map_err(|e| e.to_string())
+        self.0
+            .register_group(gid, owner, now)
+            .map_err(|e| e.to_string())
     }
     fn submit_as(&mut self, sender: WalletAddress, env: Envelope, now: u64) -> Result<u64, String> {
-        self.0.submit_as(sender, env, now).map_err(|e| e.to_string())
+        self.0
+            .submit_as(sender, env, now)
+            .map_err(|e| e.to_string())
     }
     fn onboard(
         &mut self,
@@ -182,7 +226,9 @@ impl WsRelay {
 impl Relay for WsRelay {
     fn issue_challenge(&mut self, _now: u64) -> String {
         // A WS challenge failure surfaces at authenticate (which will then fail loudly).
-        self.rt.block_on(self.client.challenge()).unwrap_or_default()
+        self.rt
+            .block_on(self.client.challenge())
+            .unwrap_or_default()
     }
     fn authenticate(&mut self, msg: &SiweMessage, sig: &[u8; 65], _now: u64) -> Result<(), String> {
         self.rt
@@ -190,7 +236,11 @@ impl Relay for WsRelay {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    fn publish_key_package(&mut self, pubn: KeyPackagePublication, _now: u64) -> Result<(), String> {
+    fn publish_key_package(
+        &mut self,
+        pubn: KeyPackagePublication,
+        _now: u64,
+    ) -> Result<(), String> {
         self.rt
             .block_on(self.client.publish_key_package(pubn))
             .map_err(|e| e.to_string())
@@ -203,6 +253,24 @@ impl Relay for WsRelay {
             .block_on(self.client.take_key_package(*wallet))
             .map_err(|e| e.to_string())
     }
+    fn submit_claim(
+        &mut self,
+        _submitter: WalletAddress,
+        submission: ClaimSubmission,
+    ) -> Result<(), String> {
+        self.rt
+            .block_on(self.client.submit_claim(submission))
+            .map_err(|e| e.to_string())
+    }
+    fn poll_claims(
+        &mut self,
+        _poller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<Vec<ClaimSubmission>, String> {
+        self.rt
+            .block_on(self.client.poll_claims(token_hash))
+            .map_err(|e| e.to_string())
+    }
     fn register_group(
         &mut self,
         gid: GroupId,
@@ -213,7 +281,12 @@ impl Relay for WsRelay {
             .block_on(self.client.register_group(gid))
             .map_err(|e| e.to_string())
     }
-    fn submit_as(&mut self, _sender: WalletAddress, env: Envelope, _now: u64) -> Result<u64, String> {
+    fn submit_as(
+        &mut self,
+        _sender: WalletAddress,
+        env: Envelope,
+        _now: u64,
+    ) -> Result<u64, String> {
         self.rt
             .block_on(self.client.submit(env))
             .map_err(|e| e.to_string())
@@ -228,7 +301,10 @@ impl Relay for WsRelay {
         _now: u64,
     ) -> Result<(), String> {
         self.rt
-            .block_on(self.client.onboard(gid, joiner, None, welcome, ratchet_tree))
+            .block_on(
+                self.client
+                    .onboard(gid, joiner, None, welcome, ratchet_tree),
+            )
             .map_err(|e| e.to_string())
     }
     fn fetch(&mut self, _wallet: &WalletAddress) -> Vec<Envelope> {

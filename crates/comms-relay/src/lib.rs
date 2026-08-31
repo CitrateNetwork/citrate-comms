@@ -37,7 +37,7 @@ use comms_core::identity::{self, InMemoryNonceStore, NonceStore, SiweMessage};
 use comms_core::rbac::{self, Capability, RbacError};
 use comms_core::store::{self, EncryptedStore, StoreError};
 use comms_proto::{
-    canonical, AuditEvent, AuditRecord, Envelope, EnvelopeKind, EpochId, GroupId,
+    canonical, AuditEvent, AuditRecord, ClaimSubmission, Envelope, EnvelopeKind, EpochId, GroupId,
     KeyPackagePublication, KeyPackageRef, RoleAssertion, WalletAddress,
 };
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,9 @@ pub struct DeliveryService {
     nonces: InMemoryNonceStore,
     /// One-time-use KeyPackage directory, keyed by wallet.
     key_packages: HashMap<WalletAddress, VecDeque<KeyPackagePublication>>,
+    /// CONNECT-S1 — the server-blind claims-inbox, keyed by invite `token_hash`. Ciphertext ONLY
+    /// (opaque). In-memory + ephemeral by design (a dropped connect-request is just re-submitted).
+    claims: HashMap<[u8; 32], Vec<ClaimSubmission>>,
     groups: HashMap<GroupId, GroupState>,
     /// Per-wallet delivery mailboxes (the fan-out target).
     mailboxes: HashMap<WalletAddress, Vec<Envelope>>,
@@ -135,6 +138,7 @@ impl DeliveryService {
             owner,
             nonces: InMemoryNonceStore::new(),
             key_packages: HashMap::new(),
+            claims: HashMap::new(),
             groups: HashMap::new(),
             mailboxes: HashMap::new(),
             sessions: BTreeSet::new(),
@@ -165,7 +169,11 @@ impl DeliveryService {
         let audit = if audit_records.is_empty() {
             let chain = AuditChain::new(genesis_ts_ms)?;
             for r in chain.records() {
-                store.put(store::CF_AUDIT, &r.sequence.to_be_bytes(), &canonical::to_vec(r).map_err(RelayError::Decode)?)?;
+                store.put(
+                    store::CF_AUDIT,
+                    &r.sequence.to_be_bytes(),
+                    &canonical::to_vec(r).map_err(RelayError::Decode)?,
+                )?;
             }
             chain
         } else {
@@ -175,7 +183,11 @@ impl DeliveryService {
         // Groups: metadata snapshots, then the envelope logs.
         let mut groups: HashMap<GroupId, GroupState> = HashMap::new();
         for (k, v) in store.scan(store::CF_MEMBERSHIP)? {
-            let gid = GroupId(k.as_slice().try_into().map_err(|_| RelayError::CorruptKey)?);
+            let gid = GroupId(
+                k.as_slice()
+                    .try_into()
+                    .map_err(|_| RelayError::CorruptKey)?,
+            );
             let snap: GroupSnapshot = canonical::from_slice(&v).map_err(RelayError::Decode)?;
             groups.insert(gid, GroupState::from_snapshot(snap));
         }
@@ -191,10 +203,16 @@ impl DeliveryService {
         }
 
         // KeyPackage directory (each value is the wallet's whole queue).
-        let mut key_packages: HashMap<WalletAddress, VecDeque<KeyPackagePublication>> = HashMap::new();
+        let mut key_packages: HashMap<WalletAddress, VecDeque<KeyPackagePublication>> =
+            HashMap::new();
         for (k, v) in store.scan(store::CF_KEYPACKAGES)? {
-            let wallet = WalletAddress(k.as_slice().try_into().map_err(|_| RelayError::CorruptKey)?);
-            let queue: Vec<KeyPackagePublication> = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            let wallet = WalletAddress(
+                k.as_slice()
+                    .try_into()
+                    .map_err(|_| RelayError::CorruptKey)?,
+            );
+            let queue: Vec<KeyPackagePublication> =
+                canonical::from_slice(&v).map_err(RelayError::Decode)?;
             key_packages.insert(wallet, queue.into());
         }
 
@@ -203,6 +221,7 @@ impl DeliveryService {
             owner,
             nonces: InMemoryNonceStore::new(),
             key_packages,
+            claims: HashMap::new(),
             groups,
             mailboxes: HashMap::new(),
             sessions: BTreeSet::new(),
@@ -225,21 +244,33 @@ impl DeliveryService {
     fn audit_append(&mut self, event: AuditEvent, now_ms: u64) -> Result<(), RelayError> {
         let rec = self.audit.append(event, now_ms)?.clone();
         if let Some(s) = &self.store {
-            s.put(store::CF_AUDIT, &rec.sequence.to_be_bytes(), &canonical::to_vec(&rec).map_err(RelayError::Decode)?)?;
+            s.put(
+                store::CF_AUDIT,
+                &rec.sequence.to_be_bytes(),
+                &canonical::to_vec(&rec).map_err(RelayError::Decode)?,
+            )?;
         }
         Ok(())
     }
 
     fn persist_group(&self, gid: &GroupId) -> Result<(), RelayError> {
         if let (Some(s), Some(g)) = (&self.store, self.groups.get(gid)) {
-            s.put(store::CF_MEMBERSHIP, &gid.0, &canonical::to_vec(&g.snapshot()).map_err(RelayError::Decode)?)?;
+            s.put(
+                store::CF_MEMBERSHIP,
+                &gid.0,
+                &canonical::to_vec(&g.snapshot()).map_err(RelayError::Decode)?,
+            )?;
         }
         Ok(())
     }
 
     fn persist_envelope(&self, gid: &GroupId, seq: u64, env: &Envelope) -> Result<(), RelayError> {
         if let Some(s) = &self.store {
-            s.put(store::CF_ENVELOPES, &store::seq_key(&gid.0, seq), &canonical::to_vec(env).map_err(RelayError::Decode)?)?;
+            s.put(
+                store::CF_ENVELOPES,
+                &store::seq_key(&gid.0, seq),
+                &canonical::to_vec(env).map_err(RelayError::Decode)?,
+            )?;
         }
         Ok(())
     }
@@ -248,9 +279,16 @@ impl DeliveryService {
     /// reflected on disk — consumed packages do not reappear after restart).
     fn persist_keypackages(&self, wallet: &WalletAddress) -> Result<(), RelayError> {
         if let Some(s) = &self.store {
-            let queue: Vec<&KeyPackagePublication> =
-                self.key_packages.get(wallet).map(|q| q.iter().collect()).unwrap_or_default();
-            s.put(store::CF_KEYPACKAGES, &wallet.0, &canonical::to_vec(&queue).map_err(RelayError::Decode)?)?;
+            let queue: Vec<&KeyPackagePublication> = self
+                .key_packages
+                .get(wallet)
+                .map(|q| q.iter().collect())
+                .unwrap_or_default();
+            s.put(
+                store::CF_KEYPACKAGES,
+                &wallet.0,
+                &canonical::to_vec(&queue).map_err(RelayError::Decode)?,
+            )?;
         }
         Ok(())
     }
@@ -306,10 +344,16 @@ impl DeliveryService {
 
         let kp_ref = KeyPackageRef(blake3::hash(&publication.key_package).as_bytes().to_vec());
         let wallet = publication.wallet;
-        self.key_packages.entry(wallet).or_default().push_back(publication);
+        self.key_packages
+            .entry(wallet)
+            .or_default()
+            .push_back(publication);
         self.persist_keypackages(&wallet)?;
         self.audit_append(
-            AuditEvent::KeyPackagePublished { wallet, key_package_ref: kp_ref.clone() },
+            AuditEvent::KeyPackagePublished {
+                wallet,
+                key_package_ref: kp_ref.clone(),
+            },
             now_ms,
         )?;
         Ok(kp_ref)
@@ -319,7 +363,10 @@ impl DeliveryService {
     /// about to add that wallet to a group. The on-disk queue is updated so a consumed
     /// package does not reappear after restart.
     pub fn take_key_package(&mut self, wallet: &WalletAddress) -> Option<KeyPackagePublication> {
-        let popped = self.key_packages.get_mut(wallet).and_then(|q| q.pop_front());
+        let popped = self
+            .key_packages
+            .get_mut(wallet)
+            .and_then(|q| q.pop_front());
         if popped.is_some() {
             let _ = self.persist_keypackages(wallet);
         }
@@ -328,6 +375,46 @@ impl DeliveryService {
 
     pub fn key_package_count(&self, wallet: &WalletAddress) -> usize {
         self.key_packages.get(wallet).map(|q| q.len()).unwrap_or(0)
+    }
+
+    // ─────────────────── CONNECT-S1 claims-inbox (server-blind) ───────────────────
+
+    const MAX_CLAIMS_PER_TOKEN: usize = 16;
+
+    /// Submit a claim to the server-blind claims-inbox (CONNECT-S1). The `submitter` must be
+    /// SIWE-authenticated but is NOT required to be a member (the pre-membership connect path). The
+    /// relay stores the `ciphertext` opaquely — NO attestation verify, NEVER decrypted. Fails closed
+    /// without a session. Idempotent per identical ciphertext; capped per token to bound growth.
+    pub fn submit_claim(
+        &mut self,
+        submitter: &WalletAddress,
+        submission: ClaimSubmission,
+    ) -> Result<(), RelayError> {
+        self.require_session(submitter)?;
+        let q = self.claims.entry(submission.token_hash).or_default();
+        if !q.iter().any(|c| c.ciphertext == submission.ciphertext) {
+            q.push(submission);
+            while q.len() > Self::MAX_CLAIMS_PER_TOKEN {
+                q.remove(0);
+            }
+        }
+        Ok(())
+    }
+
+    /// Poll the claims-inbox for an invite `token_hash` (owner-side). Non-destructive; the ciphertexts
+    /// are opaque and useless without the invite's ephemeral private key. Requires a session.
+    pub fn poll_claims(
+        &self,
+        poller: &WalletAddress,
+        token_hash: &[u8; 32],
+    ) -> Result<Vec<ClaimSubmission>, RelayError> {
+        self.require_session(poller)?;
+        Ok(self.claims.get(token_hash).cloned().unwrap_or_default())
+    }
+
+    /// Clear the inbox for a `token_hash` once the owner has consumed the (one-time) invite.
+    pub fn clear_claims(&mut self, token_hash: &[u8; 32]) {
+        self.claims.remove(token_hash);
     }
 
     // ─────────────────────────── groups ───────────────────────────
@@ -390,14 +477,21 @@ impl DeliveryService {
         self.submit_as(admin, welcome, now_ms)?;
         // Update the roster + public ratchet tree, persist, and audit the membership change.
         let epoch = {
-            let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
+            let state = self
+                .groups
+                .get_mut(&group_id)
+                .ok_or(RelayError::GroupUnknown)?;
             state.members.insert(joiner);
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
         self.persist_group(&group_id)?;
         self.audit_append(
-            AuditEvent::MemberAdded { group_id, member: joiner, epoch: EpochId(epoch) },
+            AuditEvent::MemberAdded {
+                group_id,
+                member: joiner,
+                epoch: EpochId(epoch),
+            },
             now_ms,
         )?;
         Ok(())
@@ -415,7 +509,14 @@ impl DeliveryService {
     /// can `RemoveMember`. The removed member keeps prior plaintext but cannot decrypt
     /// anything from the new epoch forward (forward security — `PLANSET/02` §3.2/§4.3).
     pub fn offboard(&mut self, req: OffboardRequest, now_ms: u64) -> Result<u64, RelayError> {
-        let OffboardRequest { group_id, admin, admin_assertion, removed, remove_commit, ratchet_tree } = req;
+        let OffboardRequest {
+            group_id,
+            admin,
+            admin_assertion,
+            removed,
+            remove_commit,
+            ratchet_tree,
+        } = req;
         self.require_session(&admin)?;
         // RBAC: owner is the trust anchor; anyone else must present an owner-signed
         // assertion whose role carries RemoveMember.
@@ -440,17 +541,30 @@ impl DeliveryService {
         // Atomic with the commit: drop from the roster, refresh the public ratchet
         // tree, and record the offboard as a single logical event pair.
         let epoch = {
-            let state = self.groups.get_mut(&group_id).ok_or(RelayError::GroupUnknown)?;
+            let state = self
+                .groups
+                .get_mut(&group_id)
+                .ok_or(RelayError::GroupUnknown)?;
             state.members.remove(&removed);
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
         self.persist_group(&group_id)?;
         self.audit_append(
-            AuditEvent::MemberRemoved { group_id, member: removed, epoch: EpochId(epoch) },
+            AuditEvent::MemberRemoved {
+                group_id,
+                member: removed,
+                epoch: EpochId(epoch),
+            },
             now_ms,
         )?;
-        self.audit_append(AuditEvent::RoleRevoked { subject: removed, scope: Some(group_id) }, now_ms)?;
+        self.audit_append(
+            AuditEvent::RoleRevoked {
+                subject: removed,
+                scope: Some(group_id),
+            },
+            now_ms,
+        )?;
         Ok(seq)
     }
 
@@ -494,7 +608,10 @@ impl DeliveryService {
         let ciphertext_hash = *blake3::hash(&envelope.ciphertext).as_bytes();
         let size = envelope.ciphertext.len() as u64;
 
-        let state = self.groups.get_mut(&envelope.group_id).ok_or(RelayError::GroupUnknown)?;
+        let state = self
+            .groups
+            .get_mut(&envelope.group_id)
+            .ok_or(RelayError::GroupUnknown)?;
         if !state.members.contains(&envelope.sender) {
             return Err(RelayError::NotAMember);
         }
@@ -505,11 +622,15 @@ impl DeliveryService {
         if envelope.kind == EnvelopeKind::Commit {
             match state.accepted_commit.get(&envelope.epoch.0) {
                 Some(existing) if *existing != ciphertext_hash => {
-                    return Err(RelayError::EpochAlreadyCommitted { epoch: envelope.epoch.0 });
+                    return Err(RelayError::EpochAlreadyCommitted {
+                        epoch: envelope.epoch.0,
+                    });
                 }
                 Some(_) => {} // identical resubmission — idempotent
                 None => {
-                    state.accepted_commit.insert(envelope.epoch.0, ciphertext_hash);
+                    state
+                        .accepted_commit
+                        .insert(envelope.epoch.0, ciphertext_hash);
                     if envelope.epoch.0 > state.current_epoch {
                         state.current_epoch = envelope.epoch.0;
                     }
@@ -550,7 +671,10 @@ impl DeliveryService {
 
     /// Drain a wallet's mailbox (the client's poll). In-order by arrival.
     pub fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
-        self.mailboxes.get_mut(wallet).map(std::mem::take).unwrap_or_default()
+        self.mailboxes
+            .get_mut(wallet)
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     // ─────────────────────── introspection / audit ───────────────────────
@@ -561,7 +685,9 @@ impl DeliveryService {
     }
 
     pub fn group_members(&self, group_id: &GroupId) -> Option<Vec<WalletAddress>> {
-        self.groups.get(group_id).map(|g| g.members.iter().copied().collect())
+        self.groups
+            .get(group_id)
+            .map(|g| g.members.iter().copied().collect())
     }
 
     /// Number of registered groups (for the admin health snapshot).
@@ -635,7 +761,14 @@ mod tests {
         relay.authenticate(&msg, &sig, now).unwrap();
     }
 
-    fn envelope(group: GroupId, sender: WalletAddress, kind: EnvelopeKind, epoch: u64, ct: &[u8], to: &[WalletAddress]) -> Envelope {
+    fn envelope(
+        group: GroupId,
+        sender: WalletAddress,
+        kind: EnvelopeKind,
+        epoch: u64,
+        ct: &[u8],
+        to: &[WalletAddress],
+    ) -> Envelope {
         Envelope {
             group_id: group,
             epoch: EpochId(epoch),
@@ -648,6 +781,69 @@ mod tests {
     }
 
     #[test]
+    fn claims_inbox_roundtrips_ciphertext_server_blind_and_allows_non_members() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate(); // authenticated but NOT a member of any group
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let token_hash = [9u8; 32];
+        let sealed = b"SEALED-CLAIM-CIPHERTEXT".to_vec();
+        relay
+            .submit_claim(
+                &invitee.address(),
+                ClaimSubmission {
+                    token_hash,
+                    ciphertext: sealed.clone(),
+                },
+            )
+            .unwrap();
+        let got = relay.poll_claims(&owner.address(), &token_hash).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].ciphertext, sealed);
+        assert_eq!(got[0].token_hash, token_hash);
+        relay
+            .submit_claim(
+                &invitee.address(),
+                ClaimSubmission {
+                    token_hash,
+                    ciphertext: sealed.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            relay
+                .poll_claims(&owner.address(), &token_hash)
+                .unwrap()
+                .len(),
+            1
+        );
+        relay.clear_claims(&token_hash);
+        assert!(relay
+            .poll_claims(&owner.address(), &token_hash)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn claims_inbox_requires_an_authenticated_session() {
+        let owner = EthWallet::generate();
+        let stranger = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        let r = relay.submit_claim(
+            &stranger.address(),
+            ClaimSubmission {
+                token_hash: [1u8; 32],
+                ciphertext: vec![1, 2, 3],
+            },
+        );
+        assert!(matches!(r, Err(RelayError::NotAuthenticated)));
+        login(&mut relay, &owner, 10);
+        let r2 = relay.poll_claims(&stranger.address(), &[1u8; 32]);
+        assert!(matches!(r2, Err(RelayError::NotAuthenticated)));
+    }
+
+    #[test]
     fn ciphertext_only_store_and_audit_verifies() {
         let alice = EthWallet::generate();
         let bob = EthWallet::generate();
@@ -657,13 +853,41 @@ mod tests {
 
         let gid = GroupId([7; 32]);
         relay.register_group(gid, alice.address(), 12).unwrap();
-        relay.onboard(gid, alice.address(), None, bob.address(),
-            envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome-ct", &[bob.address()]),
-            b"ratchet-tree".to_vec(), 13).unwrap();
+        relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                bob.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"welcome-ct",
+                    &[bob.address()],
+                ),
+                b"ratchet-tree".to_vec(),
+                13,
+            )
+            .unwrap();
 
         let secret_plaintext = b"this is a secret message";
         let ct = b"OPAQUE-CIPHERTEXT-BLOB"; // stand-in ciphertext for the relay-only test
-        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Application, 1, ct, &[bob.address()]), 14).unwrap();
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    ct,
+                    &[bob.address()],
+                ),
+                14,
+            )
+            .unwrap();
 
         // The relay's durable store contains ciphertext only — never the plaintext.
         // The log holds the Welcome (durable) + the application envelope.
@@ -673,10 +897,18 @@ mod tests {
             assert_ne!(e.ciphertext.as_slice(), secret_plaintext);
             assert!(e.group_seq.is_some());
         }
-        assert!(log.iter().any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == ct));
+        assert!(log
+            .iter()
+            .any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == ct));
         // Bob receives the fanned-out envelope.
         let inbox = relay.fetch(&bob.address());
-        assert_eq!(inbox.iter().filter(|e| e.kind == EnvelopeKind::Application).count(), 1);
+        assert_eq!(
+            inbox
+                .iter()
+                .filter(|e| e.kind == EnvelopeKind::Application)
+                .count(),
+            1
+        );
         // The audit chain is intact offline.
         relay.audit().verify_integrity().unwrap();
     }
@@ -690,12 +922,54 @@ mod tests {
         relay.register_group(gid, alice.address(), 2).unwrap();
 
         // First commit for epoch 1 is accepted.
-        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 3).unwrap();
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    1,
+                    b"commit-A",
+                    &[],
+                ),
+                3,
+            )
+            .unwrap();
         // A DIFFERENT commit for the same epoch is rejected (no fork).
-        let err = relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-B", &[]), 4).unwrap_err();
-        assert!(matches!(err, RelayError::EpochAlreadyCommitted { epoch: 1 }));
+        let err = relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    1,
+                    b"commit-B",
+                    &[],
+                ),
+                4,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RelayError::EpochAlreadyCommitted { epoch: 1 }
+        ));
         // Re-submitting the IDENTICAL commit is idempotent (no error).
-        relay.submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-A", &[]), 5).unwrap();
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    1,
+                    b"commit-A",
+                    &[],
+                ),
+                5,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -704,7 +978,10 @@ mod tests {
         let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
         let gid = GroupId([1; 32]);
         // No login → register fails fail-closed.
-        assert!(matches!(relay.register_group(gid, alice.address(), 1), Err(RelayError::NotAuthenticated)));
+        assert!(matches!(
+            relay.register_group(gid, alice.address(), 1),
+            Err(RelayError::NotAuthenticated)
+        ));
     }
 
     #[test]
@@ -718,19 +995,42 @@ mod tests {
         // First run: durable relay does a full onboard + message.
         {
             let mut relay =
-                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 0).unwrap();
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 0)
+                    .unwrap();
             login(&mut relay, &alice, 10);
             login(&mut relay, &bob, 11);
             relay.register_group(gid, alice.address(), 12).unwrap();
             relay
                 .onboard(
-                    gid, alice.address(), None, bob.address(),
-                    envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome-ct", &[bob.address()]),
-                    b"ratchet-tree".to_vec(), 13,
+                    gid,
+                    alice.address(),
+                    None,
+                    bob.address(),
+                    envelope(
+                        gid,
+                        alice.address(),
+                        EnvelopeKind::Welcome,
+                        1,
+                        b"welcome-ct",
+                        &[bob.address()],
+                    ),
+                    b"ratchet-tree".to_vec(),
+                    13,
                 )
                 .unwrap();
             relay
-                .submit_as(alice.address(), envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"CIPHERTEXT-BLOB", &[bob.address()]), 14)
+                .submit_as(
+                    alice.address(),
+                    envelope(
+                        gid,
+                        alice.address(),
+                        EnvelopeKind::Application,
+                        1,
+                        b"CIPHERTEXT-BLOB",
+                        &[bob.address()],
+                    ),
+                    14,
+                )
                 .unwrap();
             assert_eq!(relay.group_log(&gid).unwrap().len(), 2); // welcome + application
         }
@@ -738,7 +1038,8 @@ mod tests {
         // Second run: reopen the SAME store — state replays from disk.
         {
             let relay =
-                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 999).unwrap();
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 999)
+                    .unwrap();
             // Roster survived.
             let members = relay.group_members(&gid).unwrap();
             assert!(members.contains(&alice.address()) && members.contains(&bob.address()));
@@ -765,7 +1066,18 @@ mod tests {
         relay.register_group(gid, alice.address(), 3).unwrap();
         // Mallory is authenticated but not a member.
         let err = relay
-            .submit_as(mallory.address(), envelope(gid, mallory.address(), EnvelopeKind::Application, 0, b"x", &[]), 4)
+            .submit_as(
+                mallory.address(),
+                envelope(
+                    gid,
+                    mallory.address(),
+                    EnvelopeKind::Application,
+                    0,
+                    b"x",
+                    &[],
+                ),
+                4,
+            )
             .unwrap_err();
         assert!(matches!(err, RelayError::NotAMember));
     }
@@ -793,31 +1105,66 @@ mod tests {
         // sender-binding, not on membership).
         relay
             .onboard(
-                gid, alice.address(), None, mallory.address(),
-                envelope(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome", &[mallory.address()]),
-                b"rt".to_vec(), 4,
+                gid,
+                alice.address(),
+                None,
+                mallory.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"welcome",
+                    &[mallory.address()],
+                ),
+                b"rt".to_vec(),
+                4,
             )
             .unwrap();
 
         let audit_len_before = relay.audit().len();
 
         // Mallory (authed) tries to submit AS Alice (spoofed sender).
-        let spoof = envelope(gid, alice.address(), EnvelopeKind::Application, 1, b"FORGED", &[mallory.address()]);
+        let spoof = envelope(
+            gid,
+            alice.address(),
+            EnvelopeKind::Application,
+            1,
+            b"FORGED",
+            &[mallory.address()],
+        );
         let err = relay.submit_as(mallory.address(), spoof, 5).unwrap_err();
-        assert!(matches!(err, RelayError::SenderMismatch), "spoofed sender must be rejected, got {err:?}");
+        assert!(
+            matches!(err, RelayError::SenderMismatch),
+            "spoofed sender must be rejected, got {err:?}"
+        );
 
         // Nothing was recorded under Alice's identity: no new audit receipt, no
         // forged envelope in the log.
-        assert_eq!(relay.audit().len(), audit_len_before, "spoofed submit must not write an audit receipt");
+        assert_eq!(
+            relay.audit().len(),
+            audit_len_before,
+            "spoofed submit must not write an audit receipt"
+        );
         let alice_forged = relay
             .group_log(&gid)
             .unwrap()
             .iter()
             .any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == b"FORGED");
-        assert!(!alice_forged, "forged envelope must not enter the durable log");
+        assert!(
+            !alice_forged,
+            "forged envelope must not enter the durable log"
+        );
 
         // And the honest path still works: Mallory submits as herself.
-        let ok = envelope(gid, mallory.address(), EnvelopeKind::Application, 1, b"HONEST", &[alice.address()]);
+        let ok = envelope(
+            gid,
+            mallory.address(),
+            EnvelopeKind::Application,
+            1,
+            b"HONEST",
+            &[alice.address()],
+        );
         relay.submit_as(mallory.address(), ok, 6).unwrap();
     }
 
@@ -840,38 +1187,85 @@ mod tests {
         // Owner onboards Mallory (legitimately).
         relay
             .onboard(
-                gid, owner.address(), None, mallory.address(),
-                envelope(gid, owner.address(), EnvelopeKind::Welcome, 1, b"w1", &[mallory.address()]),
-                b"rt1".to_vec(), 4,
+                gid,
+                owner.address(),
+                None,
+                mallory.address(),
+                envelope(
+                    gid,
+                    owner.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w1",
+                    &[mallory.address()],
+                ),
+                b"rt1".to_vec(),
+                4,
             )
             .unwrap();
 
         // Mallory (a Member, no grant) tries to onboard the victim → rejected.
         let err = relay
             .onboard(
-                gid, mallory.address(), None, victim.address(),
-                envelope(gid, mallory.address(), EnvelopeKind::Welcome, 1, b"w2", &[victim.address()]),
-                b"rt2".to_vec(), 5,
+                gid,
+                mallory.address(),
+                None,
+                victim.address(),
+                envelope(
+                    gid,
+                    mallory.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w2",
+                    &[victim.address()],
+                ),
+                b"rt2".to_vec(),
+                5,
             )
             .unwrap_err();
-        assert!(matches!(err, RelayError::NotAuthorized), "non-owner without AddMember grant must be rejected, got {err:?}");
         assert!(
-            !relay.group_members(&gid).unwrap().contains(&victim.address()),
+            matches!(err, RelayError::NotAuthorized),
+            "non-owner without AddMember grant must be rejected, got {err:?}"
+        );
+        assert!(
+            !relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&victim.address()),
             "victim must NOT have entered the roster"
         );
 
         // With an owner-signed Admin grant (Admin holds AddMember), Mallory CAN onboard.
         let grant = rbac::sign_role_assertion(
-            &owner, Role::Owner, mallory.address(), Role::Admin, None, None,
+            &owner,
+            Role::Owner,
+            mallory.address(),
+            Role::Admin,
+            None,
+            None,
         )
         .unwrap();
         relay
             .onboard(
-                gid, mallory.address(), Some(&grant), victim.address(),
-                envelope(gid, mallory.address(), EnvelopeKind::Welcome, 1, b"w3", &[victim.address()]),
-                b"rt3".to_vec(), 6,
+                gid,
+                mallory.address(),
+                Some(&grant),
+                victim.address(),
+                envelope(
+                    gid,
+                    mallory.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w3",
+                    &[victim.address()],
+                ),
+                b"rt3".to_vec(),
+                6,
             )
             .unwrap();
-        assert!(relay.group_members(&gid).unwrap().contains(&victim.address()));
+        assert!(relay
+            .group_members(&gid)
+            .unwrap()
+            .contains(&victim.address()));
     }
 }

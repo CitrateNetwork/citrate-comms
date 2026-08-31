@@ -12,7 +12,8 @@
 
 use comms_core::identity::SiweMessage;
 use comms_proto::{
-    canonical, Envelope, EnvelopeKind, GroupId, KeyPackagePublication, RoleAssertion, WalletAddress,
+    canonical, ClaimSubmission, Envelope, EnvelopeKind, GroupId, KeyPackagePublication,
+    RoleAssertion, WalletAddress,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
@@ -184,6 +185,22 @@ impl RelayClient {
         self.expect_ack(ClientFrame::RegisterGroup { group_id })
             .await
             .map(|_| ())
+    }
+
+    /// CONNECT-S1 — submit a sealed claim to the server-blind claims-inbox (pre-membership).
+    pub async fn submit_claim(&self, submission: ClaimSubmission) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::SubmitClaim(submission))
+            .await
+            .map(|_| ())
+    }
+
+    /// CONNECT-S1 — poll the claims-inbox by invite token hash (owner-side); opaque ciphertexts.
+    pub async fn poll_claims(&self, token_hash: [u8; 32]) -> Result<Vec<ClaimSubmission>, WsError> {
+        match self.request(ClientFrame::PollClaims { token_hash }).await? {
+            ServerFrame::Claims(claims) => Ok(claims),
+            ServerFrame::Error { message } => Err(WsError::Server(message)),
+            _ => Err(WsError::Protocol("expected Claims")),
+        }
     }
 
     pub async fn onboard(

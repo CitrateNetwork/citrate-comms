@@ -18,8 +18,8 @@ use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::{GroupHandle, MlsMember};
 use comms_core::rbac;
 use comms_proto::{
-    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role, RoleAssertion,
-    WalletAddress, CITRATE_CHAIN_ID,
+    ClaimSubmission, Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role,
+    RoleAssertion, WalletAddress, CITRATE_CHAIN_ID,
 };
 
 pub mod ipc;
@@ -111,7 +111,11 @@ pub struct MemberDaemon {
 impl MemberDaemon {
     /// Bring up the daemon for `wallet` over a fresh IN-PROCESS relay owned by this wallet (single
     /// node). For a networked relay, use [`Self::new_with_relay`] with a `WsRelay`.
-    pub fn new(wallet: EthWallet, domain: impl Into<String>, now: u64) -> Result<Self, DaemonError> {
+    pub fn new(
+        wallet: EthWallet,
+        domain: impl Into<String>,
+        now: u64,
+    ) -> Result<Self, DaemonError> {
         let domain = domain.into();
         let relay: Box<dyn Relay> =
             Box::new(InProcessRelay::new(&domain, wallet.address()).map_err(DaemonError::Relay)?);
@@ -127,7 +131,8 @@ impl MemberDaemon {
         now: u64,
     ) -> Result<Self, DaemonError> {
         let domain = domain.into();
-        let mls = MlsMember::new(&wallet.address().0).map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let mls =
+            MlsMember::new(&wallet.address().0).map_err(|e| DaemonError::Mls(e.to_string()))?;
         let mut d_now = now;
         login(relay.as_mut(), &wallet, &domain, d_now)?;
         d_now += 1;
@@ -195,7 +200,10 @@ impl MemberDaemon {
             .into_iter()
             .find(|e| e.kind == EnvelopeKind::Welcome && e.group_id == gid)
             .ok_or_else(|| {
-                DaemonError::Relay(format!("no pending welcome for group {}", hex::encode(gid.0)))
+                DaemonError::Relay(format!(
+                    "no pending welcome for group {}",
+                    hex::encode(gid.0)
+                ))
             })?;
         let tree = self
             .relay
@@ -216,7 +224,11 @@ impl MemberDaemon {
             .into_iter()
             .map(|w| MemberInfo {
                 wallet: w,
-                sig_pubkey: if w == me { self.mls.sig_pubkey() } else { Vec::new() },
+                sig_pubkey: if w == me {
+                    self.mls.sig_pubkey()
+                } else {
+                    Vec::new()
+                },
                 role: Role::Member,
             })
             .collect();
@@ -270,7 +282,15 @@ impl MemberDaemon {
             (out.commit, out.welcome, out.ratchet_tree, g.epoch)
         };
         // Deliver the commit to existing members, then onboard the joiner (welcome + tree).
-        submit_commit(self.relay.as_mut(), gid, owner, epoch, commit, commit_recipients, now)?;
+        submit_commit(
+            self.relay.as_mut(),
+            gid,
+            owner,
+            epoch,
+            commit,
+            commit_recipients,
+            now,
+        )?;
         onboard(
             self.relay.as_mut(),
             gid,
@@ -354,6 +374,34 @@ impl MemberDaemon {
     }
 
     /// The group roster: `(wallet, role)` for every current member (owner first).
+    /// CONNECT-S1 — submit a sealed claim to the relay's server-blind claims-inbox (invitee side).
+    pub fn submit_claim(
+        &mut self,
+        token_hash: [u8; 32],
+        ciphertext: Vec<u8>,
+    ) -> Result<(), DaemonError> {
+        self.relay
+            .as_mut()
+            .submit_claim(
+                self.wallet.address(),
+                ClaimSubmission {
+                    token_hash,
+                    ciphertext,
+                },
+            )
+            .map_err(DaemonError::Relay)
+    }
+
+    /// CONNECT-S1 — poll the relay's claims-inbox by invite token hash (owner side).
+    pub fn poll_claims(&mut self, token_hash: [u8; 32]) -> Result<Vec<Vec<u8>>, DaemonError> {
+        let claims = self
+            .relay
+            .as_mut()
+            .poll_claims(self.wallet.address(), token_hash)
+            .map_err(DaemonError::Relay)?;
+        Ok(claims.into_iter().map(|c| c.ciphertext).collect())
+    }
+
     pub fn roster(&self, gid: GroupId) -> Result<Vec<(WalletAddress, Role)>, DaemonError> {
         let g = self
             .groups
