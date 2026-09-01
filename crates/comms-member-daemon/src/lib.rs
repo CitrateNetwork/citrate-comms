@@ -539,6 +539,12 @@ impl MemberDaemon {
     pub fn domain(&self) -> &str {
         &self.domain
     }
+    /// Flag-A — whether the relay link is currently usable (in-process is always up; a networked
+    /// `WsRelay` reports its live socket). Surfaced over IPC as `relayStatus` so citrate-core reports
+    /// a relay DROP instead of a false "healthy". Cheap + bounded (see [`Relay::is_connected`]).
+    pub fn relay_connected(&self) -> bool {
+        self.relay.is_connected()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,13 @@ pub trait Relay: Send {
         now: u64,
     ) -> Result<(), String>;
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope>;
+    /// Flag-A — whether this relay's link is currently usable. The in-process relay is always
+    /// local-up; a networked [`WsRelay`] reports its LIVE connection state so the daemon (and the app
+    /// above it) can surface a relay DROP instead of a false "healthy" while every relayed op fails.
+    /// Default `true` so in-process impls need no change; must be cheap + bounded (a health probe).
+    fn is_connected(&self) -> bool {
+        true
+    }
     /// The public ratchet tree a joiner needs to process its Welcome.
     fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String>;
     /// The group's current member roster (addresses) — a joiner needs it to address messages.
@@ -224,6 +231,22 @@ impl WsRelay {
 }
 
 impl Relay for WsRelay {
+    fn is_connected(&self) -> bool {
+        // Flag-A — ACTIVE liveness: a bounded `challenge()` round-trip. Unlike a cached flag this
+        // reflects the live socket (a WS that dropped mid-session fails the round-trip), and `challenge`
+        // is the pre-auth endpoint so it works regardless of session state. Bounded at 500ms so a
+        // wedged link can never stall the health probe; any error/timeout ⇒ not connected.
+        self.rt
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    self.client.challenge(),
+                )
+                .await
+            })
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
+    }
     fn issue_challenge(&mut self, _now: u64) -> String {
         // A WS challenge failure surfaces at authenticate (which will then fail loudly).
         self.rt
