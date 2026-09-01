@@ -169,3 +169,16 @@ fn add_member_without_a_published_key_package_is_an_honest_error() {
     let r = owner.add_member(gid, stranger);
     assert!(matches!(r, Err(DaemonError::NoKeyPackage(_))), "got {r:?}");
 }
+
+#[test]
+fn relay_status_op_reports_connected_for_the_in_process_relay() {
+    // Flag-A — the health query maps straight to Relay::is_connected. The in-process relay is always
+    // local-up, so a fresh daemon answers relayStatus{connected:true}. (A networked WsRelay overrides
+    // is_connected with a live challenge round-trip; a dropped link answers connected:false.)
+    let mut d = MemberDaemon::new(EthWallet::generate(), "relay.test", 1000).expect("daemon up");
+    assert!(d.relay_connected(), "in-process relay is always connected");
+    match crate::ipc::handle_request(&mut d, crate::ipc::Request::RelayStatus) {
+        crate::ipc::Response::RelayStatus { connected } => assert!(connected),
+        other => panic!("expected RelayStatus, got {other:?}"),
+    }
+}

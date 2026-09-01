@@ -65,6 +65,9 @@ pub enum Request {
     JoinGroup {
         group: String,
     },
+    /// Flag-A — report whether the networked relay link is currently up. Cheap health query (no group
+    /// state); citrate-core uses it so a mid-session relay DROP shows as "degraded", not "healthy".
+    RelayStatus,
 }
 
 /// One roster entry: the member address (hex) + role string.
@@ -117,6 +120,11 @@ pub enum Response {
     /// CONNECT-S1 — the polled claim ciphertexts (hex; opaque). Owner decrypts with the invite key.
     Claims {
         ciphertexts: Vec<String>,
+    },
+    /// Flag-A — the networked relay-link state (answer to `RelayStatus`). `connected: false` = the
+    /// relay is configured but the link is down, so relayed ops will fail until it reconnects.
+    RelayStatus {
+        connected: bool,
     },
     Error {
         message: String,
@@ -348,5 +356,10 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 },
             }
         }
+        // Flag-A — a pure health query: never touches group/MLS state, never fails (a down link is a
+        // valid answer, `connected: false`, not an error).
+        Request::RelayStatus => Response::RelayStatus {
+            connected: daemon.relay_connected(),
+        },
     }
 }
