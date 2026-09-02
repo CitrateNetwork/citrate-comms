@@ -18,6 +18,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
+# rustls 0.23 dropped the automatic default CryptoProvider; with both `ring` and `aws-lc-rs`
+# in the tree it can't pick one and PANICS on the first wss:// dial. We install `ring`
+# explicitly (once) before connecting — see client.rs. Pin the provider here.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

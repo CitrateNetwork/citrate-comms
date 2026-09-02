@@ -1229,6 +1229,7 @@ dependencies = [
  "comms-core",
  "comms-proto",
  "futures-util",
+ "rustls",
  "serde",
  "thiserror 1.0.69",
  "tokio",
