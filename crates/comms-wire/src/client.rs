@@ -21,6 +21,18 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::frames::{ClientFrame, ServerFrame};
 
+/// Install the rustls `ring` crypto provider exactly once for this process, before any TLS dial.
+/// rustls 0.23 no longer auto-selects a provider, and with both `ring` and `aws-lc-rs` present in the
+/// tree the ambiguity makes the first `wss://` `connect_async` panic. Called from every connect path.
+fn install_tls_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Err only means "already installed by someone else" — fine either way.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// **E-5 WP-3.** The advisory notification push, decoded off its own channel.
 pub struct NotifyPush {
     pub group_id: GroupId,
@@ -61,6 +73,12 @@ impl RelayClient {
         url: &str,
         allow_insecure: bool,
     ) -> Result<(Self, String), WsError> {
+        // Install the rustls crypto provider ONCE before any TLS dial. rustls 0.23 removed the
+        // automatic default provider, and with both `ring` and `aws-lc-rs` in the dependency tree it
+        // cannot pick one — so `connect_async` to a wss:// endpoint would PANIC at TLS setup, before
+        // the WebSocket handshake, before SIWE login (the relay never sees a connection). This is what
+        // made every wss:// group fail to connect. Idempotent (install_default errs if already set).
+        install_tls_provider();
         // Fail closed BEFORE dialing if the endpoint is insecure.
         crate::endpoint::enforce_endpoint_policy(url, allow_insecure)
             .map_err(|e| WsError::InsecureEndpoint(e.to_string()))?;
