@@ -336,6 +336,14 @@ impl NetSession {
                     .await
                     .map_err(NetError::Ws)?
                     .ok_or(NetError::NoKeyPackage(peer))?;
+                // The relay is the in-scope attacker for this server-blind asset
+                // (RFC 9420 §3: the Delivery Service is untrusted). Verify — HERE,
+                // in the client that is about to admit the member — that this
+                // KeyPackage genuinely belongs to `peer` before adding it. Without
+                // this gate a hostile relay substitutes its own KeyPackage, is
+                // added as a full MLS member, and reads the group (CM2-B-A001).
+                comms_core::mls::verify_incoming_key_package(&kp, &peer)
+                    .map_err(|e| NetError::Mls(e.to_string()))?;
                 key_packages.push(kp.key_package);
             }
             let add = group

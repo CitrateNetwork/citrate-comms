@@ -5,8 +5,12 @@
 //! opaque [`Envelope`] ciphertext + routing metadata. The relay:
 //!
 //! - authenticates a session with the SIWE handshake (`comms-core::identity`),
-//! - runs a one-time-use **KeyPackage directory** (verifying each wallet binding
-//!   attestation — defeats spoofing, R3),
+//! - runs a one-time-use **KeyPackage directory**, verifying each wallet binding
+//!   attestation as a *courtesy pre-filter* (R3). This check is NOT the security
+//!   boundary for KeyPackage spoofing: the relay is the in-scope attacker for a
+//!   server-blind asset (RFC 9420 §3), so a hostile relay simply skips it. The
+//!   authoritative check runs client-side in `comms_core::mls::verify_incoming_key_package`
+//!   before any member is admitted (finding CM2-B-A001),
 //! - assigns a **per-group total order** (`group_seq`) and enforces
 //!   **first-writer-wins per epoch** for Commits (R1, formalized in `PLANSET/03`),
 //! - stores ciphertext envelopes and fans them out to recipient mailboxes,
@@ -326,7 +330,11 @@ impl DeliveryService {
     // ─────────────────────── KeyPackage directory ───────────────────────
 
     /// Admit a KeyPackage to the directory after verifying its wallet binding
-    /// attestation (R3) and consuming the bound nonce (single-use).
+    /// attestation (R3, a courtesy pre-filter) and consuming the bound nonce
+    /// (single-use). The client that later admits the member re-verifies the
+    /// attestation itself (`comms_core::mls::verify_incoming_key_package`) — that
+    /// client-side check, not this one, is the security boundary against a hostile
+    /// relay substituting a KeyPackage (CM2-B-A001).
     pub fn publish_key_package(
         &mut self,
         publication: KeyPackagePublication,

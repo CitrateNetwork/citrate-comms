@@ -257,6 +257,13 @@ impl MemberDaemon {
             .take_key_package(&member)
             .map_err(DaemonError::Relay)?
             .ok_or_else(|| DaemonError::NoKeyPackage(hex::encode(member.0)))?;
+        // The relay is untrusted (RFC 9420 §3; `01_SCOPE.md` §2). Verify HERE, in
+        // the client admitting the member, that this KeyPackage genuinely belongs
+        // to `member` before it is added and before its `mls_sig_pubkey` is trusted
+        // as this member's identity. A hostile relay that skips its own check and
+        // substitutes a KeyPackage is rejected here (CM2-B-A001).
+        comms_core::mls::verify_incoming_key_package(&kp, &member)
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let gi = self
             .groups
             .iter()
