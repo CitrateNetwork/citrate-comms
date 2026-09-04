@@ -340,6 +340,72 @@ impl GroupHandle {
     }
 }
 
+/// Client-side gate that a KeyPackage handed back by the (untrusted) relay
+/// genuinely belongs to the wallet we intend to admit — the security boundary for
+/// KeyPackage substitution (finding `CM2-B-A001`).
+///
+/// RFC 9420 §3 treats the Delivery Service (here, the relay) as untrusted, and
+/// `01_SCOPE.md` §2 names the relay operator an in-scope attacker for this
+/// server-blind asset. The relay's own `publish_key_package` attestation check
+/// therefore runs *inside the component it must defend against*: it is a courtesy
+/// pre-filter only. THIS function — run by the client that is about to add the
+/// member — is the authority. Three independent bindings must all hold, or a
+/// hostile relay substitutes its own KeyPackage, is admitted as a full MLS member,
+/// and decrypts the group:
+///
+/// 1. **Roster binding** — the publication claims the wallet we asked to add. A
+///    relay that hands back its *own* validly-attested KeyPackage is caught here.
+/// 2. **Wallet→MLS attestation** — the claimed wallet's secp256k1 key signed the
+///    binding over `mls_sig_pubkey`. A relay that mints an MLS key in the victim's
+///    name is caught here: it does not hold the victim's wallet secret.
+/// 3. **KeyPackage↔attestation consistency** — the signature key and credential
+///    identity actually inside the TLS-serialized KeyPackage equal the attested
+///    `mls_sig_pubkey` and wallet. A relay that keeps a genuine attestation but
+///    swaps the KeyPackage bytes under it is caught here.
+///
+/// Refuses on any mismatch. Public-key verification over public data only — no
+/// group secret is touched, so this is safe to run before any MLS state change.
+pub fn verify_incoming_key_package(
+    pubn: &comms_proto::KeyPackagePublication,
+    expected_wallet: &comms_proto::WalletAddress,
+) -> Result<(), MlsError> {
+    // (1) Roster binding: the relay must return the wallet we asked for.
+    if pubn.wallet != *expected_wallet {
+        return Err(MlsError::Binding(format!(
+            "relay returned a KeyPackage for {} but {} was requested",
+            hex::encode(pubn.wallet.0),
+            hex::encode(expected_wallet.0),
+        )));
+    }
+    // (2) Wallet→MLS binding attestation. The client is the authority here; the
+    //     relay running the identical check cannot defend against the relay itself.
+    crate::identity::verify_binding_attestation(pubn)
+        .map_err(|e| MlsError::Binding(format!("binding attestation failed: {e}")))?;
+    // (3) The KeyPackage bytes must actually carry the attested signature key and
+    //     wallet identity, or a relay could keep a real attestation and swap the
+    //     package under it.
+    let provider = OpenMlsRustCrypto::default();
+    let kp_in = KeyPackageIn::tls_deserialize_exact(pubn.key_package.as_slice())
+        .map_err(|e| MlsError::Codec(format!("kp deser: {e:?}")))?;
+    let kp = kp_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| MlsError::Group(format!("kp validate: {e:?}")))?;
+    let leaf = kp.leaf_node();
+    if leaf.signature_key().as_slice() != pubn.mls_sig_pubkey.as_slice() {
+        return Err(MlsError::Binding(
+            "KeyPackage signature key does not match the attested mls_sig_pubkey".into(),
+        ));
+    }
+    let credential = BasicCredential::try_from(leaf.credential().clone())
+        .map_err(|e| MlsError::Binding(format!("non-basic credential: {e:?}")))?;
+    if credential.identity() != expected_wallet.0 {
+        return Err(MlsError::Binding(
+            "KeyPackage credential identity does not match the claimed wallet".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn content_kind(c: &ProcessedMessageContent) -> &'static str {
     match c {
         ProcessedMessageContent::ApplicationMessage(_) => "Application",
@@ -357,6 +423,8 @@ pub enum MlsError {
     Codec(String),
     #[error("mls group error: {0}")]
     Group(String),
+    #[error("keypackage binding rejected: {0}")]
+    Binding(String),
 }
 
 #[cfg(test)]
@@ -374,6 +442,151 @@ mod tests {
             supported.contains(&CIPHERSUITE),
             "provider must support {CIPHERSUITE:?}"
         );
+    }
+
+    // ── CM2-B-A001 tripwire: the CLIENT is the authority on KeyPackage binding ──
+    //
+    // A hostile relay is the in-scope attacker for this server-blind asset (RFC 9420
+    // §3). The relay's own `publish_key_package` attestation check is inside the
+    // component it must defend against, so it is not the boundary. These tests pin
+    // that `verify_incoming_key_package` — run client-side before a member is
+    // admitted — accepts a genuine member and rejects every relay substitution.
+
+    use crate::identity::EthWallet;
+    use comms_proto::KeyPackagePublication;
+
+    const RELAY_DOMAIN: &str = "relay.citrate.ai";
+    const NONCE: &str = "nonce-abc";
+
+    /// Build the KeyPackage publication a genuine `wallet` would publish: a fresh
+    /// MLS KeyPackage whose credential identity is the wallet address, plus the
+    /// wallet's secp256k1 attestation over that MLS signature key.
+    fn genuine_publication(wallet: &EthWallet) -> KeyPackagePublication {
+        let member = MlsMember::new(&wallet.address().0).unwrap();
+        let key_package = member.fresh_key_package().unwrap();
+        let mls_sig_pubkey = member.sig_pubkey();
+        let binding = wallet
+            .sign_binding(&mls_sig_pubkey, RELAY_DOMAIN, NONCE)
+            .to_vec();
+        KeyPackagePublication {
+            wallet: wallet.address(),
+            key_package,
+            mls_sig_pubkey,
+            binding_attestation: binding,
+            nonce: NONCE.into(),
+            relay_domain: RELAY_DOMAIN.into(),
+        }
+    }
+
+    #[test]
+    fn genuine_member_is_accepted_client_side() {
+        let bob = EthWallet::generate();
+        let pubn = genuine_publication(&bob);
+        // GREEN: the honest member the client asked for is admitted.
+        verify_incoming_key_package(&pubn, &bob.address())
+            .expect("a genuine member's KeyPackage must be accepted");
+    }
+
+    #[test]
+    fn relay_substituted_keypackage_is_rejected_client_side() {
+        // Alice wants to add Bob. The relay (attacker) instead mints its OWN MLS
+        // key but labels the publication with Bob's wallet — the executed A001 PoC.
+        // The relay cannot forge Bob's secp256k1 attestation, so the client rejects.
+        let bob = EthWallet::generate();
+        let relay = EthWallet::generate();
+        let relay_member = MlsMember::new(&bob.address().0).unwrap(); // relay controls this key
+        let forged = KeyPackagePublication {
+            wallet: bob.address(), // claims to be Bob
+            key_package: relay_member.fresh_key_package().unwrap(),
+            mls_sig_pubkey: relay_member.sig_pubkey(),
+            // Relay can only sign with ITS key — recovers to relay, not Bob.
+            binding_attestation: relay
+                .sign_binding(&relay_member.sig_pubkey(), RELAY_DOMAIN, NONCE)
+                .to_vec(),
+            nonce: NONCE.into(),
+            relay_domain: RELAY_DOMAIN.into(),
+        };
+        let err = verify_incoming_key_package(&forged, &bob.address())
+            .expect_err("a KeyPackage the claimed wallet never attested must be rejected");
+        assert!(matches!(err, MlsError::Binding(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn relays_own_validly_attested_keypackage_is_rejected_for_the_wrong_wallet() {
+        // The relay returns its OWN fully valid publication (valid attestation) when
+        // Alice asked for Bob. Attestation verifies, but the roster binding does not.
+        let bob = EthWallet::generate();
+        let relay = EthWallet::generate();
+        let relay_pubn = genuine_publication(&relay);
+        let err = verify_incoming_key_package(&relay_pubn, &bob.address())
+            .expect_err("a KeyPackage for a different wallet than requested must be rejected");
+        assert!(matches!(err, MlsError::Binding(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn swapped_keypackage_under_a_genuine_attestation_is_rejected() {
+        // The relay keeps Bob's genuine attestation but swaps the KeyPackage bytes
+        // (and mls_sig_pubkey field) for a different member it controls. The
+        // KeyPackage↔attestation consistency check catches the swap.
+        let bob = EthWallet::generate();
+        let genuine = genuine_publication(&bob);
+        let other = MlsMember::new(&bob.address().0).unwrap();
+        let swapped = KeyPackagePublication {
+            // Keep Bob's wallet, his real mls_sig_pubkey, and his real attestation
+            // (steps 1 & 2 pass) — only the KeyPackage bytes are swapped for a
+            // package carrying a DIFFERENT signature key. Step 3 must catch it.
+            key_package: other.fresh_key_package().unwrap(),
+            ..genuine
+        };
+        let err = verify_incoming_key_package(&swapped, &bob.address())
+            .expect_err("a KeyPackage whose key differs from the attested one must be rejected");
+        assert!(matches!(err, MlsError::Binding(_)), "got {err:?}");
+    }
+
+    /// RED witness for CM2-B-A001. Demonstrates the exact PoC primitive: the raw
+    /// MLS add path the client used *before* this fix accepts a relay-substituted
+    /// KeyPackage, the relay-controlled member joins from the Welcome and reads
+    /// Alice's plaintext — and then that the new client gate refuses the very same
+    /// publication. Kept as a permanent witness of why the gate must run.
+    #[test]
+    fn red_witness_forged_keypackage_joins_and_reads_then_gate_rejects() {
+        let alice_wallet = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let relay = EthWallet::generate();
+
+        // Relay mints an MLS key it controls, but labels the publication as Bob.
+        let relay_member = MlsMember::new(&bob.address().0).unwrap();
+        let forged = KeyPackagePublication {
+            wallet: bob.address(),
+            key_package: relay_member.fresh_key_package().unwrap(),
+            mls_sig_pubkey: relay_member.sig_pubkey(),
+            binding_attestation: relay
+                .sign_binding(&relay_member.sig_pubkey(), RELAY_DOMAIN, NONCE)
+                .to_vec(),
+            nonce: NONCE.into(),
+            relay_domain: RELAY_DOMAIN.into(),
+        };
+
+        // RED: the pre-fix path (add straight from the relay's bytes) accepts it.
+        let alice = MlsMember::new(&alice_wallet.address().0).unwrap();
+        let mut alice_group = alice.create_group().unwrap();
+        let add = alice_group
+            .add_many(&alice, &[forged.key_package.clone()])
+            .expect("raw MLS add accepts the forged KeyPackage — the A001 primitive");
+        let mut relay_group = relay_member.join(&add.welcome, &add.ratchet_tree).unwrap();
+        let secret = b"acquisition price is 240M, do not forward";
+        let ct = alice_group.send(&alice, secret).unwrap();
+        let read = relay_group.receive(&relay_member, &ct).unwrap();
+        assert_eq!(
+            read, secret,
+            "RED CONFIRMED: without the client gate the relay reads plaintext"
+        );
+
+        // GREEN: the client gate refuses the identical publication, so it never
+        // reaches `add_many`.
+        let err = verify_incoming_key_package(&forged, &bob.address())
+            .expect_err("GREEN: the client gate must reject the forged KeyPackage");
+        assert!(matches!(err, MlsError::Binding(_)), "got {err:?}");
     }
 
     #[test]
