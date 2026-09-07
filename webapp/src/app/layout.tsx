@@ -4,7 +4,11 @@ import "@/styles/app.css";
 
 export const metadata: Metadata = {
   title: "citrate-comms",
-  description: "End-to-end-encrypted, agentic team workspace — Comms · CRM · Projects.",
+  // The native app is server-blind (E2E); this DEPLOYED web tier is trusted-tier
+  // (the server holds COMMS_ENC_KEY and decrypts to serve), as the in-product
+  // Settings/auth copy states. Do not tag the web app "end-to-end-encrypted"
+  // (CIT-COMMS-006 / CM2-B-A008).
+  description: "Agentic team workspace — Comms · CRM · Projects. Encrypted at rest; server-blind E2E on the native app.",
 };
 
 export const viewport: Viewport = {

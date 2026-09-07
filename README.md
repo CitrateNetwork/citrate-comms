@@ -31,10 +31,18 @@ The complete design lives in [`PLANSET/`](PLANSET/):
 - [`07_IMPLEMENTATION_AND_HARDENING_PLAN.md`](PLANSET/07_IMPLEMENTATION_AND_HARDENING_PLAN.md) — airgap build, reproducibility, threat model, Tier-1 audit feed
 
 ## The core invariant
-> **The relay is trusted for *liveness and ordering*, never for *confidentiality*.** It stores and
+> **The relay is trusted for *liveness and ordering*, never for message *content*.** It stores and
 > forwards ciphertext + routing metadata only. All plaintext, all group secrets, and all CRM/PM
 > records live exclusively on member clients. An agent reading a channel is cryptographically
 > identical to a human reading it — there is no shadow key and no plaintext escrow.
+>
+> **Metadata it *does* see (accepted design, PLANSET R4):** a router unavoidably sees the **social
+> graph** — the group roster and the public ratchet tree (member wallet addresses), each message's
+> sender, its recipient set, ciphertext sizes, and arrival timing/order — and retains them in the
+> audit log. The relay cannot read message *content*; it is not blind to *who talks to whom, when*.
+> This is acceptable for on-prem single-tenant (the operator already trusts the host); on a shared
+> hosted relay (`comms.citrate.ai`) it is a disclosed limitation, not a blindness break. Padding,
+> cover traffic and size quantisation are deferred (PLANSET R4).
 
 ## Architecture at a glance
 ```
@@ -63,7 +71,10 @@ MLS (RFC 9420) via OpenMLS, ciphersuite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed
 X25519/Ed25519 curves; the AES-256-GCM "chain grade" is delivered at the at-rest layer, see below).
 At-rest: RocksDB column families encrypted with **AES-256-GCM-SIV** (nonce-misuse-resistant, RFC 8452)
 under per-CF keys derived from a master key via a domain-separated BLAKE3 KDF.
-Audit: BLAKE3 hash-chained append-only log, optionally anchored to chain 40204 for tamper-evidence.
+Audit: BLAKE3 hash-chained append-only log. It detects any *single-record* edit, but is
+**not yet** signed or externally anchored, so it is not tamper-evident against the log's own
+holder (the relay operator can replay a different history that re-verifies) — chain-40204
+anchoring is roadmap (COMMS-S5, PLANSET/02 §7), not shipped (CM2-B-A015).
 
 > **Roadmap (NOT yet implemented):** post-quantum protection — wrapping the at-rest master key with the
 > chain's `HybridKEM` (X25519 + ML-KEM-768) and, in transport, migrating to a hybrid MLS ciphersuite once
