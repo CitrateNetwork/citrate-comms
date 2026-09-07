@@ -18,6 +18,13 @@ export interface ReadablePage {
   truncated: boolean;
   available: boolean;
   note?: string;
+  /**
+   * True ⇒ the fetch was refused by the SSRF guard (private/blocked target),
+   * as opposed to merely empty/unsupported/timed-out. Callers MUST NOT escalate a
+   * blocked page to a less-guarded fetcher (CM2-B-B006): a security refusal is a
+   * refusal, never a signal that "static extraction was too thin".
+   */
+  blocked?: boolean;
 }
 
 const TIMEOUT_MS = 10000;
@@ -31,28 +38,108 @@ export class BlockedUrlError extends Error {
   }
 }
 
-/** Is a dotted-quad / v6 literal in a private, loopback, link-local or ULA range? */
+/** Is a dotted-quad IPv4 in a private / loopback / link-local / reserved range? */
+function isPrivateIpv4(a: number, b: number): boolean {
+  if (a === 10) return true;
+  if (a === 127) return true; // loopback
+  if (a === 0) return true; // "this network"
+  if (a === 169 && b === 254) return true; // link-local + cloud metadata (169.254.169.254)
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT (RFC 6598)
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking (RFC 2544)
+  if (a === 192 && b === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+  if (a >= 224) return true; // multicast + 240/4 reserved
+  return false;
+}
+
+/**
+ * Expand an IPv6 literal to its 8 16-bit groups, resolving `::` and any embedded
+ * IPv4 tail (dotted or the v4-mapped hex form). Returns null if unparseable.
+ */
+function expandIpv6(ip: string): number[] | null {
+  let s = ip;
+  // Embedded dotted IPv4 tail (e.g. ::ffff:169.254.169.254): fold into two hex groups.
+  let v4tail: [number, number] | null = null;
+  const lastColon = s.lastIndexOf(":");
+  if (lastColon >= 0) {
+    const tail = s.slice(lastColon + 1);
+    const dm = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+    if (dm) {
+      const o = dm.slice(1).map(Number);
+      if (o.some((n) => n > 255)) return null;
+      v4tail = [(o[0]! << 8) | o[1]!, (o[2]! << 8) | o[3]!];
+      s = s.slice(0, lastColon + 1) + "0:0";
+    } else if (tail.includes(".")) {
+      return null; // malformed dotted tail
+    }
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tailParts = halves.length === 2 ? (halves[1] ? halves[1].split(":") : []) : null;
+  let groups: string[];
+  if (tailParts === null) {
+    groups = head;
+  } else {
+    const missing = 8 - head.length - tailParts.length;
+    if (missing < 0) return null;
+    groups = [...head, ...Array<string>(missing).fill("0"), ...tailParts];
+  }
+  if (groups.length !== 8) return null;
+  const nums = groups.map((g) => (g === "" ? 0 : parseInt(g, 16)));
+  if (nums.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  if (v4tail) {
+    nums[6] = v4tail[0];
+    nums[7] = v4tail[1];
+  }
+  return nums;
+}
+
+/**
+ * Is a dotted-quad or IPv6 literal in a private, loopback, link-local, ULA or
+ * otherwise non-public range? Bracket-tolerant, canonical-form-tolerant, and
+ * resolves IPv4-mapped / IPv4-compatible IPv6 to the embedded IPv4 before deciding
+ * (CM2-B-B007). Anything it cannot parse is treated as private (fail-closed).
+ */
 export function isPrivateIp(ip: string): boolean {
-  // IPv4
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  // Tolerate a bracketed IPv6 literal (URL.hostname keeps the brackets).
+  let s = ip.trim();
+  if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1);
+  // Drop an IPv6 zone id (fe80::1%eth0).
+  const pct = s.indexOf("%");
+  if (pct >= 0) s = s.slice(0, pct);
+
+  // IPv4 dotted quad.
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
   if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    if (a === 10) return true;
-    if (a === 127) return true; // loopback
-    if (a === 0) return true;
-    if (a === 169 && b === 254) return true; // link-local + cloud metadata
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a >= 224) return true; // multicast/reserved
+    const o = m.slice(1).map(Number);
+    if (o.some((n) => n > 255)) return true; // malformed → fail-closed
+    return isPrivateIpv4(o[0]!, o[1]!);
+  }
+
+  // IPv6 (only if it actually contains a colon).
+  if (s.includes(":")) {
+    const g = expandIpv6(s.toLowerCase());
+    if (!g) return true; // unparseable IPv6 → fail-closed
+    // Unspecified :: and loopback ::1
+    if (g.every((x) => x === 0)) return true;
+    if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true;
+    // Link-local fe80::/10
+    if ((g[0]! & 0xffc0) === 0xfe80) return true;
+    // Unique-local fc00::/7
+    if ((g[0]! & 0xfe00) === 0xfc00) return true;
+    // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 → judge by the embedded v4.
+    const mapped = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && (g[5] === 0xffff || g[5] === 0);
+    if (mapped && (g[6] !== 0 || g[7] !== 0)) {
+      return isPrivateIpv4(g[6]! >> 8, g[6]! & 0xff) || isPrivateIpv4(g[7]! >> 8, g[7]! & 0xff);
+    }
     return false;
   }
-  // IPv6
-  const lo = ip.toLowerCase();
-  if (lo === "::1" || lo === "::") return true;
-  if (lo.startsWith("fe80")) return true; // link-local
-  if (lo.startsWith("fc") || lo.startsWith("fd")) return true; // unique-local
-  if (lo.startsWith("::ffff:")) return isPrivateIp(lo.slice(7)); // v4-mapped
-  return false;
+
+  // Not an IP literal we recognize (e.g. a raw integer host) → let the caller's URL
+  // normalization have already run; treat an unrecognized numeric-looking host as private.
+  return true;
 }
 
 /** Validate scheme + host, then DNS-resolve and reject private targets (SSRF guard). */
@@ -127,23 +214,47 @@ export function extractReadable(html: string): { title: string; text: string } {
   return { title, text };
 }
 
+const MAX_REDIRECTS = 5;
+
 /** Fetch a public URL and return its readable text (static path; SSRF-guarded). */
 export async function fetchReadable(raw: string): Promise<ReadablePage> {
   let u: URL;
   try {
     u = await assertPublicUrl(raw);
   } catch (e) {
-    return { url: raw, title: "", text: "", truncated: false, available: false, note: (e as Error).message };
+    // A security refusal is flagged `blocked` so callers never escalate it to a
+    // less-guarded fetcher (CM2-B-B006).
+    return { url: raw, title: "", text: "", truncated: false, available: false, blocked: true, note: (e as Error).message };
   }
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(u.toString(), {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: { "user-agent": "Mozilla/5.0 (compatible; CitrateComms/1.0)", accept: "text/html,*/*" },
-    });
+    // Follow redirects manually so EVERY hop is re-validated by the SSRF guard —
+    // `redirect: "follow"` would let an allowed host 302 into the internal network
+    // (CM2-B-B007). Bounded to MAX_REDIRECTS.
+    let res: Response;
+    let hops = 0;
+    for (;;) {
+      res = await fetch(u.toString(), {
+        signal: ctrl.signal,
+        redirect: "manual",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; CitrateComms/1.0)", accept: "text/html,*/*" },
+      });
+      if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+        if (++hops > MAX_REDIRECTS) {
+          return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: "too many redirects" };
+        }
+        const loc = new URL(res.headers.get("location")!, u).toString();
+        try {
+          u = await assertPublicUrl(loc); // re-validate the redirect target
+        } catch (e) {
+          return { url: loc, title: "", text: "", truncated: false, available: false, blocked: true, note: (e as Error).message };
+        }
+        continue;
+      }
+      break;
+    }
     if (!res.ok) return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: `fetch failed (${res.status})` };
     const ctype = res.headers.get("content-type") ?? "";
     if (!/text\/html|text\/plain|application\/xhtml/i.test(ctype)) {

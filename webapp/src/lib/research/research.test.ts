@@ -73,6 +73,41 @@ describe("RES — SSRF guard", () => {
     await expect(assertPublicUrl("http://127.0.0.1/x")).rejects.toBeInstanceOf(BlockedUrlError);
     await expect(assertPublicUrl("http://169.254.169.254/latest/meta-data")).rejects.toBeInstanceOf(BlockedUrlError);
   });
+
+  // CM2-B-B007: the guard was bypassed by bracketed IPv6, IPv4-mapped IPv6, the
+  // CGNAT/benchmark ranges, and canonical-form IPv6. Table-driven so a new bypass
+  // form extends the corpus, not the code (the finding's requested tripwire).
+  it("blocks IPv6 bracketed/mapped/canonical and CGNAT/benchmark IPv4 bypasses", () => {
+    for (const ip of [
+      "[::1]", // bracketed loopback (URL.hostname keeps the brackets)
+      "[::ffff:169.254.169.254]", // v4-mapped cloud metadata
+      "[::ffff:a9fe:a9fe]", // same, canonical hex compression
+      "[0:0:0:0:0:ffff:127.0.0.1]", // v4-mapped loopback, uncompressed
+      "::ffff:127.0.0.1", // unbracketed v4-mapped loopback
+      "100.64.1.5", // 100.64/10 CGNAT
+      "198.18.0.1", // 198.18/15 benchmarking
+      "192.0.0.1", // 192.0.0.0/24 IETF protocol assignments
+    ]) {
+      expect(isPrivateIp(ip), ip).toBe(true);
+    }
+  });
+
+  it("rejects the IPv6/CGNAT SSRF-bypass URLs at assertPublicUrl", async () => {
+    for (const url of [
+      "http://[::1]:9200/_cat/indices",
+      "http://[::ffff:169.254.169.254]/latest/meta-data/",
+      "http://[0:0:0:0:0:ffff:127.0.0.1]:8080/x",
+      "http://100.64.1.5/",
+      "http://198.18.0.1/",
+    ]) {
+      await expect(assertPublicUrl(url), url).rejects.toBeInstanceOf(BlockedUrlError);
+    }
+  });
+
+  it("still allows genuine public IPv6", () => {
+    expect(isPrivateIp("2606:2800:220:1:248:1893:25c8:1946")).toBe(false);
+    expect(isPrivateIp("[2606:2800:220:1:248:1893:25c8:1946]")).toBe(false);
+  });
 });
 
 describe("RES — readable extraction", () => {

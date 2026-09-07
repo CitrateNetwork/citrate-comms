@@ -794,6 +794,10 @@ export function citrateCommsTools(ctx: ToolContext) {
         // RES: SSRF-guarded static fetch + readability on the BFF. Escalate to the runner's
         // Playwright path only when the static extraction yields no usable text (JS-heavy).
         const page = await fetchReadable(a.url);
+        // CM2-B-B006: a security refusal is a refusal. NEVER retry a blocked URL
+        // through the runner's unguarded Playwright fetcher (which is co-located with
+        // internal services) — only escalate when static extraction was genuinely thin.
+        if (page.blocked) return page;
         if (page.available && page.text.length > 200) return page;
         try {
           const dyn = await webFetch(a.url);
