@@ -12,6 +12,8 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { agentApprovals, agentToolCalls } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
+import { can, Capability, type Role } from "@/lib/rbac/matrix";
+import { GuardError } from "@/lib/tenant/guard";
 import { appendAudit } from "@/lib/audit/chain";
 import { logToolCall, finishToolCall } from "@/lib/ai/audit";
 import { addNote } from "./crm-notes";
@@ -68,6 +70,50 @@ const RISK_BY_KIND: Record<AgentAction["kind"], Risk> = {
   "calendar.cancel": "medium",
 };
 
+/**
+ * CM2-B-B004 / CIT-COMMS-002: the capability an approver must hold to APPROVE each
+ * action kind — pinned to the capability the SAME mutation requires on its direct
+ * route, so the approval queue can never be a lower-privileged path to a privileged
+ * op. `crm.delete`/`crm.dedupe` need DeleteRecord (Owner/Admin, as the direct CRM
+ * delete route does); the sandbox runner (arbitrary shell / code) and bulk imports
+ * need ManageWorkspace (Owner/Admin). Everything else stays at CreateRecord (Member).
+ */
+const CAP_BY_KIND: Record<AgentAction["kind"], Capability> = {
+  "crm.note": Capability.CreateRecord,
+  "crm.field": Capability.CreateRecord,
+  "crm.standard": Capability.CreateRecord,
+  "crm.create": Capability.CreateRecord,
+  "crm.delete": Capability.DeleteRecord,
+  "crm.dedupe": Capability.DeleteRecord,
+  "memory.assert": Capability.CreateRecord,
+  "runner.terminal": Capability.ManageWorkspace,
+  "runner.code": Capability.ManageWorkspace,
+  "documents.write": Capability.CreateRecord,
+  "ledger.write": Capability.CreateRecord,
+  "pm.write": Capability.CreateRecord,
+  "crm.import": Capability.ManageWorkspace,
+  "crm.ingest_review": Capability.ManageWorkspace,
+  "calendar.schedule": Capability.CreateRecord,
+  "calendar.cancel": Capability.CreateRecord,
+};
+
+/**
+ * Why an approver may NOT decide this action, or null if permitted. Pure so it is
+ * unit-testable without a database. Enforces (a) the per-kind capability re-check
+ * against the APPROVER's role, and (b) no self-approval of a high-risk action (the
+ * proposer must not also be the sole human committing it — separation of duties).
+ */
+export function approvalAuthzError(
+  role: Role,
+  action: AgentAction,
+  decidedBy: string,
+  requestedBy: string,
+): "forbidden" | "self_approval_forbidden" | null {
+  if (!can(role, CAP_BY_KIND[action.kind])) return "forbidden";
+  if (RISK_BY_KIND[action.kind] === "high" && decidedBy === requestedBy) return "self_approval_forbidden";
+  return null;
+}
+
 export interface EnqueueArgs {
   workspaceId: string;
   tool: string;
@@ -123,7 +169,7 @@ export interface PendingApproval {
   summary: string; // derived at read — describes the proposed change
 }
 
-function describe(action: AgentAction): string {
+export function describeAction(action: AgentAction): string {
   switch (action.kind) {
     case "crm.note":
       return `Add ${action.type} to ${action.entity}: ${truncate(action.title ? action.title + " — " + action.body : action.body)}`;
@@ -139,10 +185,17 @@ function describe(action: AgentAction): string {
       return `De-duplicate the CRM — merge duplicate accounts/deals/contacts into one canonical each`;
     case "memory.assert":
       return `Assert to knowledge graph (${action.nodeKind}): ${truncate(action.content)}`;
+    // CM2-B-B005: high-risk sandbox execution is shown IN FULL (never truncated), so
+    // the human consents to exactly what runs — a 140-char preview of a 20k-char
+    // payload is consent to a different thing. Byte count + file manifest included.
     case "runner.terminal":
-      return `Run in sandbox: ${truncate(action.cmd)}`;
-    case "runner.code":
-      return `Run ${action.lang} in sandbox: ${truncate(action.source)}`;
+      return `Run in sandbox (${Buffer.byteLength(action.cmd)} bytes):\n${action.cmd}`;
+    case "runner.code": {
+      const files = action.files?.length
+        ? `\nfiles: ${action.files.map((f) => `${f.name} (${Buffer.byteLength(f.content)}B)`).join(", ")}`
+        : "";
+      return `Run ${action.lang} in sandbox (${Buffer.byteLength(action.source)} bytes):\n${action.source}${files}`;
+    }
     case "documents.write":
       return `Create document “${action.name}”: ${truncate(action.content)}`;
     case "ledger.write":
@@ -173,7 +226,7 @@ export async function listPendingApprovals(workspaceId: string): Promise<Pending
     let summary = "(unreadable)";
     if (r.payloadEnc) {
       try {
-        summary = describe(JSON.parse(decryptField(workspaceId, r.payloadEnc)) as AgentAction);
+        summary = describeAction(JSON.parse(decryptField(workspaceId, r.payloadEnc)) as AgentAction);
       } catch {
         /* keep placeholder */
       }
@@ -199,6 +252,7 @@ export async function decideApproval(
   workspaceId: string,
   approvalId: string,
   decidedBy: string,
+  decidedByRole: Role,
   decision: "approved" | "rejected",
 ): Promise<{ ok: boolean; error?: string }> {
   const [appr] = await db()
@@ -223,6 +277,11 @@ export async function decideApproval(
   } catch {
     return { ok: false, error: "bad_payload" };
   }
+  // CM2-B-B004 / CIT-COMMS-002: re-check the APPROVER's role against the capability
+  // the action's direct path requires, and forbid self-approval of high-risk actions.
+  // The approval queue must never be a lower-privileged path to a privileged op.
+  const authzErr = approvalAuthzError(decidedByRole, action, decidedBy, appr.requestedBySub);
+  if (authzErr) throw new GuardError(403, authzErr);
   let result: unknown;
   try {
     result = await executeAction(workspaceId, action, { bySub: appr.requestedBySub, personaId: appr.personaId });

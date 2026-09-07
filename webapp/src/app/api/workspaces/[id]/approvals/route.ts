@@ -24,7 +24,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const ctx = await requireCapability(req, id, Capability.CreateRecord);
     const parsed = approvalDecisionSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
-    const result = await decideApproval(id, parsed.data.approvalId, ctx.sub, parsed.data.decision);
+    // CM2-B-B004: decideApproval re-checks ctx.role against the action's required
+    // capability and blocks self-approval of high-risk actions (throws GuardError 403).
+    const result = await decideApproval(id, parsed.data.approvalId, ctx.sub, ctx.role, parsed.data.decision);
     if (!result.ok) return NextResponse.json({ error: result.error ?? "failed" }, { status: 409 });
     return NextResponse.json({ ok: true });
   } catch (e) {
