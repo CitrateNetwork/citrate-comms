@@ -327,6 +327,20 @@ impl DeliveryService {
         }
     }
 
+    /// Drop an authenticated session (revocation). The session set was previously
+    /// insert-only — a SIWE login was permanent for the process lifetime, it grew
+    /// without bound, and an offboarded member kept passing `require_session`. The WS
+    /// teardown calls this on disconnect and `offboard` calls it on removal, so a
+    /// session no longer outlives its purpose (CM2-B-A011 / CM2-B-B019).
+    pub fn end_session(&mut self, wallet: &WalletAddress) {
+        self.sessions.remove(wallet);
+    }
+
+    /// Whether a wallet currently holds an authenticated session (test/introspection).
+    pub fn has_session(&self, wallet: &WalletAddress) -> bool {
+        self.sessions.contains(wallet)
+    }
+
     // ─────────────────────── KeyPackage directory ───────────────────────
 
     /// Admit a KeyPackage to the directory after verifying its wallet binding
@@ -350,8 +364,17 @@ impl DeliveryService {
         }
         identity::verify_binding_attestation(&publication).map_err(RelayError::Binding)?;
 
-        let kp_ref = KeyPackageRef(blake3::hash(&publication.key_package).as_bytes().to_vec());
+        // CIT-COMMS-005: cap the one-time-KeyPackage queue per wallet. Publishing is
+        // session-gated + nonce-consuming, but a wallet could still grow its directory
+        // without bound; a legitimate client keeps only a small pool of spare packages.
         let wallet = publication.wallet;
+        if self.key_package_count(&wallet) >= Self::MAX_KEYPACKAGES_PER_WALLET {
+            return Err(RelayError::KeyPackageQuotaExceeded {
+                max: Self::MAX_KEYPACKAGES_PER_WALLET,
+            });
+        }
+
+        let kp_ref = KeyPackageRef(blake3::hash(&publication.key_package).as_bytes().to_vec());
         self.key_packages
             .entry(wallet)
             .or_default()
@@ -389,6 +412,11 @@ impl DeliveryService {
 
     const MAX_CLAIMS_PER_TOKEN: usize = 16;
 
+    /// Ceiling on the one-time KeyPackage queue per wallet (CIT-COMMS-005). A client
+    /// keeps only a few spare packages; this bounds the directory a single wallet can
+    /// grow while still leaving generous headroom for legitimate re-publication.
+    const MAX_KEYPACKAGES_PER_WALLET: usize = 64;
+
     /// A submit's `recipients` may name at most this many wallets. A hard backstop
     /// on top of the `recipients ⊆ roster` rule (finding CM2-B-A005): a group larger
     /// than this cannot exist, so a legitimate fan-out never approaches it, while an
@@ -412,9 +440,13 @@ impl DeliveryService {
         self.require_session(submitter)?;
         let q = self.claims.entry(submission.token_hash).or_default();
         if !q.iter().any(|c| c.ciphertext == submission.ciphertext) {
-            q.push(submission);
-            while q.len() > Self::MAX_CLAIMS_PER_TOKEN {
-                q.remove(0);
+            // A007: newest-DROP when the inbox is full, not oldest-evict. The genuine
+            // connect-request is by construction the earliest claim; oldest-first
+            // eviction let a squatter who learns the invite token (it travels in the
+            // shared link) submit MAX distinct junk claims and silently delete it.
+            // Refusing new claims once full preserves any already-delivered genuine one.
+            if q.len() < Self::MAX_CLAIMS_PER_TOKEN {
+                q.push(submission);
             }
         }
         Ok(())
@@ -578,6 +610,10 @@ impl DeliveryService {
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
+        // Revoke the removed member's relay session (CM2-B-B019): the MLS Remove denies
+        // future plaintext, but the server-side authorization must be revoked too, or a
+        // still-connected offboarded member keeps passing `require_session`.
+        self.end_session(&removed);
         self.persist_group(&group_id)?;
         self.audit_append(
             AuditEvent::MemberRemoved {
@@ -678,7 +714,21 @@ impl DeliveryService {
                         epoch: envelope.epoch.0,
                     });
                 }
-                Some(_) => {} // identical resubmission — idempotent
+                Some(_) => {
+                    // B014: identical resubmission — genuinely idempotent. Return the
+                    // seq already assigned to this epoch's accepted Commit and STOP.
+                    // Falling through (the prior behavior) appended a duplicate to the
+                    // durable log, re-persisted, re-fanned-out, and inserted a second
+                    // EnvelopeReceipt into the tamper-evident audit chain on every replay.
+                    let prior = state
+                        .log
+                        .iter()
+                        .find(|e| e.kind == EnvelopeKind::Commit && e.epoch.0 == envelope.epoch.0)
+                        .and_then(|e| e.group_seq);
+                    return prior.ok_or(RelayError::EpochAlreadyCommitted {
+                        epoch: envelope.epoch.0,
+                    });
+                }
                 None => {
                     // A003: a new Commit MUST advance the epoch by exactly one.
                     // Without this a member squats arbitrary future epochs with junk
@@ -798,6 +848,8 @@ pub enum RelayError {
     CiphertextTooLarge { size: u64, max: u64 },
     #[error("no key package available for wallet")]
     NoKeyPackage,
+    #[error("key package quota exceeded for wallet (max {max})")]
+    KeyPackageQuotaExceeded { max: usize },
     #[error("rbac check failed: {0}")]
     Rbac(RbacError),
     #[error(transparent)]
@@ -913,6 +965,56 @@ mod tests {
         login(&mut relay, &owner, 10);
         let r2 = relay.poll_claims(&stranger.address(), &[1u8; 32]);
         assert!(matches!(r2, Err(RelayError::NotAuthenticated)));
+    }
+
+    /// CM2-B-A007: a genuine (earliest) claim must SURVIVE a squatter flooding the inbox.
+    /// Oldest-first eviction let anyone who learned the invite token delete it; newest-drop
+    /// preserves it.
+    #[test]
+    fn a007_genuine_claim_survives_squatting() {
+        let owner = EthWallet::generate();
+        let attacker = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &attacker, 11);
+        let th = [9u8; 32];
+        let genuine = b"GENUINE-CONNECT-REQUEST".to_vec();
+        relay
+            .submit_claim(&owner.address(), ClaimSubmission { token_hash: th, ciphertext: genuine.clone() })
+            .unwrap();
+        // Flood with distinct junk well past the cap.
+        for i in 0..40u16 {
+            let ct = vec![(i & 0xff) as u8; 8 + i as usize];
+            relay
+                .submit_claim(&attacker.address(), ClaimSubmission { token_hash: th, ciphertext: ct })
+                .unwrap();
+        }
+        let got = relay.poll_claims(&owner.address(), &th).unwrap();
+        assert!(got.len() <= DeliveryService::MAX_CLAIMS_PER_TOKEN);
+        assert!(
+            got.iter().any(|c| c.ciphertext == genuine),
+            "genuine claim was evicted by squatting"
+        );
+    }
+
+    /// CM2-B-A011 / B019: a session must be revocable — end_session drops it, and a
+    /// session-gated call then fails closed. (The WS teardown + offboard both call this.)
+    #[test]
+    fn b019_session_is_revocable() {
+        let owner = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        assert!(relay.has_session(&owner.address()));
+        relay
+            .submit_claim(&owner.address(), ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![1] })
+            .unwrap();
+        relay.end_session(&owner.address());
+        assert!(!relay.has_session(&owner.address()));
+        let after = relay.submit_claim(
+            &owner.address(),
+            ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![2] },
+        );
+        assert!(matches!(after, Err(RelayError::NotAuthenticated)));
     }
 
     #[test]

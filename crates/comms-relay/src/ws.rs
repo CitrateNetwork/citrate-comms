@@ -203,6 +203,9 @@ impl RelayServer {
 
         if let Some(w) = authed {
             self.registry.lock().await.remove(&w);
+            // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
+            // not persist for the process lifetime (no revocation + unbounded growth).
+            self.service.lock().await.end_session(&w);
         }
         writer.abort();
         Ok(())

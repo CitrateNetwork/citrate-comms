@@ -38,6 +38,11 @@ pub struct InMemoryNonceStore {
 }
 
 impl InMemoryNonceStore {
+    /// A nonce older than this can no longer complete a SIWE login (verification also
+    /// enforces the message's own expiration), so it is safe to evict. Bounds the
+    /// store against an unauthenticated peer looping `Challenge` (CIT-COMMS-005).
+    const NONCE_TTL_MS: u64 = 10 * 60 * 1000; // 10 minutes
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -53,6 +58,11 @@ impl InMemoryNonceStore {
 
 impl NonceStore for InMemoryNonceStore {
     fn issue(&mut self, nonce: String, issued_at_ms: u64) {
+        // CIT-COMMS-005: evict expired nonces before inserting, so the store cannot be
+        // inflated without bound by looping the pre-auth `Challenge` frame. Insert-only
+        // was a memory-exhaustion vector on the single-droplet relay.
+        self.nonces
+            .retain(|_, &mut issued| issued_at_ms.saturating_sub(issued) < Self::NONCE_TTL_MS);
         self.nonces.insert(nonce, issued_at_ms);
     }
     fn consume(&mut self, nonce: &str) -> bool {
@@ -336,6 +346,21 @@ pub enum IdentityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CIT-COMMS-005: the nonce store must evict entries older than the TTL, so an
+    /// unauthenticated peer looping `Challenge` cannot grow it without bound.
+    #[test]
+    fn stale_nonces_are_evicted_on_issue() {
+        let mut store = InMemoryNonceStore::new();
+        // A batch of never-consumed challenge nonces at t=0.
+        for _ in 0..100 {
+            let _ = store.fresh(0);
+        }
+        assert_eq!(store.nonces.len(), 100);
+        // A fresh issue well past the TTL prunes all of them (leaving only the new one).
+        let _ = store.fresh(InMemoryNonceStore::NONCE_TTL_MS + 1);
+        assert_eq!(store.nonces.len(), 1, "stale nonces were not evicted");
+    }
 
     fn msg(domain: &str, addr: WalletAddress, nonce: &str, chain: u64, exp: u64) -> SiweMessage {
         SiweMessage {
