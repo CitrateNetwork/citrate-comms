@@ -90,8 +90,14 @@ jobs:
 
       - name: resolve tag
         id: tag
+        # CM2-B-B026: the workflow_dispatch input is passed via env, NOT interpolated
+        # into the shell with ${{ ... }} — which the Actions expression engine would
+        # substitute BEFORE the shell parses the line, allowing command injection in a
+        # job that holds `contents: write` and the release signing key.
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then TAG="${{ github.event.inputs.tag }}"; else TAG="${GITHUB_REF##*/}"; fi
+          if [ -n "$TAG_INPUT" ]; then TAG="$TAG_INPUT"; else TAG="${GITHUB_REF##*/}"; fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "git_rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
