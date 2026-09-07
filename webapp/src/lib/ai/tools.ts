@@ -20,6 +20,7 @@ import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
 import { listMessages } from "@/lib/domain/messages";
+import { isChannelMember } from "@/lib/domain/channels";
 import { listTasks, listProjects } from "@/lib/domain/pm";
 import { listTables, getSheetSchema, readRows, queryTable } from "@/lib/domain/tables-repo";
 import { saveMapping, previewImport, ensureMapping } from "@/lib/domain/import-engine";
@@ -675,6 +676,9 @@ export function citrateCommsTools(ctx: ToolContext) {
         days: z.number().int().min(1).max(60).default(7),
       }),
       execute: audited("calendar.pin_summary", Capability.PostMessage, async (a: { channelId: string; days: number }) => {
+        // CM2-B-B003: authorize on the channel, not just the capability — the invoker
+        // must be seated in the target channel (prevents posting into arbitrary channels).
+        if (!(await isChannelMember(a.channelId, ctx.invokedBySub))) throw new ToolDenied("not a member of this channel");
         const { messageId, events } = await postAndPinCalendarSummary(ctx.workspaceId, a.channelId, ctx.invokedBySub, a.days);
         return { status: "posted", messageId, events, message: `Pinned an upcoming-events summary (${events} event(s), next ${a.days} days).` };
       }),
@@ -685,6 +689,10 @@ export function citrateCommsTools(ctx: ToolContext) {
         "messages (oldest→newest). Use before filing notes/decisions/tasks.",
       inputSchema: z.object({ channelId: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50) }),
       execute: audited("thread.summarize", Capability.ReadChannel, async (a: { channelId: string; limit: number }) => {
+        // CM2-B-B003: ReadChannel is not enough — the invoker must be a member of THIS
+        // channel. Without this a prompt-injected agent (or a Guest via the MCP surface)
+        // could read any channel/DM in the workspace by uuid.
+        if (!(await isChannelMember(a.channelId, ctx.invokedBySub))) throw new ToolDenied("not a member of this channel");
         const msgs = await listMessages(ctx.workspaceId, a.channelId, { limit: a.limit });
         // Cap each body so a few very long messages can't blow the tool result.
         const BODY_CAP = 2000;

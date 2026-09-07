@@ -9,7 +9,7 @@
  * they land, gated by HITL — the MCP surface inherits the same gates automatically.
  */
 import { z } from "zod";
-import { requireMember, GuardError } from "@/lib/tenant/guard";
+import { requireMember, GuardError, type MemberCtx } from "@/lib/tenant/guard";
 import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
 import { citrateCommsTools } from "@/lib/ai/tools";
@@ -28,11 +28,14 @@ interface McpTool {
 }
 type Json = Record<string, unknown>;
 
-async function buildTools(workspaceId: string, sub: string) {
+export async function buildTools(workspaceId: string, ctx: Pick<MemberCtx, "sub" | "role">) {
   return citrateCommsTools({
     workspaceId,
-    invokedBySub: sub,
-    agentRole: "Agent",
+    invokedBySub: ctx.sub,
+    // CM2-B-B002: bind the tool surface to the CALLER's real role — never a hardcoded
+    // "Agent". A human drives this endpoint directly; a Guest (read-only) must not
+    // receive Agent-level post/write capability. Each tool then self-enforces RBAC.
+    agentRole: ctx.role,
     allow: new Set(IMPLEMENTED_TOOLS),
     fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),
   }) as unknown as Record<string, McpTool>;
@@ -109,7 +112,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   try {
     const { id } = await params;
     const ctx = await requireMember(req, id);
-    const tools = await buildTools(id, ctx.sub);
+    const tools = await buildTools(id, ctx);
     return Response.json({
       name: SERVER_INFO.name,
       version: SERVER_INFO.version,
@@ -127,23 +130,22 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   let workspaceId: string;
-  let sub: string;
+  let ctx: MemberCtx;
   try {
     const { id } = await params;
     workspaceId = id;
-    const ctx = await requireMember(req, workspaceId);
-    sub = ctx.sub;
+    ctx = await requireMember(req, workspaceId);
   } catch (e) {
     if (e instanceof GuardError) return Response.json(rpcErr(null, -32000, e.message), { status: e.status });
     return Response.json(rpcErr(null, -32603, "internal error"), { status: 500 });
   }
 
-  const rl = await limit(`mcp:${hashId(sub)}`);
+  const rl = await limit(`mcp:${hashId(ctx.sub)}`);
   if (!rl.success) {
     return Response.json(rpcErr(null, -32000, "Rate limit exceeded"), { status: 429 });
   }
 
-  const tools = await buildTools(workspaceId, sub);
+  const tools = await buildTools(workspaceId, ctx);
 
   let bodyJson: unknown;
   try {
