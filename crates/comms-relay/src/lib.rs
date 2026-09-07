@@ -389,6 +389,17 @@ impl DeliveryService {
 
     const MAX_CLAIMS_PER_TOKEN: usize = 16;
 
+    /// A submit's `recipients` may name at most this many wallets. A hard backstop
+    /// on top of the `recipients ⊆ roster` rule (finding CM2-B-A005): a group larger
+    /// than this cannot exist, so a legitimate fan-out never approaches it, while an
+    /// abusive one is refused before any per-recipient work.
+    const MAX_RECIPIENTS: usize = 4096;
+
+    /// Ceiling on a single envelope's ciphertext (finding CM2-B-A005). Generous
+    /// versus real MLS chat/commit/welcome payloads, but bounds one submit so a
+    /// member cannot drive the single-droplet relay to OOM with an oversized blob.
+    const MAX_CIPHERTEXT_BYTES: usize = 4 * 1024 * 1024;
+
     /// Submit a claim to the server-blind claims-inbox (CONNECT-S1). The `submitter` must be
     /// SIWE-authenticated but is NOT required to be a member (the pre-membership connect path). The
     /// relay stores the `ciphertext` opaquely — NO attestation verify, NEVER decrypted. Fails closed
@@ -479,17 +490,27 @@ impl DeliveryService {
             }
         }
         debug_assert_eq!(welcome.kind, EnvelopeKind::Welcome);
-        // Deliver the Welcome on the durable ordered path (stored + audited + fanned
-        // to the joiner's mailbox). Bind its sender to the authenticated admin so an
-        // admin cannot post a Welcome attributed to another member (FWA-C11-01).
-        self.submit_as(admin, welcome, now_ms)?;
-        // Update the roster + public ratchet tree, persist, and audit the membership change.
-        let epoch = {
+        // Add the joiner to the routing roster FIRST, so the Welcome (whose sole
+        // recipient is the joiner) satisfies the `recipients ⊆ roster` check the
+        // ordered path now enforces (CM2-B-A005). Onboarding is exactly the moment a
+        // wallet legitimately becomes a routing member, so this is where it belongs.
+        {
             let state = self
                 .groups
                 .get_mut(&group_id)
                 .ok_or(RelayError::GroupUnknown)?;
             state.members.insert(joiner);
+        }
+        // Deliver the Welcome on the durable ordered path (stored + audited + fanned
+        // to the joiner's mailbox). Bind its sender to the authenticated admin so an
+        // admin cannot post a Welcome attributed to another member (FWA-C11-01).
+        self.submit_as(admin, welcome, now_ms)?;
+        // Stash the public ratchet tree, persist, and audit the membership change.
+        let epoch = {
+            let state = self
+                .groups
+                .get_mut(&group_id)
+                .ok_or(RelayError::GroupUnknown)?;
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
@@ -624,6 +645,29 @@ impl DeliveryService {
             return Err(RelayError::NotAMember);
         }
 
+        // A005: bound the ciphertext and validate the recipient set against the
+        // roster. Without this one authenticated member fans a single submit out to
+        // arbitrarily many invented non-member mailboxes (which `deliver_pending`
+        // never drains, since it only visits connected wallets) and/or ships an
+        // unbounded ciphertext — a memory-exhaustion DoS on the single-droplet relay.
+        if envelope.ciphertext.len() > Self::MAX_CIPHERTEXT_BYTES {
+            return Err(RelayError::CiphertextTooLarge {
+                size,
+                max: Self::MAX_CIPHERTEXT_BYTES as u64,
+            });
+        }
+        if envelope.recipients.len() > Self::MAX_RECIPIENTS {
+            return Err(RelayError::TooManyRecipients {
+                count: envelope.recipients.len(),
+                max: Self::MAX_RECIPIENTS,
+            });
+        }
+        for r in &envelope.recipients {
+            if !state.members.contains(r) {
+                return Err(RelayError::RecipientNotAMember);
+            }
+        }
+
         // R1: a group has ONE accepted Commit per epoch. First writer wins;
         // fail closed on a conflicting Commit (a different ciphertext for an epoch
         // already committed). Identical resubmission is idempotent.
@@ -636,12 +680,24 @@ impl DeliveryService {
                 }
                 Some(_) => {} // identical resubmission — idempotent
                 None => {
+                    // A003: a new Commit MUST advance the epoch by exactly one.
+                    // Without this a member squats arbitrary future epochs with junk
+                    // ciphertext — each accepted first-writer-wins and persisted —
+                    // permanently bricking the group's membership machinery,
+                    // including the Remove Commit that would evict them (they become
+                    // unremovable). Contiguity also bounds `accepted_commit` growth
+                    // to the group's genuine epoch count.
+                    let expected = state.current_epoch.checked_add(1);
+                    if Some(envelope.epoch.0) != expected {
+                        return Err(RelayError::NonContiguousEpoch {
+                            expected: expected.unwrap_or(u64::MAX),
+                            got: envelope.epoch.0,
+                        });
+                    }
                     state
                         .accepted_commit
                         .insert(envelope.epoch.0, ciphertext_hash);
-                    if envelope.epoch.0 > state.current_epoch {
-                        state.current_epoch = envelope.epoch.0;
-                    }
+                    state.current_epoch = envelope.epoch.0;
                 }
             }
         }
@@ -732,6 +788,14 @@ pub enum RelayError {
     SenderMismatch,
     #[error("epoch {epoch} already has a different accepted commit (first-writer-wins)")]
     EpochAlreadyCommitted { epoch: u64 },
+    #[error("non-contiguous commit epoch: expected {expected}, got {got}")]
+    NonContiguousEpoch { expected: u64, got: u64 },
+    #[error("a recipient is not a member of the group")]
+    RecipientNotAMember,
+    #[error("too many recipients: {count} (max {max})")]
+    TooManyRecipients { count: usize, max: usize },
+    #[error("ciphertext too large: {size} bytes (max {max})")]
+    CiphertextTooLarge { size: u64, max: u64 },
     #[error("no key package available for wallet")]
     NoKeyPackage,
     #[error("rbac check failed: {0}")]
@@ -1275,5 +1339,180 @@ mod tests {
             .group_members(&gid)
             .unwrap()
             .contains(&victim.address()));
+    }
+
+    /// CM2-B-A003 red→green — commit epochs MUST be contiguous. A member cannot
+    /// squat a future epoch with junk to brick the group's membership machinery
+    /// (which would also block their own offboard, making them unremovable).
+    #[test]
+    fn commit_epoch_must_be_contiguous() {
+        let alice = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
+        login(&mut relay, &alice, 1);
+        let gid = GroupId([4; 32]);
+        relay.register_group(gid, alice.address(), 2).unwrap();
+
+        // RED primitive (property P6): a Commit at `epoch = u64::MAX` for a group at
+        // epoch 0 is now REJECTED. Before the fix it was accepted first-writer-wins
+        // and persisted — squatting the epoch forever.
+        let squat = relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    u64::MAX,
+                    b"junk",
+                    &[],
+                ),
+                3,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(squat, RelayError::NonContiguousEpoch { got, .. } if got == u64::MAX),
+            "far-future commit must be refused, got {squat:?}"
+        );
+
+        // A merely-skipped epoch (2 while the group is at 0) is refused too.
+        let skip = relay
+            .submit_as(
+                alice.address(),
+                envelope(gid, alice.address(), EnvelopeKind::Commit, 2, b"skip", &[]),
+                4,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                skip,
+                RelayError::NonContiguousEpoch {
+                    expected: 1,
+                    got: 2
+                }
+            ),
+            "skipped epoch must be refused, got {skip:?}"
+        );
+
+        // GREEN: the genuine next epoch (exactly current+1) is accepted, and the one
+        // after it — the squat never blocked them, so the group is not bricked.
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    1,
+                    b"commit-1",
+                    &[],
+                ),
+                5,
+            )
+            .unwrap();
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Commit,
+                    2,
+                    b"commit-2",
+                    &[],
+                ),
+                6,
+            )
+            .unwrap();
+    }
+
+    /// CM2-B-A005 red→green — a submit's `recipients` must be a subset of the roster
+    /// and the ciphertext bounded, so one member cannot fan a single submit out into
+    /// unbounded non-member mailboxes (never drained) and OOM the single-droplet relay.
+    #[test]
+    fn recipients_must_be_a_subset_of_the_roster_and_bounded() {
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let stranger = EthWallet::generate(); // never a member of any group
+        let mut relay = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
+        login(&mut relay, &alice, 1);
+        login(&mut relay, &bob, 2);
+        let gid = GroupId([6; 32]);
+        relay.register_group(gid, alice.address(), 3).unwrap();
+        relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                bob.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w",
+                    &[bob.address()],
+                ),
+                b"rt".to_vec(),
+                4,
+            )
+            .unwrap();
+
+        // RED: a non-member recipient (an invented wallet) is rejected. Before the
+        // fix this allocated a mailbox `deliver_pending` never drains.
+        let err = relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    b"x",
+                    &[stranger.address()],
+                ),
+                5,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::RecipientNotAMember),
+            "non-member recipient must be refused, got {err:?}"
+        );
+
+        // GREEN: an in-roster recipient is accepted.
+        relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    b"x",
+                    &[bob.address()],
+                ),
+                6,
+            )
+            .unwrap();
+
+        // And an oversized ciphertext is refused by the size cap.
+        let huge = vec![0u8; DeliveryService::MAX_CIPHERTEXT_BYTES + 1];
+        let big = relay
+            .submit_as(
+                alice.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    &huge,
+                    &[bob.address()],
+                ),
+                7,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(big, RelayError::CiphertextTooLarge { .. }),
+            "oversized ciphertext must be refused, got {big:?}"
+        );
     }
 }

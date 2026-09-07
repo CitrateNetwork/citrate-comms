@@ -121,7 +121,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
     let inbox = relay.fetch(&bob_wallet.address());
     let app = inbox.iter().find(|e| e.kind == EnvelopeKind::Application).expect("app delivered");
     let decrypted = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext, "Bob decrypts Alice's message");
+    assert_eq!(decrypted.plaintext, plaintext, "Bob decrypts Alice's message");
 
     // ── 7. The server-blind invariant: the relay's durable store is ciphertext-only. ──
     let log = relay.group_log(&gid).unwrap();
@@ -198,7 +198,7 @@ fn offboard_atomically_revokes_role_and_future_access() {
 
     // Pre-offboard: Bob can read.
     let ct1 = alice_group.send(&alice_member, b"before offboard").unwrap();
-    assert_eq!(bob_group.receive(&bob_member, &ct1).unwrap(), b"before offboard");
+    assert_eq!(bob_group.receive(&bob_member, &ct1).unwrap().plaintext, b"before offboard");
 
     // ── OFFBOARD: Alice removes Bob (MLS Remove → epoch 2), then the relay applies it atomically. ──
     let bob_leaf = alice_group.member_index_by_sig(&bob_sig_pub).expect("bob is a member");
@@ -305,7 +305,7 @@ fn domain_record_replicates_e2e_over_relay() {
     let inbox = relay.fetch(&bob_wallet.address());
     let app = inbox.iter().find(|e| e.kind == EnvelopeKind::Application).unwrap();
     let plain = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
-    let bob_ev = DomainEvent::decode(&plain).unwrap();
+    let bob_ev = DomainEvent::decode(&plain.plaintext).unwrap();
     let mut bob_store = DomainStore::new();
     bob_store.apply(&bob_ev);
 

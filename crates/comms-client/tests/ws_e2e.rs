@@ -126,5 +126,5 @@ async fn two_clients_exchange_a_message_over_websocket() {
     let app = next_kind(&bob, EnvelopeKind::Application).await;
     assert_ne!(app.ciphertext.as_slice(), plaintext, "the wire carries ciphertext, not plaintext");
     let decrypted = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext, "Bob decrypts Alice's message received over the socket");
+    assert_eq!(decrypted.plaintext, plaintext, "Bob decrypts Alice's message received over the socket");
 }

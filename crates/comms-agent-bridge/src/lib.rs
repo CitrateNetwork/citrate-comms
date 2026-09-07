@@ -209,11 +209,17 @@ impl AgentBridge {
             if e.kind != EnvelopeKind::Application {
                 continue;
             }
-            let Ok(pt) = group.receive(&self.mls, &e.ciphertext) else { continue };
-            let Ok(msg) = ChatMessage::decode(&pt) else { continue };
+            let Ok(received) = group.receive(&self.mls, &e.ciphertext) else { continue };
+            let Ok(msg) = ChatMessage::decode(&received.plaintext) else { continue };
+            // Attribute from the authenticated MLS credential, never the
+            // relay-controlled `e.sender` — otherwise a hostile relay could forge
+            // authorship in the AI agent's view of the conversation (CM2-B-A002).
+            let Some(sender) = WalletAddress::from_identity(&received.sender_identity) else {
+                continue;
+            };
             out.push(AgentInbound::Message {
                 group: group_hex.clone(),
-                sender: e.sender.to_hex(),
+                sender: sender.to_hex(),
                 text: msg.body,
             });
         }
@@ -502,7 +508,7 @@ mod tests {
         assert!(seq > 0);
         let admin_inbox = relay.fetch(&admin_w.address());
         let app = admin_inbox.iter().find(|e| e.kind == EnvelopeKind::Application).unwrap();
-        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap();
+        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap().plaintext;
         assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind wants a self-hosted"));
 
         // The guardrail: the agent is refused any membership-mutating command.
@@ -632,7 +638,7 @@ mod tests {
         // The admin decrypts the agent's reply off the relay.
         let admin_inbox = relay.fetch(&admin_w.address());
         let app = admin_inbox.iter().find(|e| e.kind == EnvelopeKind::Application).expect("agent reply routed");
-        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap();
+        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap().plaintext;
         assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind is in Proposal"));
         relay.audit().verify_integrity().unwrap();
     }

@@ -11,25 +11,43 @@
 //! slot in at [`master_key_for`] without changing the daemon's call site.
 
 use keyring::Entry;
+use zeroize::Zeroizing;
 
 /// Keyring service + account the relay stores its master key under.
 pub const KEYRING_SERVICE: &str = "citrate-comms";
 pub const KEYRING_ACCOUNT: &str = "relay-master-key";
 
 /// Load the master key from the OS keyring, generating + storing one on first run.
-pub fn load_or_create_master_key(service: &str, account: &str) -> Result<[u8; 32], KeyvaultError> {
+///
+/// The key is returned wrapped in [`Zeroizing`] so the caller's copy is wiped from
+/// memory on drop, rather than left resident for the process lifetime (CM2-B-A009).
+pub fn load_or_create_master_key(
+    service: &str,
+    account: &str,
+) -> Result<Zeroizing<[u8; 32]>, KeyvaultError> {
     let entry = Entry::new(service, account).map_err(|e| KeyvaultError::Keyring(e.to_string()))?;
     master_key_for(&entry)
 }
 
 /// Get-or-create against a specific keyring entry (the testable core).
-fn master_key_for(entry: &Entry) -> Result<[u8; 32], KeyvaultError> {
+fn master_key_for(entry: &Entry) -> Result<Zeroizing<[u8; 32]>, KeyvaultError> {
     match entry.get_secret() {
-        Ok(bytes) => bytes.as_slice().try_into().map_err(|_| KeyvaultError::BadLength),
+        Ok(bytes) => {
+            // Wrap the intermediate secret Vec so it is wiped on drop too, not just
+            // the returned array (CM2-B-A009).
+            let bytes = Zeroizing::new(bytes);
+            let arr: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyvaultError::BadLength)?;
+            Ok(Zeroizing::new(arr))
+        }
         Err(keyring::Error::NoEntry) => {
-            let mut key = [0u8; 32];
-            getrandom::getrandom(&mut key).map_err(|_| KeyvaultError::Rng)?;
-            entry.set_secret(&key).map_err(|e| KeyvaultError::Keyring(e.to_string()))?;
+            let mut key = Zeroizing::new([0u8; 32]);
+            getrandom::getrandom(&mut key[..]).map_err(|_| KeyvaultError::Rng)?;
+            entry
+                .set_secret(&key[..])
+                .map_err(|e| KeyvaultError::Keyring(e.to_string()))?;
             Ok(key)
         }
         Err(e) => Err(KeyvaultError::Keyring(e.to_string())),
@@ -58,7 +76,10 @@ mod tests {
 
         let first = master_key_for(&entry).unwrap();
         let second = master_key_for(&entry).unwrap();
-        assert_eq!(first, second, "the key generated on first run is reused thereafter");
-        assert_ne!(first, [0u8; 32], "the generated key is not all-zero");
+        assert_eq!(
+            *first, *second,
+            "the key generated on first run is reused thereafter"
+        );
+        assert_ne!(*first, [0u8; 32], "the generated key is not all-zero");
     }
 }

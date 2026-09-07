@@ -353,9 +353,12 @@ fn drain(relay: &mut DeliveryService, me_w: &EthWallet, me_g: &mut GroupHandle, 
         if e.kind != EnvelopeKind::Application {
             continue;
         }
-        let Ok(pt) = me_g.receive(me_m, &e.ciphertext) else { continue };
-        let Ok(payload) = canonical::from_slice::<WirePayload>(&pt) else { continue };
-        let meta = by_wallet.get(&e.sender).cloned().unwrap_or(Meta { name: "Unknown".into(), initials: "··".into(), rgb: (0x84, 0x86, 0x7f), role: String::new(), is_agent: false });
+        let Ok(received) = me_g.receive(me_m, &e.ciphertext) else { continue };
+        let Ok(payload) = canonical::from_slice::<WirePayload>(&received.plaintext) else { continue };
+        // Attribute from the authenticated MLS credential, not the relay-controlled
+        // `e.sender` field (CM2-B-A002).
+        let Some(sender) = WalletAddress::from_identity(&received.sender_identity) else { continue };
+        let meta = by_wallet.get(&sender).cloned().unwrap_or(Meta { name: "Unknown".into(), initials: "··".into(), rgb: (0x84, 0x86, 0x7f), role: String::new(), is_agent: false });
         match payload {
             WirePayload::Domain(ev) => store.apply(&ev),
             WirePayload::Chat(c) => messages.push(UiMessage {

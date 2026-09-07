@@ -101,6 +101,22 @@ impl SiweSigner for EthWallet {
     }
 }
 
+/// Build a channel roster from the authenticated MLS group membership, guaranteeing
+/// `self` is present. This is the ONLY roster source that a hostile relay cannot
+/// poison: every entry is an authenticated MLS credential, so no relay-supplied
+/// `Envelope.sender` can inject a phantom recipient (finding CM2-B-A002).
+fn roster_from_group(group: &GroupHandle, me: WalletAddress) -> Vec<WalletAddress> {
+    let mut members: Vec<WalletAddress> = group
+        .member_identities()
+        .iter()
+        .filter_map(|id| WalletAddress::from_identity(id))
+        .collect();
+    if !members.contains(&me) {
+        members.push(me);
+    }
+    members
+}
+
 /// One joined channel's MLS state.
 struct Channel {
     gid: GroupId,
@@ -417,7 +433,9 @@ impl NetSession {
             .join(&env.ciphertext, &rt)
             .map_err(|e| NetError::Mls(e.to_string()))?;
         let epoch = group.epoch();
-        let members = vec![self.address, env.sender];
+        // Seed the roster from the AUTHENTICATED MLS membership, not the
+        // relay-controlled `env.sender` (CM2-B-A002).
+        let members = roster_from_group(&group, self.address);
         self.channel = Some(Channel {
             gid,
             group,
@@ -495,14 +513,25 @@ impl NetSession {
         }
         match env.kind {
             EnvelopeKind::Application => {
-                let pt = ch
+                let received = ch
                     .group
                     .receive(&self.member, &env.ciphertext)
                     .map_err(|e| NetError::Mls(e.to_string()))?;
-                let msg = ChatMessage::decode(&pt).map_err(|e| NetError::Codec(e.to_string()))?;
+                // Attribute from the AUTHENTICATED MLS credential, never from the
+                // relay-controlled `env.sender` routing field (CM2-B-A002). A hostile
+                // relay can set `env.sender` to any wallet, but it cannot forge the
+                // MLS signature the credential is bound to.
+                let sender =
+                    WalletAddress::from_identity(&received.sender_identity).ok_or_else(|| {
+                        NetError::Mls(
+                            "authenticated sender identity is not a 20-byte wallet".into(),
+                        )
+                    })?;
+                let msg = ChatMessage::decode(&received.plaintext)
+                    .map_err(|e| NetError::Codec(e.to_string()))?;
                 Ok(Some(Inbound::Message {
                     group: ch.gid,
-                    sender: env.sender,
+                    sender,
                     text: msg.body,
                 }))
             }
@@ -511,9 +540,10 @@ impl NetSession {
                     .process_commit(&self.member, &env.ciphertext)
                     .map_err(|e| NetError::Mls(e.to_string()))?;
                 ch.epoch = ch.group.epoch();
-                if !ch.members.contains(&env.sender) {
-                    ch.members.push(env.sender);
-                }
+                // Rebuild the roster from the AUTHENTICATED MLS membership, never from
+                // the relay-controlled `env.sender` (CM2-B-A002): a lying relay must
+                // not be able to inject a phantom wallet into our recipient set.
+                ch.members = roster_from_group(&ch.group, self.address);
                 Ok(Some(Inbound::System {
                     text: "channel membership changed".into(),
                 }))
@@ -768,6 +798,62 @@ mod tests {
                 assert!(text.contains("loud and clear"));
             }
             other => panic!("expected a message, got {other:?}"),
+        }
+    }
+
+    /// CM2-B-A002 red→green — a message is attributed to the AUTHENTICATED MLS
+    /// credential, never to the relay-controlled `Envelope.sender`. We simulate the
+    /// exact relay capability: flip the plaintext `sender` byte-field on a delivered
+    /// envelope before `apply`. The decrypted message must still be attributed to
+    /// Alice (the true MLS signer), not the forged `0xaa…` address.
+    #[tokio::test]
+    async fn apply_attributes_from_mls_credential_not_relay_sender() {
+        const DOMAIN: &str = "relay.citrate.ai";
+        let alice_w = EthWallet::generate();
+        let bob_w = EthWallet::generate();
+        let alice_addr = alice_w.address();
+        let bob_addr = bob_w.address();
+        let service = DeliveryService::new(DOMAIN, alice_addr, 0).unwrap();
+        let server = RelayServer::new(service);
+        let (addr, _accept) = server.bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let mut alice = NetSession::login(&url, DOMAIN, Box::new(alice_w), now, false)
+            .await
+            .unwrap();
+        let mut bob = NetSession::login(&url, DOMAIN, Box::new(bob_w), now, false)
+            .await
+            .unwrap();
+        bob.publish_keypackage().await.unwrap();
+        let gid = alice.create_channel(&[bob_addr]).await.unwrap();
+        assert_eq!(bob.join_next_channel().await.unwrap(), gid);
+
+        alice.send_text("acquisition price is 240M").await.unwrap();
+
+        // Drain until the application envelope; a hostile relay flips its `sender`.
+        loop {
+            let mut env = bob.next_envelope().await.expect("delivery");
+            if env.kind != EnvelopeKind::Application {
+                continue;
+            }
+            env.sender = WalletAddress([0xaa; 20]); // the relay lies about authorship
+            match bob.apply(env).unwrap() {
+                Some(Inbound::Message { sender, text, .. }) => {
+                    assert_eq!(
+                        sender, alice_addr,
+                        "attribution must come from the authenticated MLS credential, \
+                         not the forged Envelope.sender"
+                    );
+                    assert_ne!(sender, WalletAddress([0xaa; 20]));
+                    assert!(text.contains("acquisition price"));
+                    break;
+                }
+                other => panic!("expected a message, got {other:?}"),
+            }
         }
     }
 }

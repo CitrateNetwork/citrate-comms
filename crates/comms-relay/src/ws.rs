@@ -170,6 +170,7 @@ impl RelayServer {
         let mutating = matches!(
             frame,
             ClientFrame::PublishKeyPackage(_)
+                | ClientFrame::TakeKeyPackage { .. }
                 | ClientFrame::RegisterGroup { .. }
                 | ClientFrame::Onboard { .. }
                 | ClientFrame::Submit(_)
@@ -224,6 +225,14 @@ impl RelayServer {
                 }
             }
             ClientFrame::TakeKeyPackage { wallet } => {
+                // CM2-B-A004: consuming a wallet's one-time KeyPackage is destructive
+                // (it pops the directory and persists the result). It MUST require an
+                // authenticated session — otherwise any unauthenticated network peer
+                // who knows a target's (public) address drains every KeyPackage the
+                // victim publishes, so they can never be invited to a channel.
+                let Some(_addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
                 let kp = { self.service.lock().await.take_key_package(&wallet) };
                 let _ = out_tx.send(ServerFrame::KeyPackage(kp));
             }
@@ -314,6 +323,13 @@ impl RelayServer {
                 }
             }
             ClientFrame::RatchetTree { group_id } => {
+                // CM2-B-A004: the public ratchet tree and the roster are group state;
+                // serving them to an unauthenticated peer lets anyone holding a group
+                // id — including a *removed* member, who keeps it forever — keep
+                // reading membership after eviction. Gate on an authenticated session.
+                let Some(_addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
                 let rt = {
                     self.service
                         .lock()
@@ -324,6 +340,10 @@ impl RelayServer {
                 let _ = out_tx.send(ServerFrame::RatchetTree(rt));
             }
             ClientFrame::GroupMembers { group_id } => {
+                // CM2-B-A004: see RatchetTree — the roster is group state, not public.
+                let Some(_addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
                 let members = self.service.lock().await.group_members(&group_id);
                 let _ = out_tx.send(ServerFrame::Members(members));
             }
@@ -479,6 +499,41 @@ mod tests {
             dispatch.contains("pubn.wallet != addr"),
             "TRIPWIRE: PublishKeyPackage must reject a wallet != the authenticated session"
         );
+
+        // CM2-B-A004 **TRIPWIRE** — every dispatch arm that touches directory/group
+        // state MUST sit behind the `*authed` session guard. Challenge and
+        // Authenticate are the ONLY arms allowed to run unauthenticated (they
+        // establish the session). This fails if a future edit reintroduces an
+        // unauthenticated TakeKeyPackage / RatchetTree / GroupMembers (or any other
+        // stateful frame).
+        for header in [
+            "ClientFrame::PublishKeyPackage",
+            "ClientFrame::TakeKeyPackage",
+            "ClientFrame::SubmitClaim",
+            "ClientFrame::PollClaims",
+            "ClientFrame::RegisterGroup",
+            "ClientFrame::Onboard",
+            "ClientFrame::Submit(",
+            "ClientFrame::RatchetTree",
+            "ClientFrame::GroupMembers",
+            "ClientFrame::Offboard",
+        ] {
+            // Use the LAST occurrence (the match arm, never the earlier `matches!`
+            // pause-list), then bound the slice to this arm's own body — arms are
+            // separated by a 12-space-indented `ClientFrame::` on its own line.
+            let start = dispatch
+                .rfind(header)
+                .unwrap_or_else(|| panic!("dispatch arm {header} present"));
+            let body = dispatch[start..]
+                .split("\n            ClientFrame::")
+                .next()
+                .unwrap_or("");
+            assert!(
+                body.contains("*authed"),
+                "TRIPWIRE (CM2-B-A004): dispatch arm {header} must be behind the `*authed` \
+                 session guard — unauthenticated access to group/directory state"
+            );
+        }
     }
 
     /// E-5 WP-3 **schema test (server-blind invariant)** — the advisory Notify frame
