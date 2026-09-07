@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,7 +21,24 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
+
+// ─────────────────────── CM2-B-B009: resource bounds ───────────────────────
+// The relay is the product's single router + total-order authority (R10); an
+// unauthenticated peer must not be able to grow its memory without bound.
+/// Largest inbound WebSocket message accepted (tungstenite's default is 64 MiB — far
+/// larger than any legitimate envelope; an unauthenticated peer could send it on repeat).
+const MAX_WS_MESSAGE_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+/// Largest single WebSocket frame accepted.
+const MAX_WS_FRAME_SIZE: usize = 1024 * 1024; // 1 MiB
+/// Challenge nonces are issued pre-authentication (they bootstrap SIWE) and inserted
+/// into the issuer's nonce store; cap how many one connection may request so an
+/// unauthenticated peer cannot inflate that store by looping `Challenge`.
+const MAX_CHALLENGES_PER_CONN: u32 = 32;
+/// Ceiling on concurrent connections, so the count of live pre-auth connections (and
+/// thus the total pre-auth nonce footprint) is bounded regardless of the peer.
+const MAX_CONNECTIONS: usize = 4096;
 
 use crate::{DeliveryService, OffboardRequest};
 
@@ -54,6 +71,8 @@ pub struct RelayServer {
     /// When set (via the admin surface), the relay rejects new mutating operations
     /// (submit/onboard/offboard/register/publish) but keeps serving reads.
     paused: Arc<AtomicBool>,
+    /// CM2-B-B009: live connection count, capped at [`MAX_CONNECTIONS`].
+    conns: Arc<AtomicUsize>,
 }
 
 impl RelayServer {
@@ -62,6 +81,7 @@ impl RelayServer {
             service: Arc::new(Mutex::new(service)),
             registry: Arc::new(Mutex::new(HashMap::new())),
             paused: Arc::new(AtomicBool::new(false)),
+            conns: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -101,9 +121,17 @@ impl RelayServer {
         let local = listener.local_addr()?;
         let handle = tokio::spawn(async move {
             while let Ok((stream, _peer)) = listener.accept().await {
+                // CM2-B-B009: bound concurrent connections. Over the cap we drop the
+                // socket immediately rather than spawn an unbounded task/nonce footprint.
+                if self.conns.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    drop(stream);
+                    continue;
+                }
+                self.conns.fetch_add(1, Ordering::Relaxed);
                 let server = self.clone();
                 tokio::spawn(async move {
-                    let _ = server.handle_conn(stream).await;
+                    let _ = server.clone().handle_conn(stream).await;
+                    server.conns.fetch_sub(1, Ordering::Relaxed);
                 });
             }
         });
@@ -111,7 +139,13 @@ impl RelayServer {
     }
 
     async fn handle_conn(self: Arc<Self>, stream: TcpStream) -> Result<(), WsError> {
-        let ws = tokio_tungstenite::accept_async(stream)
+        // CM2-B-B009: cap inbound message/frame size (tungstenite defaults to 64 MiB).
+        let config = WebSocketConfig {
+            max_message_size: Some(MAX_WS_MESSAGE_SIZE),
+            max_frame_size: Some(MAX_WS_FRAME_SIZE),
+            ..Default::default()
+        };
+        let ws = tokio_tungstenite::accept_async_with_config(stream, Some(config))
             .await
             .map_err(|e| WsError::Ws(e.to_string()))?;
         let (mut write, mut read) = ws.split();
@@ -136,6 +170,8 @@ impl RelayServer {
         let _ = out_tx.send(ServerFrame::Challenge { nonce });
 
         let mut authed: Option<WalletAddress> = None;
+        // CM2-B-B009: the auto-issued challenge above counts as the first.
+        let mut challenge_count: u32 = 1;
         while let Some(msg) = read.next().await {
             let bytes = match msg {
                 Ok(Message::Binary(b)) => b,
@@ -143,7 +179,20 @@ impl RelayServer {
                 Ok(_) => continue,
             };
             match canonical::from_slice::<ClientFrame>(bytes.as_ref()) {
-                Ok(frame) => self.dispatch(frame, &out_tx, &mut authed).await,
+                Ok(frame) => {
+                    // CM2-B-B009: rate-cap pre-auth challenge requests per connection so a
+                    // peer cannot inflate the nonce store by looping `Challenge`.
+                    if matches!(frame, ClientFrame::Challenge) {
+                        challenge_count += 1;
+                        if challenge_count > MAX_CHALLENGES_PER_CONN {
+                            let _ = out_tx.send(ServerFrame::Error {
+                                message: "too many challenge requests".into(),
+                            });
+                            continue;
+                        }
+                    }
+                    self.dispatch(frame, &out_tx, &mut authed).await
+                }
                 Err(_) => {
                     let _ = out_tx.send(ServerFrame::Error {
                         message: "malformed frame".into(),
