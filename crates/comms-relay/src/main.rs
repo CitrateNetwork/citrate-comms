@@ -73,19 +73,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner = WalletAddress::from_hex(&owner_hex).map_err(|_| "CITRATE_COMMS_OWNER must be a 20-byte hex address")?;
 
     // At-rest master key: explicit env override, else the OS keyring (create on first run).
-    let (master, key_source) = match env::var("CITRATE_COMMS_MASTER_KEY") {
-        Ok(hex_key) => {
-            let v = hex::decode(hex_key.trim_start_matches("0x")).map_err(|_| "master key must be hex")?;
-            let arr: [u8; 32] = v.as_slice().try_into().map_err(|_| "master key must be 32 bytes (64 hex)")?;
-            (arr, "environment (explicit)".to_string())
-        }
-        Err(_) => {
-            let key = keyvault::load_or_create_master_key(keyvault::KEYRING_SERVICE, keyvault::KEYRING_ACCOUNT)?;
-            (key, format!("OS keyring ({}/{})", keyvault::KEYRING_SERVICE, keyvault::KEYRING_ACCOUNT))
-        }
-    };
+    // Held in a `Zeroizing` wrapper so the decoded key is wiped from memory on drop
+    // rather than left resident for the process lifetime (CM2-B-A009).
+    let (master, key_source): (zeroize::Zeroizing<[u8; 32]>, String) =
+        match env::var("CITRATE_COMMS_MASTER_KEY") {
+            Ok(hex_key) => {
+                let v = zeroize::Zeroizing::new(
+                    hex::decode(hex_key.trim_start_matches("0x"))
+                        .map_err(|_| "master key must be hex")?,
+                );
+                let arr: [u8; 32] = v
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "master key must be 32 bytes (64 hex)")?;
+                (
+                    zeroize::Zeroizing::new(arr),
+                    "environment (explicit)".to_string(),
+                )
+            }
+            Err(_) => {
+                let key = keyvault::load_or_create_master_key(
+                    keyvault::KEYRING_SERVICE,
+                    keyvault::KEYRING_ACCOUNT,
+                )?;
+                (
+                    key,
+                    format!(
+                        "OS keyring ({}/{})",
+                        keyvault::KEYRING_SERVICE,
+                        keyvault::KEYRING_ACCOUNT
+                    ),
+                )
+            }
+        };
 
-    let service = DeliveryService::open(&data, domain.clone(), owner, master, now_ms())?;
+    let service = DeliveryService::open(&data, domain.clone(), owner, *master, now_ms())?;
     let server = RelayServer::new(service);
     let (addr, accept) = server.clone().bind(&bind).await?;
 

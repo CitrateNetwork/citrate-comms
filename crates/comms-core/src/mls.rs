@@ -10,6 +10,20 @@
 //! suite at the 256-bit AEAD level, so we use the strongest *X25519 + Ed25519*
 //! standard suite (matching the chain's curve choices) and keep the AES-256-GCM
 //! "chain grade" at the at-rest storage layer. See `PLANSET/00` + `02` (reconciled).
+//!
+//! ## Zeroization residual (CM2-B-A009) — accepted, documented
+//!
+//! The MLS key schedule — the Ed25519 signing key ([`SignatureKeyPair`]) and every
+//! epoch/exporter/encryption secret and HPKE private key held inside the
+//! [`OpenMlsRustCrypto`] in-memory provider — is owned by OpenMLS and its crypto
+//! provider. Those upstream types do NOT implement `Zeroize`/`ZeroizeOnDrop` and
+//! expose no hook to wipe their heap on drop, so this module cannot zeroize them
+//! without a bespoke storage provider. This is an **accepted residual**: the
+//! wallet-key hops the workspace controls directly ARE wiped (the member daemon's
+//! seed, `keyvault`'s master key, `EthWallet::secret_bytes`, and the encrypted
+//! store's master + derived keys all use `Zeroizing`). A zeroizing OpenMLS storage
+//! provider is the roadmap fix (`PLANSET/07`). `reach=local` — this matters only to
+//! an attacker who can already read this process's memory.
 
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -136,9 +150,32 @@ impl MlsMember {
     }
 }
 
+/// A decrypted application message plus the authenticated MLS sender identity.
+///
+/// `sender_identity` comes from the MLS credential that signed the message
+/// (`ProcessedMessage::credential()`), which OpenMLS verifies during
+/// `process_message`. It is the ONLY trustworthy attribution: the relay-controlled
+/// `Envelope.sender` routing field can name anyone (finding CM2-B-A002), so callers
+/// MUST attribute from this value — recover it with
+/// [`WalletAddress::from_identity`](comms_proto::WalletAddress::from_identity).
+pub struct ReceivedMessage {
+    /// The authenticated sender's credential identity (the 20 wallet-address bytes).
+    pub sender_identity: Vec<u8>,
+    /// The decrypted application plaintext.
+    pub plaintext: Vec<u8>,
+}
+
 /// A member's view of one MLS group. Holds epoch secrets — never leaves the client.
 pub struct GroupHandle {
     group: MlsGroup,
+}
+
+/// Extract the BasicCredential identity bytes from an authenticated MLS credential.
+/// For citrate-comms this is the member's 20-byte wallet address.
+fn basic_credential_identity(credential: &Credential) -> Result<Vec<u8>, MlsError> {
+    let basic = BasicCredential::try_from(credential.clone())
+        .map_err(|e| MlsError::Group(format!("non-basic credential: {e:?}")))?;
+    Ok(basic.identity().to_vec())
 }
 
 impl GroupHandle {
@@ -246,6 +283,18 @@ impl GroupHandle {
         })
     }
 
+    /// The authenticated credential identities (20-byte wallet addresses) of every
+    /// current group member, taken from the MLS ratchet tree — NOT from any
+    /// relay-supplied routing metadata. The correct source for a client's roster
+    /// after a membership change (finding CM2-B-A002): a hostile relay cannot inject
+    /// a phantom wallet, because every entry here is an authenticated MLS credential.
+    pub fn member_identities(&self) -> Vec<Vec<u8>> {
+        self.group
+            .members()
+            .filter_map(|m| basic_credential_identity(&m.credential).ok())
+            .collect()
+    }
+
     /// Find a member's leaf index by their MLS signature public key (the value
     /// bound to their wallet by the attestation). Returns `None` if not a member.
     pub fn member_index_by_sig(&self, sig_pubkey: &[u8]) -> Option<u32> {
@@ -316,11 +365,23 @@ impl GroupHandle {
             .map_err(|e| MlsError::Codec(format!("app serialize: {e:?}")))
     }
 
-    /// Decrypt an incoming application message. Returns the plaintext.
-    pub fn receive(&mut self, member: &MlsMember, ciphertext: &[u8]) -> Result<Vec<u8>, MlsError> {
+    /// Decrypt an incoming application message. Returns the plaintext together with
+    /// the *authenticated* sender identity (the MLS credential OpenMLS verified), so
+    /// callers never attribute from the relay-controlled `Envelope.sender`
+    /// (finding CM2-B-A002).
+    pub fn receive(
+        &mut self,
+        member: &MlsMember,
+        ciphertext: &[u8],
+    ) -> Result<ReceivedMessage, MlsError> {
         let processed = self.process(member, ciphertext)?;
+        // Capture the authenticated sender identity BEFORE consuming the message.
+        let sender_identity = basic_credential_identity(processed.credential())?;
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => Ok(app.into_bytes()),
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(ReceivedMessage {
+                sender_identity,
+                plaintext: app.into_bytes(),
+            }),
             other => Err(MlsError::Group(format!(
                 "expected Application, got {}",
                 content_kind(&other)
@@ -578,7 +639,7 @@ mod tests {
         let ct = alice_group.send(&alice, secret).unwrap();
         let read = relay_group.receive(&relay_member, &ct).unwrap();
         assert_eq!(
-            read, secret,
+            read.plaintext, secret,
             "RED CONFIRMED: without the client gate the relay reads plaintext"
         );
 
@@ -615,11 +676,19 @@ mod tests {
             &ciphertext, b"hello from alice",
             "wire bytes are ciphertext, not plaintext"
         );
-        let plaintext = bob_group.receive(&bob, &ciphertext).unwrap();
-        assert_eq!(plaintext, b"hello from alice");
+        let received = bob_group.receive(&bob, &ciphertext).unwrap();
+        assert_eq!(received.plaintext, b"hello from alice");
+        // The authenticated sender identity is Alice's wallet credential, recovered
+        // from the MLS message itself (not any routing metadata) — CM2-B-A002.
+        assert_eq!(
+            received.sender_identity, b"alice-identity",
+            "sender attributed from the authenticated MLS credential"
+        );
 
         // Bob → Alice (bidirectional).
         let ct2 = bob_group.send(&bob, b"hi alice").unwrap();
-        assert_eq!(alice_group.receive(&alice, &ct2).unwrap(), b"hi alice");
+        let back = alice_group.receive(&alice, &ct2).unwrap();
+        assert_eq!(back.plaintext, b"hi alice");
+        assert_eq!(back.sender_identity, b"bob-identity");
     }
 }

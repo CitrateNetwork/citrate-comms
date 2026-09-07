@@ -10,9 +10,45 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Vulnerabilities are the gate (they fail closed unless explicitly ignored below).
+# `unmaintained` is scoped to first-party workspace crates only: deep transitive
+# `unmaintained` notices (paste, proc-macro-error2, rustybuzz, ttf-parser — all from
+# the macro / Slint desktop stack) are hygiene tracking, not a supply-chain STOP, and
+# must not mask a real vulnerability behind a red gate. Widen this when they are owned.
+unmaintained = "workspace"
 ignore = [
-    # (none yet — add a RUSTSEC id + a one-line justification when an advisory is
-    #  reviewed and accepted; the entry is the audit trail.)
+    # ── CM2-B-A006 (HELD) — libcrux advisories under the MLS crypto provider ──
+    # The MLS transport is openmls 0.8 → openmls_rust_crypto 0.5.1 → hpke-rs 0.6.1,
+    # whose `hpke-rs-libcrux 0.6.1` pins the vulnerable `libcrux-* 0.0.x` line
+    # (`libcrux-aead = "^0.0.7"`, etc). The fixed libcrux versions are UNREACHABLE
+    # without bumping hpke-rs / openmls_rust_crypto — a crypto-provider MAJOR bump
+    # that carries an OpenMLS API migration and MUST NOT be rushed into a fix pass.
+    # Tracked as a HELD dependency; remove each entry as the provider bump lands.
+    # (Verified 2026-09-06: `cargo update -p <crate> --precise <fixed>` is refused,
+    #  "required by package hpke-rs v0.6.1".)
+    #
+    # RUSTSEC-2026-0207 — libcrux-sha3: incorrect incremental SHAKE (fix >=0.0.10, blocked)
+    "RUSTSEC-2026-0207",
+    # RUSTSEC-2026-0208 — libcrux-sha3: panic in AVX2 SHAKE-256 (fix >=0.0.10, blocked)
+    "RUSTSEC-2026-0208",
+    # RUSTSEC-2026-0212 — libcrux-secrets: incorrect aarch64 ct-swap/select (fix >=0.0.6, blocked)
+    "RUSTSEC-2026-0212",
+    # RUSTSEC-2026-0124 — libcrux-chacha20poly1305: panic on overlong ct (fix >=0.0.8, blocked)
+    "RUSTSEC-2026-0124",
+    # RUSTSEC-2026-0211 — libcrux-aesgcm: non-constant-time AES-GCM tag check. NO FIX
+    #   available upstream. Reachable on the live AEAD path; the residual timing oracle
+    #   is accepted only until the provider bump / a RustCrypto AEAD backend swap.
+    "RUSTSEC-2026-0211",
+    # RUSTSEC-2026-0209 — libcrux-aesgcm: AAD length not bounded. NO FIX available.
+    "RUSTSEC-2026-0209",
+    # ── Desktop-client (Slint) surface — NOT the crypto core; tracked, out of A006 ──
+    # quick-xml reaches the tree ONLY via Slint's wayland/zbus stack (desktop client),
+    # not the relay or crypto core. No semver-compatible fix is reachable (Slint pins
+    # the older line); remove when Slint bumps quick-xml to >=0.41.
+    # RUSTSEC-2026-0194 — quick-xml: quadratic duplicate-attribute check (desktop)
+    "RUSTSEC-2026-0194",
+    # RUSTSEC-2026-0195 — quick-xml: unbounded namespace-decl allocation (desktop)
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]

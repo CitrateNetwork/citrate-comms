@@ -244,10 +244,12 @@ impl EthWallet {
     }
 
     /// Export the 32-byte secret for sealing in the OS keyring. Handle with care.
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        let bytes = self.signing_key.to_bytes();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
+    ///
+    /// Returned inside [`Zeroizing`](zeroize::Zeroizing) so the caller's copy is wiped
+    /// from memory on drop rather than left resident (CM2-B-A009).
+    pub fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        let mut out = zeroize::Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&self.signing_key.to_bytes());
         out
     }
 

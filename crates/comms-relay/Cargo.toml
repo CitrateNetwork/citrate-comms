@@ -32,6 +32,8 @@ axum = { workspace = true }
 getrandom = { workspace = true }
 # Constant-time bearer-token comparison.
 subtle = { workspace = true }
+# Wipe the at-rest master key from memory on drop (CM2-B-A009).
+zeroize = { workspace = true }
 
 # OS keyring for the at-rest master key — native backend per platform.
 [target.'cfg(target_os = "macos")'.dependencies]

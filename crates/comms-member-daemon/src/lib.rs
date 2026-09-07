@@ -366,14 +366,20 @@ impl MemberDaemon {
             if e.kind != EnvelopeKind::Application || e.group_id != gid {
                 continue;
             }
-            let pt = g
+            let received = g
                 .handle
                 .receive(mls, &e.ciphertext)
                 .map_err(|err| DaemonError::Mls(err.to_string()))?;
-            let body = String::from_utf8(pt).map_err(|_| DaemonError::BadUtf8)?;
+            let body = String::from_utf8(received.plaintext).map_err(|_| DaemonError::BadUtf8)?;
+            // Attribute from the authenticated MLS credential, not the
+            // relay-controlled `e.sender` routing field (CM2-B-A002).
+            let sender =
+                WalletAddress::from_identity(&received.sender_identity).ok_or_else(|| {
+                    DaemonError::Mls("authenticated sender identity is not a wallet".into())
+                })?;
             out.push(Msg {
                 group: gid,
-                sender: e.sender,
+                sender,
                 body,
             });
         }

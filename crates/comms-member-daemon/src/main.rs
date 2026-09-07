@@ -23,6 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use comms_core::identity::EthWallet;
 use comms_member_daemon::relay::{Relay, WsRelay};
 use comms_member_daemon::{server, MemberDaemon};
+use zeroize::Zeroizing;
 
 fn required(key: &str) -> Result<String, String> {
     env::var(key).map_err(|_| format!("{key} is required"))
@@ -42,19 +43,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Seed: prefer a 0600 FILE (the secret never crosses env/argv, which leak to `ps`), mirroring
     // the bearer. Fall back to the inline CITRATE_MEMBER_SEED for back-compat / tests.
-    let seed_hex = match env::var("CITRATE_MEMBER_SEED_FILE").ok().filter(|p| !p.is_empty()) {
-        Some(path) => fs::read_to_string(&path)
-            .map_err(|e| format!("reading seed file {path}: {e}"))?,
-        None => required("CITRATE_MEMBER_SEED")?,
-    };
-    let seed_hex = seed_hex.trim();
-    if seed_hex.is_empty() {
+    //
+    // Every copy of the secret key material is held in `Zeroizing` so it is wiped from
+    // memory on drop rather than left resident for the daemon's lifetime (CM2-B-A009):
+    // the hex text, the decoded bytes, and the fixed 32-byte array.
+    let seed_hex = Zeroizing::new(
+        match env::var("CITRATE_MEMBER_SEED_FILE")
+            .ok()
+            .filter(|p| !p.is_empty())
+        {
+            Some(path) => {
+                fs::read_to_string(&path).map_err(|e| format!("reading seed file {path}: {e}"))?
+            }
+            None => required("CITRATE_MEMBER_SEED")?,
+        },
+    );
+    let seed_trimmed = seed_hex.trim();
+    if seed_trimmed.is_empty() {
         return Err("seed is empty (fail closed)".into());
     }
-    let seed_bytes = hex::decode(seed_hex).map_err(|_| "seed must be hex")?;
-    let seed: [u8; 32] = seed_bytes
-        .try_into()
-        .map_err(|_| "seed must be 32 bytes")?;
+    let seed_bytes = Zeroizing::new(hex::decode(seed_trimmed).map_err(|_| "seed must be hex")?);
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+        seed_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "seed must be 32 bytes")?,
+    );
     let wallet = EthWallet::from_secret_key(&seed).map_err(|e| format!("bad seed: {e}"))?;
 
     let now = SystemTime::now()

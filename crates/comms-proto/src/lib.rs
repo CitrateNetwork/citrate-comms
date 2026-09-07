@@ -33,6 +33,19 @@ impl WalletAddress {
     pub fn to_hex(&self) -> String {
         format!("0x{}", hex::encode(self.0))
     }
+
+    /// Recover a wallet address from the bytes carried as an MLS `BasicCredential`
+    /// identity. In citrate-comms a member's credential identity IS the 20 address
+    /// bytes (`MlsMember::new(&wallet.0)`), so this is the inverse. Rejects any
+    /// identity that is not exactly 20 bytes.
+    ///
+    /// This is the authenticated attribution source: it is the sole safe way to turn
+    /// a decrypted message's MLS credential into a wallet, as opposed to the
+    /// relay-controlled `Envelope.sender` routing hint (finding CM2-B-A002).
+    pub fn from_identity(identity: &[u8]) -> Option<Self> {
+        let arr: [u8; 20] = identity.try_into().ok()?;
+        Some(Self(arr))
+    }
 }
 
 impl fmt::Debug for WalletAddress {

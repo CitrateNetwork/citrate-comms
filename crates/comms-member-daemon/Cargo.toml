@@ -26,3 +26,5 @@ thiserror = { workspace = true }
 hex = "0.4"
 # Constant-time bearer comparison (no `==` on the loopback IPC token).
 subtle = { workspace = true }
+# Wipe the wallet seed copies from memory on drop (CM2-B-A009).
+zeroize = { workspace = true }
