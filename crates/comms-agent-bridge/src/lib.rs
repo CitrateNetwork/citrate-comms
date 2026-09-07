@@ -245,11 +245,20 @@ impl AgentBridge {
                         return Err(BridgeError::SponsorExpired);
                     }
                 }
+                // CM2-B-B022: the grant's scope must authorize THIS group. It was stored
+                // at accept_sponsor but never compared at action time, so a grant narrowly
+                // scoped to group A authorized posting to any group the bridge joined.
+                let sponsor_scope = sponsor.scope;
                 // The guardrail is the same rbac matrix the rest of the system uses.
                 if !can(Role::Agent, Capability::PostMessage) {
                     return Err(BridgeError::Forbidden("post"));
                 }
                 let gid = self.gid.ok_or(BridgeError::NotJoined)?;
+                if let Some(scope) = sponsor_scope {
+                    if scope != gid {
+                        return Err(BridgeError::Forbidden("scope"));
+                    }
+                }
                 let group = self.group.as_mut().ok_or(BridgeError::NotJoined)?;
                 let payload = ChatMessage {
                     thread_id: None,
@@ -514,6 +523,21 @@ mod tests {
         // The guardrail: the agent is refused any membership-mutating command.
         assert_eq!(agent.handle(&mut relay, AgentOutbound::AddMember { group: "deals".into(), member: "0xabc".into() }, now), Err(BridgeError::Forbidden("add-member")));
         assert_eq!(agent.handle(&mut relay, AgentOutbound::RemoveMember { group: "deals".into(), member: "0xabc".into() }, now), Err(BridgeError::Forbidden("remove-member")));
+
+        // CM2-B-B022: a grant scoped to a DIFFERENT group must not authorize a post to
+        // this one — the scope field is now compared at action time, not just stored.
+        let wrong_scope = GroupId([0xAB; 32]);
+        assert_ne!(wrong_scope, gid);
+        let mis_grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(wrong_scope), Some(now + 86_400_000)).unwrap();
+        agent.accept_sponsor(mis_grant, admin_w.address(), now).unwrap();
+        assert_eq!(
+            agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "out-of-scope".into() }, now),
+            Err(BridgeError::Forbidden("scope")),
+            "a grant scoped to another group must not authorize this post"
+        );
+        // Restore the correctly-scoped grant so the audit assertion below is unaffected.
+        let ok_grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
+        agent.accept_sponsor(ok_grant, admin_w.address(), now).unwrap();
 
         // The audit chain recorded the agent's envelope + the visible Add.
         relay.audit().verify_integrity().unwrap();
