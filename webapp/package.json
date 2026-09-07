@@ -63,5 +63,12 @@
     "typescript-eslint": "^8.18.0",
     "vitest": "^4.1.7"
   },
-  "packageManager": "pnpm@10.0.0"
+  "packageManager": "pnpm@10.0.0",
+  "pnpm": {
+    "//auditConfig": "CM2-B-B010: reviewed dependency-audit exceptions. Every entry MUST carry a reason + tracking item, mirroring the Rust deny.toml [advisories] ignore discipline. Empty = no unreviewed high advisories tolerated.",
+    "auditConfig": {
+      "ignoreGhsas": [],
+      "ignoreCves": []
+    }
+  }
 }

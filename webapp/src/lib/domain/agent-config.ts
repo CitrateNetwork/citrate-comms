@@ -85,17 +85,45 @@ export async function addResource(
   return row?.id ?? null;
 }
 
-export async function setResourceEnabled(workspaceId: string, resourceId: string, enabled: boolean, by: string): Promise<void> {
+export async function setResourceEnabled(
+  workspaceId: string,
+  personaId: string,
+  resourceId: string,
+  enabled: boolean,
+  by: string,
+): Promise<void> {
+  // Scope the mutation to the persona the caller was authorized for. Without the
+  // personaId predicate a delegate scoped to persona A could toggle persona B's
+  // resources (which are injected into B's system prompt) — CM2-B-B013.
   await db()
     .update(agentResources)
     .set({ enabled })
-    .where(and(eq(agentResources.workspaceId, workspaceId), eq(agentResources.id, resourceId)));
-  await appendAudit({ workspaceId, actorSub: by, event: "persona_resource_toggled", target: resourceId });
+    .where(
+      and(
+        eq(agentResources.workspaceId, workspaceId),
+        eq(agentResources.personaId, personaId),
+        eq(agentResources.id, resourceId),
+      ),
+    );
+  await appendAudit({ workspaceId, actorSub: by, event: "persona_resource_toggled", target: `${personaId}:${resourceId}` });
 }
 
-export async function deleteResource(workspaceId: string, resourceId: string, by: string): Promise<void> {
-  await db().delete(agentResources).where(and(eq(agentResources.workspaceId, workspaceId), eq(agentResources.id, resourceId)));
-  await appendAudit({ workspaceId, actorSub: by, event: "persona_resource_deleted", target: resourceId });
+export async function deleteResource(
+  workspaceId: string,
+  personaId: string,
+  resourceId: string,
+  by: string,
+): Promise<void> {
+  await db()
+    .delete(agentResources)
+    .where(
+      and(
+        eq(agentResources.workspaceId, workspaceId),
+        eq(agentResources.personaId, personaId),
+        eq(agentResources.id, resourceId),
+      ),
+    );
+  await appendAudit({ workspaceId, actorSub: by, event: "persona_resource_deleted", target: `${personaId}:${resourceId}` });
 }
 
 /** Runtime: enabled resources rendered for the system prompt (CFG injection). */

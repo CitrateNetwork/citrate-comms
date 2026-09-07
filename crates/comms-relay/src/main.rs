@@ -72,39 +72,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "set CITRATE_COMMS_OWNER=0x<40 hex> (the workspace owner wallet)")?;
     let owner = WalletAddress::from_hex(&owner_hex).map_err(|_| "CITRATE_COMMS_OWNER must be a 20-byte hex address")?;
 
-    // At-rest master key: explicit env override, else the OS keyring (create on first run).
-    // Held in a `Zeroizing` wrapper so the decoded key is wiped from memory on drop
-    // rather than left resident for the process lifetime (CM2-B-A009).
+    // At-rest master key source priority (CM2-B-A010):
+    //   1. CITRATE_COMMS_MASTER_KEY_FILE — a 0600 file holding the hex key. PREFERRED:
+    //      the secret never enters the process environment, so it is not exposed via
+    //      /proc/<pid>/environ, `ps -e`, crash reporters, or child processes (the member
+    //      daemon already uses this file-path pattern for its own secrets).
+    //   2. the OS keyring (create on first run).
+    //   3. CITRATE_COMMS_MASTER_KEY — inline hex in the env — ONLY when
+    //      CITRATE_COMMS_ALLOW_ENV_KEY=1 is also set (dev/test escape hatch). Refused by
+    //      default because an env-resident key is a standing local-disclosure vector.
+    // Held in `Zeroizing` so the decoded key is wiped on drop (CM2-B-A009).
+    let decode_hex = |hex_key: &str| -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+        let v = zeroize::Zeroizing::new(
+            hex::decode(hex_key.trim().trim_start_matches("0x")).map_err(|_| "master key must be hex".to_string())?,
+        );
+        let arr: [u8; 32] = v
+            .as_slice()
+            .try_into()
+            .map_err(|_| "master key must be 32 bytes (64 hex)".to_string())?;
+        Ok(zeroize::Zeroizing::new(arr))
+    };
+
     let (master, key_source): (zeroize::Zeroizing<[u8; 32]>, String) =
-        match env::var("CITRATE_COMMS_MASTER_KEY") {
-            Ok(hex_key) => {
-                let v = zeroize::Zeroizing::new(
-                    hex::decode(hex_key.trim_start_matches("0x"))
-                        .map_err(|_| "master key must be hex")?,
-                );
-                let arr: [u8; 32] = v
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "master key must be 32 bytes (64 hex)")?;
-                (
-                    zeroize::Zeroizing::new(arr),
-                    "environment (explicit)".to_string(),
-                )
+        if let Ok(path) = env::var("CITRATE_COMMS_MASTER_KEY_FILE") {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|e| format!("CITRATE_COMMS_MASTER_KEY_FILE {path}: {e}"))?;
+            (decode_hex(&contents)?, format!("key file ({path})"))
+        } else if env::var("CITRATE_COMMS_MASTER_KEY").is_ok() {
+            // Inline env key present — accept it only with an explicit unsafe opt-in.
+            if env::var("CITRATE_COMMS_ALLOW_ENV_KEY").as_deref() != Ok("1") {
+                return Err("CITRATE_COMMS_MASTER_KEY is set inline in the environment (leaks via \
+                     /proc/<pid>/environ and to child processes). Use CITRATE_COMMS_MASTER_KEY_FILE \
+                     (a 0600 file) or the OS keyring instead, or set CITRATE_COMMS_ALLOW_ENV_KEY=1 \
+                     to override for a dev/test run."
+                    .into());
             }
-            Err(_) => {
-                let key = keyvault::load_or_create_master_key(
-                    keyvault::KEYRING_SERVICE,
-                    keyvault::KEYRING_ACCOUNT,
-                )?;
-                (
-                    key,
-                    format!(
-                        "OS keyring ({}/{})",
-                        keyvault::KEYRING_SERVICE,
-                        keyvault::KEYRING_ACCOUNT
-                    ),
-                )
-            }
+            let hex_key = env::var("CITRATE_COMMS_MASTER_KEY").unwrap();
+            (decode_hex(&hex_key)?, "environment (explicit, unsafe opt-in)".to_string())
+        } else {
+            let key = keyvault::load_or_create_master_key(
+                keyvault::KEYRING_SERVICE,
+                keyvault::KEYRING_ACCOUNT,
+            )?;
+            (
+                key,
+                format!("OS keyring ({}/{})", keyvault::KEYRING_SERVICE, keyvault::KEYRING_ACCOUNT),
+            )
         };
 
     let service = DeliveryService::open(&data, domain.clone(), owner, *master, now_ms())?;

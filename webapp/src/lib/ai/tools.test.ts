@@ -32,4 +32,32 @@ describe("comms tool registry — single source of truth", () => {
       expect(typeof t.execute).toBe("function");
     }
   });
+
+  // CM2-B-B018: the HITL tools bypass `audited()`, so they carried NO RBAC check at
+  // the point of call — a read-only Guest could stage a `runner.terminal` / `crm.delete`
+  // approval. Each HITL tool now gates on PostMessage (which an Agent/Member holds and
+  // a Guest does not) BEFORE it touches the queue.
+  it("a read-only Guest cannot STAGE a high-risk HITL action (guard fires before the DB)", async () => {
+    const asGuest = citrateCommsTools({ ...base, agentRole: "Guest" }) as Record<
+      string,
+      { execute: (a: unknown) => Promise<unknown> }
+    >;
+    // Assert the GUARD denies (message names the propose-gate), not an incidental
+    // DB error — so the tripwire fails if the guard is removed and execution falls
+    // through to enqueueApproval.
+    await expect(
+      asGuest["crm.delete"]!.execute({ entity: "account", recordId: crypto.randomUUID() }),
+    ).rejects.toThrow(/may not propose crm\.delete/);
+    await expect(asGuest["terminal.exec"]!.execute({ cmd: "echo hi" })).rejects.toThrow(/may not propose terminal\.exec/);
+  });
+
+  it("an Agent (read+post) is NOT blocked by the propose-gate (it may propose HITL actions)", () => {
+    // Regression guard: the propose-gate must be PostMessage, NOT the execute-capability
+    // (CreateRecord/DeleteRecord/ManageWorkspace) — those would wrongly block agents,
+    // which is the whole point of the HITL propose→approve split.
+    const asAgent = citrateCommsTools({ ...base, agentRole: "Agent" });
+    // The tool is present and callable for an Agent (execution is DB-bound, so we only
+    // assert the registry exposes it — the deny path above proves the guard is active).
+    expect(typeof (asAgent as Record<string, { execute: unknown }>)["crm.note"]!.execute).toBe("function");
+  });
 });

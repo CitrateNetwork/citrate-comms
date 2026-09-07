@@ -203,6 +203,9 @@ impl RelayServer {
 
         if let Some(w) = authed {
             self.registry.lock().await.remove(&w);
+            // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
+            // not persist for the process lifetime (no revocation + unbounded growth).
+            self.service.lock().await.end_session(&w);
         }
         writer.abort();
         Ok(())
@@ -389,12 +392,21 @@ impl RelayServer {
                 let _ = out_tx.send(ServerFrame::RatchetTree(rt));
             }
             ClientFrame::GroupMembers { group_id } => {
-                // CM2-B-A004: see RatchetTree — the roster is group state, not public.
-                let Some(_addr) = *authed else {
+                // CM2-B-A004: the roster is group state, not public.
+                let Some(addr) = *authed else {
                     return send_err(out_tx, "not authenticated");
                 };
+                // CIT-COMMS-003: bind the roster read to MEMBERSHIP, not merely to any
+                // authenticated session. The wallet set is the group's social graph;
+                // only a member should read it. (RatchetTree stays session-gated because
+                // a joiner needs it to process its Welcome before it is a member.)
                 let members = self.service.lock().await.group_members(&group_id);
-                let _ = out_tx.send(ServerFrame::Members(members));
+                match &members {
+                    Some(roster) if roster.contains(&addr) => {
+                        let _ = out_tx.send(ServerFrame::Members(members));
+                    }
+                    _ => return send_err(out_tx, "not a member of this group"),
+                }
             }
             ClientFrame::Offboard {
                 group_id,

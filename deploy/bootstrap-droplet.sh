@@ -84,18 +84,27 @@ fi
 
 install -m 0755 "$SRC/target/release/comms-relay" "$PREFIX/bin/comms-relay"
 
-log "Installing .env (generating a master key on first run)"
-if [[ ! -f "$PREFIX/.env" ]]; then
-	MASTER_KEY=$(openssl rand -hex 32)
-	sed -e "s|comms.example.com|$DOMAIN|g" \
-		-e "s|^CITRATE_COMMS_OWNER=.*|CITRATE_COMMS_OWNER=$OWNER|" \
-		-e "s|^CITRATE_COMMS_MASTER_KEY=.*|CITRATE_COMMS_MASTER_KEY=$MASTER_KEY|" \
-		"$SRC/deploy/.env.example" >"$PREFIX/.env"
-	echo "  generated a new at-rest master key — backed-up copy recommended"
+log "Installing .env + master key (generating the key on first run)"
+KEYFILE="$PREFIX/master.key"
+# CM2-B-A010: keep the at-rest master key OUT of the process environment (it would
+# otherwise leak via /proc/<pid>/environ + child processes). The relay reads it from
+# CITRATE_COMMS_MASTER_KEY_FILE. CM2-B-B020: create both files with umask 077 so they
+# are never world-readable even momentarily (a chmod-after-write leaves a race window).
+if [[ ! -f "$KEYFILE" ]]; then
+	( umask 077; openssl rand -hex 32 >"$KEYFILE" )
+	echo "  generated a new at-rest master key at $KEYFILE — a backed-up copy is recommended"
 else
-	echo "  $PREFIX/.env exists; leaving it (and its master key) untouched"
+	echo "  $KEYFILE exists; leaving the master key untouched"
 fi
-chmod 600 "$PREFIX/.env"
+if [[ ! -f "$PREFIX/.env" ]]; then
+	( umask 077; sed -e "s|comms.example.com|$DOMAIN|g" \
+		-e "s|^CITRATE_COMMS_OWNER=.*|CITRATE_COMMS_OWNER=$OWNER|" \
+		-e "s|^CITRATE_COMMS_MASTER_KEY=.*|CITRATE_COMMS_MASTER_KEY_FILE=$KEYFILE|" \
+		"$SRC/deploy/.env.example" >"$PREFIX/.env" )
+else
+	echo "  $PREFIX/.env exists; leaving it untouched"
+fi
+chmod 600 "$PREFIX/.env" "$KEYFILE"
 chown -R comms:comms "$PREFIX"
 
 log "Installing the systemd unit"

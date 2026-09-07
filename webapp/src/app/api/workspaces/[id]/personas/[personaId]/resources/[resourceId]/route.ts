@@ -12,7 +12,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const ctx = await requireMember(req, id);
     if (!(await canConfigurePersona(id, ctx.sub, ctx.role, personaId))) throw new GuardError(403, "not authorized");
     const body = (await readJson(req)) as { enabled?: unknown };
-    await setResourceEnabled(id, resourceId, body.enabled === true, ctx.sub);
+    await setResourceEnabled(id, personaId, resourceId, body.enabled === true, ctx.sub);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return errorResponse(e);
@@ -25,7 +25,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
     const { id, personaId, resourceId } = await params;
     const ctx = await requireMember(req, id);
     if (!(await canConfigurePersona(id, ctx.sub, ctx.role, personaId))) throw new GuardError(403, "not authorized");
-    await deleteResource(id, resourceId, ctx.sub);
+    await deleteResource(id, personaId, resourceId, ctx.sub);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return errorResponse(e);

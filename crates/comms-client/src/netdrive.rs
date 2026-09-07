@@ -95,7 +95,15 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
     let endpoint = cfg.endpoint_label();
     status(&weak, "connecting…", &endpoint, false);
 
-    let wallet = load_wallet(&cfg.wallet_account);
+    let wallet = match load_wallet(&cfg.wallet_account) {
+        Ok(w) => w,
+        Err(e) => {
+            // Fail closed: refuse to start a session rather than mint a throwaway wallet.
+            system(&weak, &mut log, &e);
+            status(&weak, "offline", &endpoint, false);
+            return;
+        }
+    };
     let mut session = match NetSession::login(&cfg.url, &cfg.domain, Box::new(wallet), now_ms(), cfg.allow_insecure).await {
         Ok(s) => s,
         Err(e) => {
@@ -193,13 +201,16 @@ async fn create_channel(weak: &Weak<AppWindow>, log: &mut Vec<Line>, session: &m
     }
 }
 
-/// A durable, keyring-backed wallet identity (stable across restarts). Falls back to an
-/// ephemeral wallet if the keyring is unavailable — never panics (Rule 8).
-fn load_wallet(account: &str) -> EthWallet {
-    match comms_relay::keyvault::load_or_create_master_key("citrate-comms", account) {
-        Ok(secret) => EthWallet::from_secret_key(&secret).unwrap_or_else(|_| EthWallet::generate()),
-        Err(_) => EthWallet::generate(),
-    }
+/// A durable, keyring-backed wallet identity (stable across restarts). Fails CLOSED
+/// (returns Err) if the keyring is unavailable — it must NEVER silently mint a fresh
+/// ephemeral wallet, which would sign the user in under an address they do not control,
+/// dropping all their group membership and role bindings (CM2-B-A016). Still never
+/// panics (Rule 8): the error is surfaced to the caller/UI.
+fn load_wallet(account: &str) -> Result<EthWallet, String> {
+    let secret = comms_relay::keyvault::load_or_create_master_key("citrate-comms", account)
+        .map_err(|e| format!("keyring unavailable — cannot load your identity: {e}"))?;
+    EthWallet::from_secret_key(&secret)
+        .map_err(|e| format!("stored key is unusable — cannot load your identity: {e}"))
 }
 
 fn now_ms() -> u64 {

@@ -43,8 +43,14 @@ export function encryptField(workspaceId: string, plaintext: string): string {
 export function decryptField(workspaceId: string, packed: string): string {
   const [v, ivb, tagb, ctb] = packed.split(":");
   if (v !== "v1" || !ivb || !tagb || !ctb) throw new Error("bad ciphertext envelope");
-  const decipher = createDecipheriv("aes-256-gcm", workspaceKey(workspaceId), Buffer.from(ivb, "base64"));
-  decipher.setAuthTag(Buffer.from(tagb, "base64"));
+  const tag = Buffer.from(tagb, "base64");
+  // Pin the GCM tag length. Without this Node accepts a truncated tag (down to
+  // 4 bytes), dropping forgery work from 2^128 to 2^32 for a DB-write attacker.
+  if (tag.length !== 16) throw new Error("bad ciphertext envelope: GCM auth tag must be 16 bytes");
+  const decipher = createDecipheriv("aes-256-gcm", workspaceKey(workspaceId), Buffer.from(ivb, "base64"), {
+    authTagLength: 16,
+  });
+  decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(Buffer.from(ctb, "base64")), decipher.final()]).toString("utf8");
 }
 
@@ -87,10 +93,27 @@ export function blindIndex(workspaceId: string, domain: string, value: string): 
   return createHmac("sha256", key).update(value).digest("hex");
 }
 
-/** Salted one-way hash for audit attribution (IP/UA). Not reversible. */
+/**
+ * Keyed one-way hash for audit attribution (IP/UA). Not reversible.
+ * Fail-closed: the salt is derived from the master key via HKDF, so an
+ * unprovisioned deployment throws rather than silently degrading to an
+ * unsalted, precomputable `sha256("citrate-comms:"+v)` (fail-open default).
+ */
 export function hashId(value: string): string {
-  const salt = process.env.COMMS_ENC_KEY ?? "citrate-comms";
-  return createHash("sha256").update(`${salt}:${value}`).digest("hex").slice(0, 32);
+  const salt = hkdfSync("sha256", masterKey(), Buffer.from("comms-hashid", "utf8"), "comms-hashid-v1", 32);
+  return createHmac("sha256", Buffer.from(salt)).update(value).digest("hex").slice(0, 32);
+}
+
+/**
+ * Keyed MAC for the per-workspace audit chain (hex). Domain-separated from the
+ * field-encryption and assertion keys. Keying the chain makes it tamper-EVIDENT
+ * against a DB-write insider: without the master key an attacker cannot recompute
+ * a rewritten prefix's hashes, so `verifyChainFromDb` detects wholesale rewrites,
+ * not just careless single-record edits. Fail-closed when COMMS_ENC_KEY is unset.
+ */
+export function auditMac(workspaceId: string, message: string): string {
+  const key = Buffer.from(hkdfSync("sha256", masterKey(), Buffer.from(workspaceId, "utf8"), "comms-audit-chain-v1", 32));
+  return createHmac("sha256", key).update(message).digest("hex");
 }
 
 /** SHA-256 of an invite token — we persist only this, never the raw token. */

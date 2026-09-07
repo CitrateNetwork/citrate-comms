@@ -18,7 +18,7 @@
  * reach us. The client additionally falls back to the legacy 20s poll if SSE
  * dies entirely (NotifBell).
  */
-import { requireMember } from "@/lib/tenant/guard";
+import { requireMember, membershipOf } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { unreadCount } from "@/lib/domain/notifications";
 import { subscribeNotify, type NotifyEvent } from "@/lib/realtime/notify-events";
@@ -68,6 +68,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       const timer = setInterval(() => {
         void (async () => {
           try {
+            // CM2-B-B023: re-authorize on each tick. Auth was checked only at open,
+            // so an offboarded member kept receiving notification metadata for the
+            // rest of the ~270s stream. Terminate the stream the moment membership
+            // is revoked.
+            if (!(await membershipOf(id, sub))) {
+              cleanup();
+              return;
+            }
             const n = await unreadCount(id, sub);
             if (n !== lastUnread) {
               lastUnread = n;

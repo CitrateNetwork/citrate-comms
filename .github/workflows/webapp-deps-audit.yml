@@ -1,0 +1,38 @@
+# CM2-B-B010: the webapp had no JavaScript dependency-audit gate anywhere in CI,
+# while the Rust side blocks releases on `cargo audit` (release.yml) + `deny.toml`.
+# This is the missing JS equivalent: a blocking `pnpm audit` at high severity.
+#
+# Reviewed exceptions live in webapp/package.json under `pnpm.auditConfig`
+# (ignoreGhsas / ignoreCves), mirroring deny.toml's `[advisories] ignore`
+# discipline — every ignored advisory must carry a comment + tracking item.
+name: webapp-deps-audit
+
+on:
+  pull_request:
+    paths:
+      - "webapp/package.json"
+      - "webapp/pnpm-lock.yaml"
+      - ".github/workflows/webapp-deps-audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "webapp/package.json"
+      - "webapp/pnpm-lock.yaml"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # --prod: only advisories reachable from shipped (non-dev) deps.
+      # --audit-level high: block on high/critical; moderate is reported, not gating.
+      - run: pnpm audit --prod --audit-level high

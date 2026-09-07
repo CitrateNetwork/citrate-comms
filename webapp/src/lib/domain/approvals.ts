@@ -132,6 +132,7 @@ export async function enqueueApproval(args: EnqueueArgs): Promise<{ approvalId: 
     args.tool,
     args.action,
     "pending",
+    { redactBody: true }, // body lives only in the encrypted payloadEnc (CM2-B-B016)
   );
   const [row] = await db()
     .insert(agentApprovals)
@@ -282,11 +283,36 @@ export async function decideApproval(
   // The approval queue must never be a lower-privileged path to a privileged op.
   const authzErr = approvalAuthzError(decidedByRole, action, decidedBy, appr.requestedBySub);
   if (authzErr) throw new GuardError(403, authzErr);
+
+  // CM2-B-B012: atomically claim the approval (compare-and-swap on status) BEFORE
+  // executing, so two concurrent approvals of the same id cannot both run the
+  // action. The prior read-check-execute-write sequence let both requests pass the
+  // `status !== "pending"` check before either wrote, double-executing `runner.*`,
+  // `crm.delete`, etc. The UPDATE is predicated on status='pending' and returns the
+  // row only to the winner.
+  const claimed = await db()
+    .update(agentApprovals)
+    .set({ status: "executing" })
+    .where(
+      and(
+        eq(agentApprovals.workspaceId, workspaceId),
+        eq(agentApprovals.id, approvalId),
+        eq(agentApprovals.status, "pending"),
+      ),
+    )
+    .returning({ id: agentApprovals.id });
+  if (claimed.length === 0) return { ok: false, error: "already_decided" };
+
   let result: unknown;
   try {
     result = await executeAction(workspaceId, action, { bySub: appr.requestedBySub, personaId: appr.personaId });
   } catch {
-    // Execution failed (e.g. runner unreachable) — keep it pending so it can be retried.
+    // Execution failed (e.g. runner unreachable) — release the claim back to pending
+    // so it can be retried by a fresh decision.
+    await db()
+      .update(agentApprovals)
+      .set({ status: "pending" })
+      .where(and(eq(agentApprovals.id, approvalId), eq(agentApprovals.status, "executing")));
     return { ok: false, error: "execution_failed" };
   }
   await db().update(agentApprovals).set({ status: "approved", decidedBySub: decidedBy, decidedAt: new Date() }).where(eq(agentApprovals.id, approvalId));

@@ -126,11 +126,9 @@ impl AgentConn {
     }
 
     async fn read_frame<T: DeserializeOwned>(&mut self) -> Result<Option<T>, SocketError> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await.map_err(SocketError::Io)?;
-        if n == 0 {
-            return Ok(None); // clean EOF
-        }
+        let Some(line) = read_capped_line(&mut self.reader).await? else {
+            return Ok(None);
+        };
         let value = crate::ipc::from_line(&line).map_err(SocketError::Codec)?;
         Ok(Some(value))
     }
@@ -164,11 +162,9 @@ pub struct AgentSource {
 impl AgentSource {
     /// `Ok(None)` on a clean EOF (the runtime disconnected).
     pub async fn recv_command(&mut self) -> Result<Option<AgentOutbound>, SocketError> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await.map_err(SocketError::Io)?;
-        if n == 0 {
+        let Some(line) = read_capped_line(&mut self.reader).await? else {
             return Ok(None);
-        }
+        };
         let cmd = crate::ipc::from_line(&line).map_err(SocketError::Codec)?;
         Ok(Some(cmd))
     }
@@ -211,11 +207,9 @@ impl RuntimeClient {
     }
 
     async fn read_frame<T: DeserializeOwned>(&mut self) -> Result<Option<T>, SocketError> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await.map_err(SocketError::Io)?;
-        if n == 0 {
+        let Some(line) = read_capped_line(&mut self.reader).await? else {
             return Ok(None);
-        }
+        };
         let value = crate::ipc::from_line(&line).map_err(SocketError::Codec)?;
         Ok(Some(value))
     }
@@ -241,6 +235,26 @@ pub enum SocketError {
     Unauthorized,
     #[error("rng error: {0}")]
     Rng(String),
+    #[error("ipc frame exceeds the {0}-byte cap")]
+    FrameTooLarge(usize),
+}
+
+/// Max bytes for one newline-delimited IPC frame (CM2-B-B021). A local runtime's JSON
+/// command/event is far smaller; this rejects an oversized frame rather than letting a
+/// misbehaving local peer drive an unbounded line read.
+const MAX_FRAME_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Read one capped, newline-delimited line. `Ok(None)` on clean EOF.
+async fn read_capped_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<String>, SocketError> {
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).await.map_err(SocketError::Io)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if line.len() > MAX_FRAME_BYTES {
+        return Err(SocketError::FrameTooLarge(MAX_FRAME_BYTES));
+    }
+    Ok(Some(line))
 }
 
 #[cfg(test)]
