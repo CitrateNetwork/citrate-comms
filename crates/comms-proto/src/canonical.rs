@@ -17,8 +17,23 @@ pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtoError> {
 }
 
 /// Deserialize a value from canonical CBOR bytes (the inverse of [`to_vec`]).
+///
+/// Enforces canonicality on the length axis: `ciborium` stops after the first CBOR
+/// value and silently ignores any trailing bytes, so `x` and `x || garbage` would
+/// otherwise decode to the same value — two distinct byte strings mapping to one
+/// value (CM2-B-A014). This module is the single source of the bytes that get
+/// hashed/signed, so it rejects any residue after the value.
 pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtoError> {
-    ciborium::de::from_reader(bytes).map_err(|e| ProtoError::Encode(e.to_string()))
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value = ciborium::de::from_reader(&mut cursor).map_err(|e| ProtoError::Encode(e.to_string()))?;
+    let consumed = cursor.position() as usize;
+    if consumed != bytes.len() {
+        return Err(ProtoError::Encode(format!(
+            "non-canonical CBOR: {} trailing byte(s) after the value",
+            bytes.len() - consumed
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -107,5 +122,31 @@ mod tests {
         // The valid bytes still round-trip exactly (decode did not regress).
         let back: Envelope = from_slice(&good).unwrap();
         assert_eq!(to_vec(&back).unwrap(), good);
+    }
+
+    /// CM2-B-A014: the canonical decoder must reject trailing bytes — appending a byte
+    /// to a valid encoding must NOT decode to the same value. Guards the "single
+    /// deterministic byte representation" contract this module advertises.
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let good = to_vec(&AuditEvent::MemberAdded {
+            group_id: GroupId([7; 32]),
+            member: WalletAddress([3; 20]),
+            epoch: EpochId(1),
+        })
+        .unwrap();
+        // Exact bytes decode.
+        let _: AuditEvent = from_slice(&good).unwrap();
+        // A single appended 0x00 must be refused (it previously decoded to an equal value).
+        let mut tampered = good.clone();
+        tampered.push(0x00);
+        assert!(
+            from_slice::<AuditEvent>(&tampered).is_err(),
+            "trailing byte accepted — canonicality not enforced"
+        );
+        // Longer garbage suffix likewise.
+        let mut tampered2 = good.clone();
+        tampered2.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert!(from_slice::<AuditEvent>(&tampered2).is_err());
     }
 }
