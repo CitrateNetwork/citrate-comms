@@ -156,6 +156,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         body: z.string().min(1).max(8000),
       }),
       execute: async (a: { entity: CrmEntity; recordId: string; type: "note" | "journal" | "call" | "meeting" | "email"; title?: string; body: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.note`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "crm.note",
@@ -185,6 +187,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         fields: z.array(z.object({ key: z.string().max(60), value: z.string().max(8000) })).max(30).optional(),
       }),
       execute: async (a: { entity: CrmEntity; name: string; domain?: string; title?: string; value?: number; accountId?: string; fields?: { key: string; value: string }[] }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.create`);
         if (a.entity === "deal" && !a.accountId) {
           return { status: "error", message: "A deal needs `accountId` (its parent account). Create/find the account first, then create the deal with that id." };
         }
@@ -216,6 +220,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         recordId: z.string().uuid(),
       }),
       execute: async (a: { entity: CrmEntity; recordId: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.delete`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "crm.delete",
@@ -235,6 +241,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         "approval; call with no arguments. Use this to clean up after a messy import.",
       inputSchema: z.object({}),
       execute: async () => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.dedupe`);
         const preview = await dedupeWorkspaceCrm(ctx.workspaceId, { dryRun: true });
         const total = preview.accounts.merged + preview.deals.merged + preview.contacts.merged;
         if (total === 0) return { status: "noop", message: "No duplicate accounts, deals, or contacts found — nothing to merge." };
@@ -280,6 +288,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         fields: z.array(z.object({ key: z.string().max(60), value: z.string().max(8000) })).max(30).optional(),
       }),
       execute: async (a: { entity: CrmEntity; recordId: string; standard?: { name?: string; domain?: string; title?: string; value?: number }; fields?: { key: string; value: string }[] }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.write`);
         // crm.write only UPDATES existing records. If the id isn't a real record (e.g. the agent
         // passed a NAME), tell it to use crm.create instead — recoverable in the same turn.
         // Check UUID shape first so a name can't reach the uuid-typed column (Postgres would throw).
@@ -340,6 +350,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         confidence: z.number().int().min(0).max(100).optional(),
       }),
       execute: async (a: { kind: string; content: string; anchors?: { entity: string; id: string }[]; confidence?: number }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose memory.assert`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "memory.assert",
@@ -530,6 +542,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         sheetId: z.string().uuid(),
       }),
       execute: async (a: { sheetId: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.import`);
         // Self-healing: if no mapping was saved yet (or a prior tables.map save failed),
         // fall back to a suggested draft instead of hard-blocking the whole import. Only
         // a genuinely missing sheet stops us here.
@@ -628,6 +642,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         channelId: z.string().uuid().optional().describe("a channel to associate/announce the event in"),
       }),
       execute: async (a: { title: string; kind: "meeting" | "deadline" | "focus"; startsAt: string; endsAt: string; timezone?: string; location?: string; description?: string; attendees?: { sub: string; raciRole?: "R" | "A" | "C" | "I" | null }[]; channelId?: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose calendar.schedule`);
         if (new Date(a.endsAt) < new Date(a.startsAt)) return { status: "error", message: "endsAt is before startsAt." };
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
@@ -655,6 +671,8 @@ export function citrateCommsTools(ctx: ToolContext) {
       description: "Propose cancelling a calendar event by id (queued for human approval). Attendees are notified on approval.",
       inputSchema: z.object({ eventId: z.string().uuid() }),
       execute: async (a: { eventId: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose calendar.cancel`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "calendar.cancel",
@@ -717,6 +735,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         channelId: z.string().uuid().optional(),
       }),
       execute: async (a: { name: string; content: string; accountId?: string; dealId?: string; channelId?: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose documents.write`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "documents.write",
@@ -740,6 +760,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         due: z.string().datetime().optional(),
       }),
       execute: async (a: { channelId: string; kind: "decision" | "commitment" | "resolved"; text: string; owner?: string; due?: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose ledger.write`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "ledger.write",
@@ -765,6 +787,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         raci: z.array(z.object({ sub: z.string().min(1).max(200), role: z.enum(["R", "A", "C", "I"]) })).max(50).optional(),
       }),
       execute: async (a: { title: string; projectId?: string; priority?: "low" | "medium" | "high"; assigneeSub?: string; due?: string; raci?: { sub: string; role: "R" | "A" | "C" | "I" }[] }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose pm.write`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "pm.write",
@@ -833,6 +857,8 @@ export function citrateCommsTools(ctx: ToolContext) {
       description: "Propose running an allow-listed shell command in the runner's capsule sandbox. HITL: queued for human approval, then executed in the sandbox. Use for read-only inspection of exported data.",
       inputSchema: z.object({ cmd: z.string().min(1).max(2000), cwd: z.string().max(400).optional() }),
       execute: async (a: { cmd: string; cwd?: string }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose terminal.exec`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "terminal.exec",
@@ -852,6 +878,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         files: z.array(z.object({ name: z.string().max(120), content: z.string().max(100000) })).max(10).optional(),
       }),
       execute: async (a: { lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] }) => {
+        // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
+        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose code.run`);
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "code.run",

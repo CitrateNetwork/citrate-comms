@@ -62,8 +62,15 @@ export async function logToolCall(
   tool: string,
   args: unknown,
   approvalStatus: "auto" | "pending" | "approved" | "rejected" = "auto",
+  opts: { redactBody?: boolean } = {},
 ): Promise<string | null> {
   try {
+    // CM2-B-B016: for HITL actions the full body is persisted (encrypted) in
+    // `agentApprovals.payloadEnc` — the single source of truth. The cleartext
+    // transparency row must NOT duplicate that body, or field encryption is only as
+    // strong as `redact()`'s field coverage. Keep the integrity hash of the true args
+    // but store a body-free rendering in the cleartext column.
+    const argsRedacted = opts.redactBody ? "[held-for-approval]" : redactedArgs(args);
     const [row] = await db()
       .insert(agentToolCalls)
       .values({
@@ -73,7 +80,7 @@ export async function logToolCall(
         invokedBySub: ctx.invokedBySub ?? null,
         tool,
         argsHash: hashArgs(args),
-        argsRedacted: redactedArgs(args),
+        argsRedacted,
         approvalStatus,
       })
       .returning({ id: agentToolCalls.id });

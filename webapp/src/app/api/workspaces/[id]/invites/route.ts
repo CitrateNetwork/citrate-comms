@@ -4,6 +4,7 @@ import { errorResponse, readJson } from "@/lib/http";
 import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
 import { inviteSchema } from "@/lib/validation/schemas";
+import { canGrant, type Role } from "@/lib/rbac/matrix";
 import { eq } from "drizzle-orm";
 import { createInvite, listPendingInvites } from "@/lib/domain/invites";
 import { sendInviteEmail } from "@/lib/email/send";
@@ -36,6 +37,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const parsed = inviteSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
     if (parsed.data.workspaceId !== id) return NextResponse.json({ error: "workspace_mismatch" }, { status: 400 });
+    // Anti-escalation: the inviter must be entitled to grant the chosen role.
+    // Without this an Admin could mint Admin-bearing invite links — the exact
+    // escalation the batch and role-change routes already block (CM2-B-B011).
+    if (!canGrant(ctx.role, parsed.data.role as Role)) {
+      return NextResponse.json({ error: "forbidden_role" }, { status: 403 });
+    }
 
     const invite = await createInvite({
       workspaceId: id,
