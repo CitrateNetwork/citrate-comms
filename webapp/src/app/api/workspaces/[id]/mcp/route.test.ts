@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const postAndPin = vi.fn(async () => ({ messageId: "m1", events: 0 }));
+const postAndPin = vi.fn(async (..._a: unknown[]) => ({ messageId: "m1", events: 0 }));
 vi.mock("@/lib/domain/crm-fields", async (o) => ({ ...(await o()), loadFieldDefsByEntity: async () => ({}) }));
 vi.mock("@/lib/domain/calendar", async (o) => ({ ...(await o()), postAndPinCalendarSummary: (...a: unknown[]) => postAndPin(...a) }));
 
