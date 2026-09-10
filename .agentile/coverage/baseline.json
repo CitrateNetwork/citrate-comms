@@ -1,0 +1,7 @@
+{
+  "rule": "Rule 2 — the workspace test count is non-decreasing across a sprint; a drop is a BLOCKER.",
+  "workspace_tests": 71,
+  "command": "cargo test --workspace",
+  "as_of": "COMMS-S4 (WP-4.1..4.11) — 2026-06-16",
+  "notes": "Seeded at the first green-CI baseline. The air-gap validation (docs/audit/AIRGAP_TEST.md) and the release gate expect >= this many tests passing offline."
+}
