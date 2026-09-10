@@ -1,118 +1,140 @@
 # citrate-comms
 
-> An **end-to-end-encrypted, agentic team workspace** for the Citrate federation —
-> Comms + CRM + Project Management in one self-hostable binary. Secure login through a
-> cryptographic handshake on `citrate-identity`, messages routed by a **server-blind relay**
-> that can never read them, and AI agents that participate as **cryptographic members** of a
-> conversation rather than server-side wiretaps. Runs on-prem and airgapped alongside `nist-agent`.
+> A self-hostable, end-to-end-encrypted agentic team workspace (Comms + CRM + PM) for the Citrate Network, delivered by a server-blind relay that can never read your messages.
 
-**Status:** accepted into the federation (2026-06-14). Two tracks are live. The **native Rust workspace**
-has shipped through the crypto + transport spine and is in UI/UX hardening (COMMS-S5 active; S0–S4 complete).
-The **customer-facing web app** is **deployed to Vercel production** at
-[`citrate-comms-web.vercel.app`](https://citrate-comms-web.vercel.app) and is engineering-mature through ~E-5:
-fail-closed OIDC auth, workspaces + RBAC, comms with the witness Ledger, a full **agentic CRM**, project
-management, agents-as-members (membership), SSE notifications, and a BLAKE3 audit chain. This is the first
-internal tool our own team runs; if it works for us it productizes for any team on the network.
+## What it is
 
-> **Not yet done (do not overstate):** the `https://citrate.ai/entitlement` claim is parsed but does **not**
-> yet gate access (no paid-entitlement enforcement); revenue is not live. Only an **internal self-audit**
-> (FWA-C11, 2026-06-21) has run — there is **no external / third-party audit** yet. The agent **runtime**
-> (privileged tools via `comms-agent-runner`) is not wired; the web app ships agents-as-members membership only.
+`citrate-comms` is an E2E-encrypted team workspace whose messages are routed by a
+**server-blind relay**: the relay stores and forwards MLS (RFC 9420) ciphertext and
+routing metadata only — all plaintext and all group secrets live exclusively on
+member clients. AI agents join a conversation as **cryptographic members**, not
+server-side wiretaps. It ships as two tracks: a native Rust workspace (the relay
++ Slint client + agent bridge) and a customer-facing web client
+(`citrate-comms-web`). Login is via the Citrate identity authority (OIDC / SIWE);
+the audit log is a BLAKE3 hash-chain optionally anchored to chain **40204**.
 
-## Read first
-The complete design lives in [`PLANSET/`](PLANSET/):
-- [`00_OVERVIEW.md`](PLANSET/00_OVERVIEW.md) — vision, the locked decisions, architecture at a glance, reuse map
-- [`01_SCOPE_OF_WORK.md`](PLANSET/01_SCOPE_OF_WORK.md) — phases, deliverables, in/out of scope, risk register (R1–R10)
-- [`02_ARCHITECTURE.md`](PLANSET/02_ARCHITECTURE.md) — crate layout, auth handshake, MLS mapping, RBAC, CRM/PM model, storage, audit
-- [`03_TLA_SPECS.md`](PLANSET/03_TLA_SPECS.md) — formal invariants (Commit-ordering, audit-chain contiguity)
-- [`04_FEATURES_BDD.md`](PLANSET/04_FEATURES_BDD.md) — Gherkin features for every v1 capability
-- [`05_SPRINTS_AND_WPS.md`](PLANSET/05_SPRINTS_AND_WPS.md) — sprint plan & work packages (COMMS-S0…)
-- [`06_AGENT_INTEGRATION_SPEC.md`](PLANSET/06_AGENT_INTEGRATION_SPEC.md) — agents-as-members, IPC bridge, key custody, compliance story
-- [`07_IMPLEMENTATION_AND_HARDENING_PLAN.md`](PLANSET/07_IMPLEMENTATION_AND_HARDENING_PLAN.md) — airgap build, reproducibility, threat model, Tier-1 audit feed
+See the concept docs at https://docs.citrate.ai/comms. Login upstream is
+[citrate-identity](https://github.com/CitrateNetwork/citrate-identity).
 
-## The core invariant
-> **The relay is trusted for *liveness and ordering*, never for message *content*.** It stores and
-> forwards ciphertext + routing metadata only. All plaintext, all group secrets, and all CRM/PM
-> records live exclusively on member clients. An agent reading a channel is cryptographically
-> identical to a human reading it — there is no shadow key and no plaintext escrow.
->
-> **Metadata it *does* see (accepted design, PLANSET R4):** a router unavoidably sees the **social
-> graph** — the group roster and the public ratchet tree (member wallet addresses), each message's
-> sender, its recipient set, ciphertext sizes, and arrival timing/order — and retains them in the
-> audit log. The relay cannot read message *content*; it is not blind to *who talks to whom, when*.
-> This is acceptable for on-prem single-tenant (the operator already trusts the host); on a shared
-> hosted relay (`comms.citrate.ai`) it is a disclosed limitation, not a blindness break. Padding,
-> cover traffic and size quantisation are deferred (PLANSET R4).
+## Prerequisites
 
-## Architecture at a glance
-```
-  citrate-identity (SIWE/OIDC)        AI agents (nist-agent / agent-runtime)
-   wallet_address = identity            join as MLS members, keys in keyring
-            │                                   │
-            ▼                                   ▼
-   ┌──────────────────────┐         ┌──────────────────────────┐
-   │  comms-client (Slint) │        │  comms-agent-bridge       │
-   │  MLS client + local   │        │  MLS client for an agent  │
-   │  encrypted store      │        │  Unix-socket JSON IPC     │
-   └──────────┬───────────┘         └───────────┬──────────────┘
-              │  opaque MLS ciphertext envelopes │
-              ▼                                  ▼
-   ┌──────────────────────────────────────────────────────────┐
-   │  comms-relay  (server-blind delivery service)             │
-   │  WS transport · per-group total order · KeyPackage dir    │
-   │  ciphertext store (RocksDB+AES-256-GCM) · BLAKE3 audit log│
-   │  reads ZERO plaintext · loopback admin + bearer token     │
-   └──────────────────────────────────────────────────────────┘
-```
-
-## Crypto grade (matches the chain)
-MLS (RFC 9420) via OpenMLS, ciphersuite `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`
-(X25519 KEM · AES-128-GCM · Ed25519 signatures — the strongest standard MLS suite over the chain's
-X25519/Ed25519 curves; the AES-256-GCM "chain grade" is delivered at the at-rest layer, see below).
-At-rest: RocksDB column families encrypted with **AES-256-GCM-SIV** (nonce-misuse-resistant, RFC 8452)
-under per-CF keys derived from a master key via a domain-separated BLAKE3 KDF.
-Audit: BLAKE3 hash-chained append-only log. It detects any *single-record* edit, but is
-**not yet** signed or externally anchored, so it is not tamper-evident against the log's own
-holder (the relay operator can replay a different history that re-verifies) — chain-40204
-anchoring is roadmap (COMMS-S5, PLANSET/02 §7), not shipped (CM2-B-A015).
-
-> **Roadmap (NOT yet implemented):** post-quantum protection — wrapping the at-rest master key with the
-> chain's `HybridKEM` (X25519 + ML-KEM-768) and, in transport, migrating to a hybrid MLS ciphersuite once
-> one ratifies (the envelope reserves a `ciphersuite_id` for epoch-by-epoch migration). The live suites
-> above are classical; no ML-KEM/Kyber is present in the build today. See `PLANSET/07`.
-
-## Workspace
-COMMS-S0 built the crypto + transport spine (✅ implemented & tested); the rest fills in per `PLANSET/05`.
-```
-crates/
-├─ comms-proto         # ✅ wire types (Envelope, GroupId, Commit/Welcome/AppMsg, RoleAssertion, AuditRecord)
-├─ comms-core          # ✅ mls (OpenMLS) · identity (SIWE+attestation) · audit (BLAKE3 chain); rbac/domain/store next
-├─ comms-relay         # ✅ server-blind DeliveryService (total order, KeyPackage dir, audit); WS+RocksDB in S1
-├─ comms-agent-bridge  # ⏳ Unix-socket IPC to nist-agent / citrate-agent-runtime; an agent's MLS client (S3)
-└─ comms-client        # ⏳ native Slint app (@citrate-ui-kit); houses the S0 e2e test; UI from design package (S2)
-```
-**Server-blind, enforced by the build graph:** `comms-relay` links `comms-core` with
-`default-features = false`, so the `mls` module (the only place group secrets live) is not compiled into
-the relay — referencing `comms_core::mls` from the relay fails to compile.
-
-## Build
 ```bash
+# Rust (pinned toolchain) + a C toolchain for RocksDB.
+rustup show                 # rust-toolchain.toml pins 1.96.0 (auto-installed by rustup)
+# System packages for the RocksDB / crypto build:
+#   Debian/Ubuntu:
+sudo apt-get install -y build-essential clang libclang-dev pkg-config
+#   macOS: clang ships with Xcode command-line tools
+# Web client (optional track): Node 20+ and pnpm/npm.
+```
+
+- OS: Linux or macOS. The relay defaults to a loopback / air-gap posture.
+- The relay uses the OS keyring for its at-rest master key by default (or set one
+  explicitly — see "Configuration").
+
+## Build from source
+
+```bash
+git clone https://github.com/CitrateNetwork/citrate-comms.git
+cd citrate-comms
 cargo build --workspace --release --locked
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Design
-The UI/UX is designed by the Claude design team from a single self-contained brief
-([`design/DESIGN_BRIEF.md`](design/DESIGN_BRIEF.md)) and handed back as an HTML/CSS/JSX prototype
-([`design/handoff/`](design/handoff/) — 10 screens + the **Witness → channel Ledger** signature feature),
-which engineering translates into Slint. COMMS-S2 has translated the **shell + the primary channel screen**
-(`crates/comms-client/ui/app.slint`); the remaining screens follow from the preserved handoff.
+Expected artifact: `target/release/comms-relay` (the self-hostable relay binary),
+plus the client/bridge crates. First build pulls RocksDB + OpenMLS and can take
+several minutes and ~1–2 GB RAM. **Server-blind is enforced by the build graph**:
+the relay links `comms-core` with `default-features=false`, so the `mls` module
+(the only place group secrets live) is never compiled into the relay — build the
+relay package-scoped (`-p comms-relay`), never let a `--workspace` build govern the
+deployed binary.
 
-## Agentile
-This repo follows the [Agentile methodology](../AGENTILE.md). Entry point: [`.agentile/AGENT_ENTRY.md`](.agentile/AGENT_ENTRY.md).
-Active sprint: `COMMS-S5` (native-client UI/UX hardening) — see `citrate-federation/repos/citrate-comms/sprints/`.
-The web-app track (agentic CRM, deployed) is planned under `webapp/PLANSET/`.
+## Run locally
 
----
-© 2026 Citrate Inc.. Licensed under Apache-2.0.
+The relay is the server component. It needs one required env var — the workspace
+owner wallet (the RBAC trust anchor):
+
+```bash
+export CITRATE_COMMS_OWNER=0x1111111111111111111111111111111111111111  # 0x + 40 hex
+cargo run -p comms-relay --release
+```
+
+Default listen: **`ws://127.0.0.1:8787`** (transport). Loopback admin surface:
+**`http://127.0.0.1:8788`**. RocksDB store: `./data`. Verify it's up via the
+unauthenticated, loopback-only admin health route:
+
+```bash
+curl -s http://127.0.0.1:8788/health     # → JSON snapshot
+curl -s http://127.0.0.1:8788/status     # → "running"
+```
+
+On start the relay prints the served domain, the owner RBAC anchor, the store path,
+and a redacted admin-token fingerprint (the real bearer token is written to
+`CITRATE_COMMS_ADMIN_TOKEN_FILE` if set, 0600 — never logged).
+
+**Web client (optional track):**
+
+```bash
+cd webapp
+cp .env.example .env.local
+pnpm install
+pnpm dev -p 3004            # citrate-comms-web on :3004 (APP_ORIGIN default)
+```
+
+## Connect it locally  ← the differentiator
+
+1. **Run the relay** on `ws://127.0.0.1:8787` with `CITRATE_COMMS_OWNER` set
+   (above). Clients dial this address; the relay is otherwise standalone (no chain
+   node required for the local loop — chain 40204 anchoring of the audit log is
+   optional/roadmap).
+2. **Point clients at the relay.** Native `comms-client` and the agent bridge dial
+   `ws://127.0.0.1:8787`; set `CITRATE_COMMS_DOMAIN` on the relay to match the
+   domain your clients bind in the SIWE handshake (default `relay.citrate.ai`).
+3. **Wire the web client to identity.** Run
+   [citrate-identity](https://github.com/CitrateNetwork/citrate-identity) on
+   `:3000`, then in `webapp/.env.local`:
+   ```bash
+   NEXT_PUBLIC_AUTH_MODE=oidc
+   NEXT_PUBLIC_OIDC_ISSUER=http://localhost:3000
+   NEXT_PUBLIC_OIDC_CLIENT_ID=citrate-comms-web
+   OIDC_ISSUER=http://localhost:3000
+   OIDC_JWKS_URL=http://localhost:3000/jwks
+   OIDC_AUDIENCE=citrate-comms-web
+   APP_ORIGIN=http://localhost:3004
+   ```
+   The authority must register `citrate-comms-web` with redirect
+   `http://localhost:3004/auth/callback`.
+4. **End-to-end check:** relay `GET /health` returns 200; a client can create a
+   workspace owned by `CITRATE_COMMS_OWNER` and exchange an MLS message that the
+   relay forwards without ever holding plaintext.
+
+For the full chain → identity → apps bring-up see https://docs.citrate.ai/local-stack.
+
+## Configuration
+
+Relay env (all read at startup, see `crates/comms-relay/src/main.rs`):
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `CITRATE_COMMS_OWNER` | **required** | Workspace owner wallet (`0x` + 40 hex); RBAC trust anchor. |
+| `CITRATE_COMMS_BIND` | `127.0.0.1:8787` | WebSocket listen address. |
+| `CITRATE_COMMS_ADMIN_BIND` | `127.0.0.1:8788` | Loopback-only admin surface. |
+| `CITRATE_COMMS_DATA` | `./data` | RocksDB store path (AES-256-GCM-SIV at rest). |
+| `CITRATE_COMMS_DOMAIN` | `relay.citrate.ai` | Logical relay domain bound in the SIWE handshake. |
+| `CITRATE_COMMS_MASTER_KEY` | OS keyring | Optional explicit at-rest key (64 hex); else keyring, created on first run. |
+| `CITRATE_COMMS_ADMIN_TOKEN_FILE` | unset | Path to export the admin bearer token (0600); it is never logged. |
+
+Web client env vars are annotated in `webapp/.env.example`
+(`NEXT_PUBLIC_OIDC_*`, `DATABASE_URL`, `RESEND_API_KEY`, `COMMS_ENC_KEY`, …).
+
+## Links
+
+- Docs: https://docs.citrate.ai/comms
+- Depends on: [citrate-identity](https://github.com/CitrateNetwork/citrate-identity) (login; optional chain 40204 audit anchoring)
+- Consumed by: Citrate teams self-hosting the workspace; the native client and web client
+- Contributing (DCO): CONTRIBUTING.md · Security: SECURITY.md · License: LICENSE
+
+## License
+
+Source-available (BUSL-1.1) — free for personal/non-commercial; commercial = membership.
