@@ -1,13 +1,14 @@
-//! Unix-domain-socket transport for the agent bridge (COMMS-S3, WP-3.3).
+//! Cross-platform local-IPC transport for the agent bridge (COMMS-S3, WP-3.3).
 //!
-//! The bridge listens on a Unix-domain socket that the agent runtime
-//! (`nist-agent` / `citrate-agent-runtime`) connects to. This is the local,
-//! loopback-equivalent control surface for the agent's MLS client — it mirrors the
-//! `citrate-node-agent` supervision posture and the `nist-agent-daemon` JSON-per-line
-//! framing:
+//! The bridge listens on a local socket that the agent runtime
+//! (`nist-agent` / `citrate-agent-runtime`) connects to — a Unix-domain socket on Unix, a named
+//! pipe on Windows, via [`interprocess`]. This is the local, loopback-equivalent control surface
+//! for the agent's MLS client — it mirrors the `citrate-node-agent` supervision posture and the
+//! `nist-agent-daemon` JSON-per-line framing:
 //!
-//! * **Local only.** A Unix socket has no network surface; the socket file is created
-//!   `0600` so only the owning uid can connect.
+//! * **Local only.** A local socket has no network surface; on Unix the socket file is created
+//!   `0600` so only the owning uid can connect, and the Windows named-pipe namespace is scoped to
+//!   the local session.
 //! * **Per-instance bearer.** On connect the runtime must present the bridge's bearer
 //!   token (constant-time compared) before any frame is accepted. A wrong/absent token
 //!   is rejected and the connection closed — **fail-closed**.
@@ -18,17 +19,48 @@
 //! the already-decrypted [`AgentInbound`] / to-be-encrypted [`AgentOutbound`] frames the
 //! [`AgentBridge`](crate::AgentBridge) produces and consumes.
 
-use std::os::unix::fs::PermissionsExt;
+use std::io;
 use std::path::{Path, PathBuf};
 
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream};
+use interprocess::local_socket::{ListenerOptions, Name};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
 
 use crate::{AgentInbound, AgentOutbound};
+
+/// Map a socket path to an [`interprocess`] endpoint name. Unix: the path is used verbatim as a
+/// filesystem name. Windows: a namespaced name derived from the path's basename, with every char
+/// outside `[A-Za-z0-9._-]` replaced by `-`. Both ends of the IPC MUST apply this identical rule so
+/// the runtime client and the bridge agree byte-for-byte.
+pub(crate) fn endpoint_name(p: &str) -> io::Result<Name<'static>> {
+    #[cfg(unix)]
+    {
+        p.to_string()
+            .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+    }
+    #[cfg(windows)]
+    {
+        let base = std::path::Path::new(p)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("citrate.sock");
+        let slug: String = base
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        slug.to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+    }
+}
 
 /// The connect handshake the runtime sends as its first line: `{"type":"auth","token":"…"}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,23 +80,41 @@ enum Ack {
 /// A listening agent-bridge socket. Bind once, then [`accept`](AgentSocket::accept) the
 /// runtime connection.
 pub struct AgentSocket {
-    listener: UnixListener,
+    listener: Listener,
     bearer: String,
     path: PathBuf,
 }
 
 impl AgentSocket {
-    /// Bind the socket at `path` with `0600` permissions, requiring `bearer` on connect.
-    /// A stale socket file at `path` is removed first.
+    /// Bind the socket at `path` (on Unix, with `0600` permissions), requiring `bearer` on connect.
+    /// On Unix a stale socket file at `path` is removed first.
     pub fn bind(path: impl AsRef<Path>, bearer: impl Into<String>) -> Result<Self, SocketError> {
         let path = path.as_ref().to_path_buf();
-        // Remove a stale socket so bind() doesn't fail with AddrInUse.
+        // Remove a stale socket file so bind() doesn't fail with AddrInUse (Unix filesystem name
+        // only; the Windows named-pipe namespace has no such file to remove).
+        #[cfg(unix)]
         if path.exists() {
             std::fs::remove_file(&path).map_err(SocketError::Io)?;
         }
-        let listener = UnixListener::bind(&path).map_err(SocketError::Io)?;
-        // Restrict to the owning uid — defense in depth atop the local-only socket.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(SocketError::Io)?;
+        let path_str = path.to_str().ok_or_else(|| {
+            SocketError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket path is not valid UTF-8",
+            ))
+        })?;
+        let name = endpoint_name(path_str).map_err(SocketError::Io)?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_tokio()
+            .map_err(SocketError::Io)?;
+        // Restrict to the owning uid — defense in depth atop the local-only socket (Unix only; the
+        // Windows named pipe has no filesystem mode to set).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(SocketError::Io)?;
+        }
         Ok(Self { listener, bearer: bearer.into(), path })
     }
 
@@ -77,8 +127,8 @@ impl AgentSocket {
     /// [`AgentConn`] only if the presented token matches (constant-time); otherwise the
     /// connection is closed and [`SocketError::Unauthorized`] is returned.
     pub async fn accept(&self) -> Result<AgentConn, SocketError> {
-        let (stream, _addr) = self.listener.accept().await.map_err(SocketError::Io)?;
-        let (read, write) = stream.into_split();
+        let stream = self.listener.accept().await.map_err(SocketError::Io)?;
+        let (read, write) = stream.split();
         let mut conn = AgentConn { reader: BufReader::new(read), writer: write };
 
         let hello: Handshake = conn.read_frame().await?.ok_or(SocketError::HandshakeClosed)?;
@@ -103,8 +153,8 @@ impl Drop for AgentSocket {
 /// A framed, authenticated connection to the agent runtime. The bridge side sends
 /// [`AgentInbound`] events and receives [`AgentOutbound`] commands.
 pub struct AgentConn {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<RecvHalf>,
+    writer: SendHalf,
 }
 
 impl AgentConn {
@@ -142,7 +192,7 @@ impl AgentConn {
 
 /// The send half of an [`AgentConn`] — pushes [`AgentInbound`] events to the runtime.
 pub struct AgentSink {
-    writer: OwnedWriteHalf,
+    writer: SendHalf,
 }
 
 impl AgentSink {
@@ -156,7 +206,7 @@ impl AgentSink {
 
 /// The receive half of an [`AgentConn`] — reads [`AgentOutbound`] commands from the runtime.
 pub struct AgentSource {
-    reader: BufReader<OwnedReadHalf>,
+    reader: BufReader<RecvHalf>,
 }
 
 impl AgentSource {
@@ -173,15 +223,22 @@ impl AgentSource {
 /// The runtime side of the transport — used by `nist-agent` / `citrate-agent-runtime` (and
 /// our integration tests) to connect to the bridge, authenticate, then exchange frames.
 pub struct RuntimeClient {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<RecvHalf>,
+    writer: SendHalf,
 }
 
 impl RuntimeClient {
     /// Connect to the bridge socket and complete the bearer handshake.
     pub async fn connect(path: impl AsRef<Path>, bearer: impl Into<String>) -> Result<Self, SocketError> {
-        let stream = UnixStream::connect(path.as_ref()).await.map_err(SocketError::Io)?;
-        let (read, write) = stream.into_split();
+        let path_str = path.as_ref().to_str().ok_or_else(|| {
+            SocketError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket path is not valid UTF-8",
+            ))
+        })?;
+        let name = endpoint_name(path_str).map_err(SocketError::Io)?;
+        let stream = Stream::connect(name).await.map_err(SocketError::Io)?;
+        let (read, write) = stream.split();
         let mut me = Self { reader: BufReader::new(read), writer: write };
         me.write_frame(&Handshake::Auth { token: bearer.into() }).await?;
         // Wait for the bridge's ready ack; a closed socket here means rejected.
@@ -245,7 +302,7 @@ pub enum SocketError {
 const MAX_FRAME_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Read one capped, newline-delimited line. `Ok(None)` on clean EOF.
-async fn read_capped_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<String>, SocketError> {
+async fn read_capped_line(reader: &mut BufReader<RecvHalf>) -> Result<Option<String>, SocketError> {
     let mut line = String::new();
     let n = reader.read_line(&mut line).await.map_err(SocketError::Io)?;
     if n == 0 {
@@ -275,9 +332,13 @@ mod tests {
         let bearer = "s3cr3t-bearer-token";
         let sock = AgentSocket::bind(&path, bearer).unwrap();
 
-        // The socket file is 0600.
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        // On Unix the socket file is 0600 (the Windows named pipe has no filesystem mode).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
 
         // Drive server-accept and client-connect concurrently.
         let server = {

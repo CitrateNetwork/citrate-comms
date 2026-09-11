@@ -62,6 +62,10 @@ rocksdb = "0.22"
 tokio = { version = "1", features = ["full"] }
 # rustls (webpki roots) so the client can dial wss:// anywhere without system OpenSSL.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Cross-platform local IPC (Unix-domain socket on Unix, named pipe on Windows). The daemon
+# server + agent bridge speak the same JSON-per-line framing over it; the crate opts into the
+# `tokio` feature only where it runs on the async runtime (comms-agent-bridge).
+interprocess = "2"
 axum = "0.7"
 # identity / keyring
 keyring = "3"
