@@ -1,5 +1,7 @@
 # citrate-comms
 
+*Part of the **[Citrate Network](https://citrate.ai)** — own the means of computation. · [Docs](https://docs.citrate.ai) · [Run a node](https://citrate.ai/download) · [Contribute → free membership](https://github.com/CitrateNetwork/.github/blob/main/CONTRIBUTING.md)*
+
 > A self-hostable, end-to-end-encrypted agentic team workspace (Comms + CRM + PM) for the Citrate Network, delivered by a server-blind relay that can never read your messages.
 
 ## What it is
