@@ -203,15 +203,96 @@ impl MlsMember {
     }
 
     /// Create a new MLS group (the creator becomes its first member).
+    ///
+    /// **External-join enabled (INVITE-S2).** The group is minted with the ratchet-tree
+    /// extension turned on (`use_ratchet_tree_extension(true)`). That makes the public
+    /// group state a token-holder needs to self-admit by *external commit* travel inside
+    /// the [`GroupHandle::export_group_info`] blob (and inside Welcomes) rather than out
+    /// of band, so the owner can mint an invite and go offline. It changes NOTHING about
+    /// the existing add/Welcome path: when the tree is carried in an extension OpenMLS
+    /// uses it and simply ignores the tree passed to [`Self::join`] (see
+    /// `into_staged_welcome_inner`), so both resolve to the identical ratchet tree.
+    ///
+    /// This applies to NEWLY-minted groups only. A group created before this change has
+    /// no external-join extension and opts in the next time it is (re)created — live
+    /// groups are NOT migrated here.
     pub fn create_group(&self) -> Result<GroupHandle, MlsError> {
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(CIPHERSUITE)
+            .use_ratchet_tree_extension(true)
+            .build();
         let group = MlsGroup::new(
             &self.provider,
             &self.signer,
-            &MlsGroupCreateConfig::default(),
+            &config,
             self.credential_with_key.clone(),
         )
         .map_err(|e| MlsError::Group(format!("create: {e:?}")))?;
         Ok(GroupHandle { group })
+    }
+
+    /// **INVITE-S2 (joiner).** Self-admit into a group by MLS **external commit**, using
+    /// only the public [`GroupInfo`](GroupHandle::export_group_info) the owner published
+    /// to the relay — no Welcome, no owner action at join time. Returns a live
+    /// [`GroupHandle`] (the joiner is now a full member at the post-commit epoch) plus
+    /// the TLS-serialized Commit the joiner must publish to the existing members, who
+    /// merge it with [`GroupHandle::process_commit`] to reach the shared epoch.
+    ///
+    /// `group_info` is the exact byte blob from [`GroupHandle::export_group_info`]: an
+    /// `MlsMessage` wrapping a `GroupInfo` that carries BOTH the ratchet-tree extension
+    /// (so the joiner can rebuild the public tree) and the `external_pub` extension (the
+    /// HPKE public key an external joiner needs). Because both are embedded, no separate
+    /// ratchet tree is required. The joiner's own KeyPackage material in this member's
+    /// keystore supplies its new leaf.
+    ///
+    /// Fails closed on any malformed / non-GroupInfo / wrong-ciphersuite blob.
+    pub fn external_commit_join(
+        &self,
+        group_info: &[u8],
+    ) -> Result<(GroupHandle, Vec<u8>), MlsError> {
+        let msg = MlsMessageIn::tls_deserialize_exact(group_info)
+            .map_err(|e| MlsError::Codec(format!("group_info deser: {e:?}")))?;
+        let verifiable_group_info = match msg.extract() {
+            MlsMessageBodyIn::GroupInfo(gi) => gi,
+            other => {
+                return Err(MlsError::Group(format!(
+                    "expected GroupInfo, got {other:?}"
+                )))
+            }
+        };
+        // Mirror the create-side config so the joiner's group keeps the ratchet-tree
+        // extension (symmetric with the owner) and the same wire-format policy.
+        let join_config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+        // The exact openmls 0.8.1 external-commit builder sequence (see the crate KAT
+        // `group/tests_and_kats/tests/external_commit_builder.rs`): build_group →
+        // load_psks → build → finalize. The ratchet tree comes from the GroupInfo
+        // extensions, so `with_ratchet_tree` is not needed.
+        let (group, bundle) = MlsGroup::external_commit_builder()
+            .with_config(join_config)
+            .build_group(
+                &self.provider,
+                verifiable_group_info,
+                self.credential_with_key.clone(),
+            )
+            .map_err(|e| MlsError::Group(format!("external commit build_group: {e:?}")))?
+            .load_psks(self.provider.storage())
+            .map_err(|e| MlsError::Group(format!("external commit load_psks: {e:?}")))?
+            .build(
+                self.provider.rand(),
+                self.provider.crypto(),
+                &self.signer,
+                |_| true,
+            )
+            .map_err(|e| MlsError::Group(format!("external commit build: {e:?}")))?
+            .finalize(&self.provider)
+            .map_err(|e| MlsError::Group(format!("external commit finalize: {e:?}")))?;
+        let commit = bundle
+            .into_commit()
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("external commit serialize: {e:?}")))?;
+        Ok((GroupHandle { group }, commit))
     }
 
     /// Join a group from a Welcome + ratchet tree (the onboarding path).
@@ -277,6 +358,40 @@ impl GroupHandle {
 
     pub fn epoch(&self) -> u64 {
         self.group.epoch().as_u64()
+    }
+
+    /// **INVITE-S2 (owner).** Export this group's public [`GroupInfo`] so a token-holder
+    /// can self-admit by external commit while the owner is offline (`external_commit_join`).
+    ///
+    /// The blob is an `MlsMessage`-wrapped `GroupInfo` exported with `with_ratchet_tree =
+    /// true`, so it carries the ratchet-tree extension AND the `external_pub` extension —
+    /// everything an external joiner needs, and nothing else. This is **public group
+    /// state only**: no epoch/exporter secret and no HPKE private key leave the member,
+    /// so it is safe to hand to the (untrusted, server-blind) relay to store and serve.
+    /// The signature is made by `owner`'s MLS signing key over the current epoch state.
+    pub fn export_group_info(&self, owner: &MlsMember) -> Result<Vec<u8>, MlsError> {
+        let msg = self
+            .group
+            .export_group_info(owner.provider.crypto(), &owner.signer, true)
+            .map_err(|e| MlsError::Group(format!("export_group_info: {e:?}")))?;
+        msg.tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("group_info serialize: {e:?}")))
+    }
+
+    /// The authenticated `(wallet-identity, mls_sig_pubkey)` of every current member,
+    /// taken from the MLS ratchet tree (never relay metadata). Used to reconcile a
+    /// client's roster after it processes an *incoming* Commit — an external joiner's
+    /// self-admit adds a leaf this member did not itself commit, so the wallet→leaf
+    /// signature mapping (needed for a later Remove) must be read back from MLS.
+    pub fn authenticated_members(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.group
+            .members()
+            .filter_map(|m| {
+                basic_credential_identity(&m.credential)
+                    .ok()
+                    .map(|id| (id, m.signature_key.as_slice().to_vec()))
+            })
+            .collect()
     }
 
     /// Add a member by their published KeyPackage. Returns the Commit + Welcome +
@@ -833,5 +948,68 @@ mod tests {
         let back = alice_group.receive(&alice, &ct2).unwrap();
         assert_eq!(back.plaintext, b"hi alice");
         assert_eq!(back.sender_identity, b"bob-identity");
+    }
+
+    // ── INVITE-S2: external-commit self-admit (no owner action at join) ──
+
+    #[test]
+    fn external_commit_self_admit_then_exchange_a_message() {
+        // Alice creates an external-join-enabled group and exports its public GroupInfo —
+        // exactly what the owner mints into an invite, then goes OFFLINE.
+        let alice = MlsMember::new(b"alice-identity").unwrap();
+        let mut alice_group = alice.create_group().unwrap();
+        assert_eq!(alice_group.epoch(), 0);
+        let group_info = alice_group.export_group_info(&alice).expect("export group info");
+
+        // Bob (a fresh identity that the owner never added) self-admits by external commit,
+        // using ONLY the public GroupInfo. No Welcome, no owner participation.
+        let bob = MlsMember::new(b"bob-identity").unwrap();
+        let (mut bob_group, commit) = bob
+            .external_commit_join(&group_info)
+            .expect("bob self-admits by external commit");
+        assert_eq!(bob_group.group_id(), alice_group.group_id());
+        assert_eq!(bob_group.epoch(), 1, "external commit advanced the epoch to 1");
+
+        // The existing member (Alice) merges Bob's published external commit — the only
+        // step that touches the owner, and it is passive message processing, not an admit.
+        alice_group
+            .process_commit(&alice, &commit)
+            .expect("alice merges the external commit");
+        assert_eq!(alice_group.epoch(), 1, "alice advanced to the shared epoch");
+
+        // Same group, same epoch → they exchange an ENCRYPTED message both ways.
+        let ct = alice_group.send(&alice, b"welcome, self-admitted bob").unwrap();
+        let got = bob_group.receive(&bob, &ct).unwrap();
+        assert_eq!(got.plaintext, b"welcome, self-admitted bob");
+        assert_eq!(
+            got.sender_identity, b"alice-identity",
+            "sender attributed from the authenticated MLS credential"
+        );
+
+        let ct2 = bob_group.send(&bob, b"thanks - glad to be in").unwrap();
+        let back = alice_group.receive(&alice, &ct2).unwrap();
+        assert_eq!(back.plaintext, b"thanks - glad to be in");
+        assert_eq!(back.sender_identity, b"bob-identity");
+
+        // The reconciled roster (read from MLS, not relay metadata) names both wallets.
+        let ids: Vec<Vec<u8>> = alice_group
+            .authenticated_members()
+            .into_iter()
+            .map(|(id, _sig)| id)
+            .collect();
+        assert!(ids.iter().any(|id| id == b"alice-identity"));
+        assert!(ids.iter().any(|id| id == b"bob-identity"));
+    }
+
+    #[test]
+    fn external_commit_join_rejects_a_non_group_info_blob() {
+        let bob = MlsMember::new(b"bob-identity").unwrap();
+        // A KeyPackage is a valid MlsMessage but NOT a GroupInfo — must fail closed.
+        let not_group_info = bob.fresh_key_package().unwrap();
+        match bob.external_commit_join(&not_group_info) {
+            Err(MlsError::Group(_)) | Err(MlsError::Codec(_)) => {}
+            Ok(_) => panic!("a non-GroupInfo blob must not yield an external-commit join"),
+            Err(other) => panic!("expected Group/Codec error, got {other:?}"),
+        }
     }
 }

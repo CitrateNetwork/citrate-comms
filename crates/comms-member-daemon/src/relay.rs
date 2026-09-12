@@ -50,6 +50,29 @@ pub trait Relay: Send {
         now: u64,
     ) -> Result<(), String>;
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope>;
+    /// INVITE-S2 (owner) — publish a single-use, group-bound invite: the relay stores
+    /// `token_hash -> group_info` (public group state) so a token-holder can self-admit by
+    /// external commit while the owner is offline.
+    fn publish_invite(
+        &mut self,
+        inviter: WalletAddress,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), String>;
+    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone).
+    fn revoke_invite(&mut self, caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String>;
+    /// INVITE-S2 (joiner) — redeem an invite by its raw token. Returns
+    /// `(group_info, mint_epoch)` on success; a fail-closed reason string otherwise.
+    fn redeem_invite(
+        &mut self,
+        joiner: WalletAddress,
+        gid: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+        now: u64,
+    ) -> Result<(Vec<u8>, u64), String>;
     /// Flag-A — whether this relay's link is currently usable. The in-process relay is always
     /// local-up; a networked [`WsRelay`] reports its LIVE connection state so the daemon (and the app
     /// above it) can surface a relay DROP instead of a false "healthy" while every relayed op fails.
@@ -155,6 +178,35 @@ impl Relay for InProcessRelay {
     }
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
         self.0.fetch(wallet)
+    }
+    fn publish_invite(
+        &mut self,
+        inviter: WalletAddress,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), String> {
+        self.0
+            .publish_invite(inviter, gid, token_hash, group_info, expires_at)
+            .map_err(|e| e.to_string())
+    }
+    fn revoke_invite(&mut self, caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String> {
+        self.0
+            .revoke_invite(caller, token_hash)
+            .map_err(|e| e.to_string())
+    }
+    fn redeem_invite(
+        &mut self,
+        joiner: WalletAddress,
+        gid: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+        now: u64,
+    ) -> Result<(Vec<u8>, u64), String> {
+        self.0
+            .redeem_invite(joiner, gid, &token, &key_package, now)
+            .map_err(|e| e.to_string())
     }
     fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
         Ok(self.0.ratchet_tree(&gid).map(|s| s.to_vec()))
@@ -329,6 +381,46 @@ impl Relay for WsRelay {
                     .onboard(gid, joiner, None, welcome, ratchet_tree),
             )
             .map_err(|e| e.to_string())
+    }
+    fn publish_invite(
+        &mut self,
+        _inviter: WalletAddress,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), String> {
+        // The relay binds the inviter to the authenticated WS session, so `_inviter` is
+        // not sent — the session principal is authoritative (FWA-C11-01 pattern).
+        self.rt
+            .block_on(
+                self.client
+                    .publish_invite(gid, token_hash, group_info, expires_at),
+            )
+            .map_err(|e| e.to_string())
+    }
+    fn revoke_invite(&mut self, _caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String> {
+        self.rt
+            .block_on(self.client.revoke_invite(token_hash))
+            .map_err(|e| e.to_string())
+    }
+    fn redeem_invite(
+        &mut self,
+        _joiner: WalletAddress,
+        gid: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+        _now: u64,
+    ) -> Result<(Vec<u8>, u64), String> {
+        use comms_wire::frames::RedeemInviteResult;
+        match self
+            .rt
+            .block_on(self.client.redeem_invite(gid, token, key_package))
+            .map_err(|e| e.to_string())?
+        {
+            RedeemInviteResult::Ok { group_info, epoch } => Ok((group_info, epoch)),
+            RedeemInviteResult::Err(reason) => Err(reason.as_str().to_string()),
+        }
     }
     fn fetch(&mut self, _wallet: &WalletAddress) -> Vec<Envelope> {
         // Drain what the relay has PUSHED to this session (the WS client only receives its own

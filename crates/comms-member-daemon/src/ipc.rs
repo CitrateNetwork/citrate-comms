@@ -45,6 +45,24 @@ pub enum Request {
     PollClaims {
         token_hash: String,
     },
+    /// INVITE-S2 — owner mints a single-use, group-bound invite. `tokenHash` is 32-byte hex
+    /// (`BLAKE3(token)`; the raw token stays with the owner/link and never reaches the relay).
+    /// `expiresAt` is Unix ms.
+    PublishInvite {
+        group: String,
+        token_hash: String,
+        expires_at: u64,
+    },
+    /// INVITE-S2 — owner revokes an invite by its token hash (32-byte hex).
+    RevokeInvite {
+        token_hash: String,
+    },
+    /// INVITE-S2 — invitee self-admits by external commit using the RAW invite `token` (hex).
+    RedeemInvite {
+        group: String,
+        token: String,
+        name: String,
+    },
     /// Apply an owner/admin-signed role grant. The signature was produced by citrate-core's
     /// SignatureCeremony; the daemon VERIFIES it (never signs — Rule 3).
     AssignRole {
@@ -149,6 +167,14 @@ fn parse_gid(hex_str: &str) -> Result<GroupId, String> {
         .try_into()
         .map_err(|_| format!("group id must be 32 bytes: {hex_str}"))?;
     Ok(GroupId(arr))
+}
+
+/// Parse a 32-byte token hash from hex (INVITE-S2 / CONNECT-S1 inbox key).
+fn parse_token_hash(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str).map_err(|_| format!("bad token hash hex: {hex_str}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("token hash must be 32 bytes: {hex_str}"))
 }
 
 fn parse_addr(hex_str: &str) -> Result<WalletAddress, String> {
@@ -299,6 +325,62 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 Ok(cts) => Response::Claims {
                     ciphertexts: cts.into_iter().map(hex::encode).collect(),
                 },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::PublishInvite {
+            group,
+            token_hash,
+            expires_at,
+        } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let th = match parse_token_hash(&token_hash) {
+                Ok(t) => t,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.publish_invite(gid, th, expires_at) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::RevokeInvite { token_hash } => {
+            let th = match parse_token_hash(&token_hash) {
+                Ok(t) => t,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.revoke_invite(th) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::RedeemInvite {
+            group,
+            token,
+            name,
+        } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let tok = match hex::decode(&token) {
+                Ok(t) => t,
+                Err(_) => {
+                    return Response::Error {
+                        message: "token must be hex".into(),
+                    }
+                }
+            };
+            match daemon.redeem_invite(gid, tok, name) {
+                Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },

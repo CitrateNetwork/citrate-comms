@@ -293,6 +293,55 @@ impl RelayClient {
         }
     }
 
+    /// INVITE-S2 (owner) — publish a single-use, group-bound invite. `group_info` is the
+    /// owner's exported public `GroupInfo`; the relay stores it against `token_hash`.
+    pub async fn publish_invite(
+        &self,
+        group_id: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::PublishInvite {
+            group_id,
+            token_hash,
+            group_info,
+            expires_at,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone).
+    pub async fn revoke_invite(&self, token_hash: [u8; 32]) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::RevokeInvite { token_hash })
+            .await
+            .map(|_| ())
+    }
+
+    /// INVITE-S2 (joiner) — redeem an invite by its raw token. Returns the relay's typed
+    /// [`RedeemInviteResult`] (success carries the public `GroupInfo` + mint epoch; failure
+    /// a fail-closed reason). A transport/protocol failure is a [`WsError`].
+    pub async fn redeem_invite(
+        &self,
+        group_id: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+    ) -> Result<crate::frames::RedeemInviteResult, WsError> {
+        match self
+            .request(ClientFrame::RedeemInvite {
+                group_id,
+                token,
+                key_package,
+            })
+            .await?
+        {
+            ServerFrame::RedeemInvite(result) => Ok(result),
+            ServerFrame::Error { message } => Err(WsError::Server(message)),
+            _ => Err(WsError::Protocol("expected RedeemInvite")),
+        }
+    }
+
     async fn expect_ack(&self, frame: ClientFrame) -> Result<Option<u64>, WsError> {
         match self.request(frame).await? {
             ServerFrame::Ack { seq } => Ok(seq),

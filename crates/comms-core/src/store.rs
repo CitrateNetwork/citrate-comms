@@ -30,8 +30,18 @@ pub const CF_KEYPACKAGES: &str = "keypackages"; // wallet(20) ‖ idx(8 BE) -> K
 pub const CF_AUDIT: &str = "audit"; // seq(8 BE) -> AuditRecord
 pub const CF_MEMBERSHIP: &str = "membership"; // group_id(32) -> GroupSnapshot
 pub const CF_META: &str = "meta"; // small key/value (owner, domain, …)
+pub const CF_INVITES: &str = "invites"; // token_hash(32) -> InviteRecord (INVITE-S2)
+pub const CF_REFERRALS: &str = "referrals"; // seq(8 BE) -> ReferralRecord (append-only, INVITE-S2)
 
-const CFS: [&str; 5] = [CF_ENVELOPES, CF_KEYPACKAGES, CF_AUDIT, CF_MEMBERSHIP, CF_META];
+const CFS: [&str; 7] = [
+    CF_ENVELOPES,
+    CF_KEYPACKAGES,
+    CF_AUDIT,
+    CF_MEMBERSHIP,
+    CF_META,
+    CF_INVITES,
+    CF_REFERRALS,
+];
 
 /// Decrypted `(key, value)` pairs returned by [`EncryptedStore::scan`].
 pub type KvPairs = Vec<(Vec<u8>, Vec<u8>)>;

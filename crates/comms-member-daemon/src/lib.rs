@@ -419,6 +419,114 @@ impl MemberDaemon {
         Ok(())
     }
 
+    /// **INVITE-S2 (owner mints).** Export this group's PUBLIC `GroupInfo` and publish a
+    /// single-use, group-bound, owner-TTL'd invite to the relay under `token_hash`
+    /// (`= BLAKE3(token)`, computed by the caller — the token itself never touches the
+    /// relay). After this the owner can go OFFLINE: a token-holder self-admits by external
+    /// commit with no further owner action.
+    pub fn publish_invite(
+        &mut self,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        expires_at: u64,
+    ) -> Result<(), DaemonError> {
+        let inviter = self.wallet.address();
+        let gi = self
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        let group_info = self.groups[gi]
+            .handle
+            .export_group_info(&self.mls)
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        self.relay
+            .publish_invite(inviter, gid, token_hash, group_info, expires_at)
+            .map_err(DaemonError::Relay)?;
+        Ok(())
+    }
+
+    /// **INVITE-S2 (owner revokes).** Tombstone a previously-minted invite so every later
+    /// redeem of it fails closed.
+    pub fn revoke_invite(&mut self, token_hash: [u8; 32]) -> Result<(), DaemonError> {
+        let caller = self.wallet.address();
+        self.relay
+            .revoke_invite(caller, token_hash)
+            .map_err(DaemonError::Relay)
+    }
+
+    /// **INVITE-S2 (invitee self-admits).** Redeem an invite by its raw `token`: the relay
+    /// validates + consumes it and returns the owner's PUBLIC `GroupInfo`; this member then
+    /// self-admits by MLS external commit, publishes the resulting commit to the existing
+    /// members, and records the joined group locally (durable via the Phase-1 persistence
+    /// path, so the new group survives a restart). No owner action is required at join time.
+    pub fn redeem_invite(
+        &mut self,
+        gid: GroupId,
+        token: Vec<u8>,
+        name: impl Into<String>,
+    ) -> Result<(), DaemonError> {
+        let joiner = self.wallet.address();
+        let now = self.tick();
+        // A fresh KeyPackage accompanies the redeem (mutates the keystore → persist below).
+        let key_package = self
+            .mls
+            .fresh_key_package()
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let (group_info, _mint_epoch) = self
+            .relay
+            .redeem_invite(joiner, gid, token, key_package, now)
+            .map_err(DaemonError::Relay)?;
+        // Self-admit by external commit — no owner participation.
+        let (handle, commit) = self
+            .mls
+            .external_commit_join(&group_info)
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let commit_epoch = handle.epoch();
+        // The relay added us to the routing roster at redeem; learn the existing members so
+        // the external commit fans out to them.
+        let members = self
+            .relay
+            .group_members(gid)
+            .map_err(DaemonError::Relay)?
+            .unwrap_or_default();
+        let recipients: Vec<WalletAddress> =
+            members.into_iter().filter(|a| *a != joiner).collect();
+        submit_commit(
+            self.relay.as_mut(),
+            gid,
+            joiner,
+            commit_epoch,
+            commit,
+            recipients.clone(),
+            now,
+        )?;
+        // Record local group state: existing members (addresses only — a joiner does not
+        // learn others' MLS signature keys) + self.
+        let mut member_infos: Vec<MemberInfo> = recipients
+            .iter()
+            .map(|w| MemberInfo {
+                wallet: *w,
+                sig_pubkey: Vec::new(),
+                role: Role::Member,
+            })
+            .collect();
+        member_infos.push(MemberInfo {
+            wallet: joiner,
+            sig_pubkey: self.mls.sig_pubkey(),
+            role: Role::Member,
+        });
+        self.groups.push(GroupState {
+            id: gid,
+            name: name.into(),
+            handle,
+            epoch: commit_epoch,
+            members: member_infos,
+        });
+        self.persist_state()?;
+        Ok(())
+    }
+
     /// Add `member` to `gid`. Requires the member to have published a key package to the relay
     /// (they do so on their own startup). Produces the real MLS commit + welcome, submits the
     /// commit to existing members, and onboards the joiner. Returns the welcome material.
@@ -533,9 +641,14 @@ impl MemberDaemon {
         Ok(())
     }
 
-    /// Drain the owner's mailbox and decrypt the Application messages for `gid`.
+    /// Drain the owner's mailbox and decrypt the Application messages for `gid`. Incoming
+    /// **Commit** envelopes (a membership change committed by another member — notably a
+    /// self-admitted joiner's INVITE-S2 external commit) are merged here too, advancing this
+    /// member to the shared epoch and reconciling the roster from the authenticated MLS tree
+    /// (not relay metadata). Envelopes are processed in delivery order, so a Commit that
+    /// precedes application traffic at the new epoch is applied first.
     pub fn poll_messages(&mut self, gid: GroupId) -> Result<Vec<Msg>, DaemonError> {
-        let owner = self.wallet.address();
+        let me = self.wallet.address();
         let mls = &self.mls;
         let g = self
             .groups
@@ -543,30 +656,48 @@ impl MemberDaemon {
             .find(|g| g.id == gid)
             .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
         let mut out = Vec::new();
-        for e in self.relay.fetch(&owner) {
-            if e.kind != EnvelopeKind::Application || e.group_id != gid {
+        let mut changed = false;
+        for e in self.relay.fetch(&me) {
+            if e.group_id != gid {
                 continue;
             }
-            let received = g
-                .handle
-                .receive(mls, &e.ciphertext)
-                .map_err(|err| DaemonError::Mls(err.to_string()))?;
-            let body = String::from_utf8(received.plaintext).map_err(|_| DaemonError::BadUtf8)?;
-            // Attribute from the authenticated MLS credential, not the
-            // relay-controlled `e.sender` routing field (CM2-B-A002).
-            let sender =
-                WalletAddress::from_identity(&received.sender_identity).ok_or_else(|| {
-                    DaemonError::Mls("authenticated sender identity is not a wallet".into())
-                })?;
-            out.push(Msg {
-                group: gid,
-                sender,
-                body,
-            });
+            match e.kind {
+                EnvelopeKind::Commit => {
+                    // Merge an incoming membership commit (e.g. a self-admitted joiner).
+                    g.handle
+                        .process_commit(mls, &e.ciphertext)
+                        .map_err(|err| DaemonError::Mls(err.to_string()))?;
+                    g.epoch = g.handle.epoch();
+                    reconcile_roster(g);
+                    changed = true;
+                }
+                EnvelopeKind::Application => {
+                    let received = g
+                        .handle
+                        .receive(mls, &e.ciphertext)
+                        .map_err(|err| DaemonError::Mls(err.to_string()))?;
+                    let body =
+                        String::from_utf8(received.plaintext).map_err(|_| DaemonError::BadUtf8)?;
+                    // Attribute from the authenticated MLS credential, not the
+                    // relay-controlled `e.sender` routing field (CM2-B-A002).
+                    let sender = WalletAddress::from_identity(&received.sender_identity)
+                        .ok_or_else(|| {
+                            DaemonError::Mls("authenticated sender identity is not a wallet".into())
+                        })?;
+                    out.push(Msg {
+                        group: gid,
+                        sender,
+                        body,
+                    });
+                    changed = true;
+                }
+                // Welcome/Proposal are not consumed here.
+                _ => continue,
+            }
         }
-        // Decrypting advanced the inbound ratchet; persist so the restored state
-        // reflects the messages already consumed. Skip the write if nothing changed.
-        if !out.is_empty() {
+        // Processing advanced the inbound ratchet / epoch; persist so the restored state
+        // reflects what was already consumed. Skip the write if nothing changed.
+        if changed {
             self.persist_state()?;
         }
         Ok(out)
@@ -803,6 +934,31 @@ pub fn publish_kp(
         .publish_key_package(pubn, now)
         .map(|_| ())
         .map_err(|e| DaemonError::Relay(e.to_string()))
+}
+
+/// Reconcile a group's tracked roster against the authenticated MLS membership after an
+/// incoming Commit (INVITE-S2 external commit, or any other member-driven change): add any
+/// newly-present wallet, and backfill an MLS signature key we did not previously hold (so a
+/// later Remove can still map the wallet to its leaf). Attribution is from the MLS tree —
+/// never relay metadata (CM2-B-A002). Removals are handled on the offboard path, not here.
+fn reconcile_roster(g: &mut GroupState) {
+    for (identity, sig) in g.handle.authenticated_members() {
+        let Some(wallet) = WalletAddress::from_identity(&identity) else {
+            continue;
+        };
+        match g.members.iter_mut().find(|m| m.wallet == wallet) {
+            Some(existing) => {
+                if existing.sig_pubkey.is_empty() && !sig.is_empty() {
+                    existing.sig_pubkey = sig;
+                }
+            }
+            None => g.members.push(MemberInfo {
+                wallet,
+                sig_pubkey: sig,
+                role: Role::Member,
+            }),
+        }
+    }
 }
 
 fn submit_commit(
