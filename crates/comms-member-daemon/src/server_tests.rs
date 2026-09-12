@@ -4,10 +4,20 @@
 use crate::ipc::Response;
 use crate::MemberDaemon;
 use comms_core::identity::EthWallet;
+use interprocess::local_socket::prelude::*;
+use interprocess::local_socket::Stream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// Connect the client end using the same [`super::endpoint_name`] rule the server binds with, then
+/// wrap it in a [`BufReader`] whose `get_mut()` is the write side (the transport is half-duplex).
+fn connect_client(path: &PathBuf) -> BufReader<Stream> {
+    let path_str = path.to_str().expect("socket path is valid UTF-8");
+    let name = super::endpoint_name(path_str).expect("endpoint name");
+    let stream = Stream::connect(name).expect("connect");
+    BufReader::new(stream)
+}
 
 fn tmp_socket(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -39,19 +49,17 @@ fn spawn_server(tag: &str) -> (PathBuf, String) {
 #[test]
 fn authenticated_client_creates_and_lists_a_group() {
     let (path, bearer) = spawn_server("create");
-    let stream = UnixStream::connect(&path).expect("connect");
-    let mut writer = stream.try_clone().unwrap();
-    let mut reader = BufReader::new(stream);
+    let mut reader = connect_client(&path);
 
     // auth handshake
-    writeln!(writer, "{{\"type\":\"auth\",\"token\":\"{bearer}\"}}").unwrap();
+    writeln!(reader.get_mut(), "{{\"type\":\"auth\",\"token\":\"{bearer}\"}}").unwrap();
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     assert!(line.contains("ready"), "auth: {line}");
 
     // createGroup
     line.clear();
-    writeln!(writer, "{{\"op\":\"createGroup\",\"name\":\"deals\"}}").unwrap();
+    writeln!(reader.get_mut(), "{{\"op\":\"createGroup\",\"name\":\"deals\"}}").unwrap();
     reader.read_line(&mut line).unwrap();
     let gid = match serde_json::from_str::<Response>(line.trim()).unwrap() {
         Response::GroupCreated { id } => id,
@@ -61,7 +69,7 @@ fn authenticated_client_creates_and_lists_a_group() {
 
     // listGroups
     line.clear();
-    writeln!(writer, "{{\"op\":\"listGroups\"}}").unwrap();
+    writeln!(reader.get_mut(), "{{\"op\":\"listGroups\"}}").unwrap();
     reader.read_line(&mut line).unwrap();
     match serde_json::from_str::<Response>(line.trim()).unwrap() {
         Response::Groups { groups } => {
@@ -74,7 +82,7 @@ fn authenticated_client_creates_and_lists_a_group() {
 
     // roster the new group over the socket → just the owner, as "owner".
     line.clear();
-    writeln!(writer, "{{\"op\":\"roster\",\"group\":\"{gid}\"}}").unwrap();
+    writeln!(reader.get_mut(), "{{\"op\":\"roster\",\"group\":\"{gid}\"}}").unwrap();
     reader.read_line(&mut line).unwrap();
     match serde_json::from_str::<Response>(line.trim()).unwrap() {
         Response::Roster { members } => {
@@ -86,7 +94,7 @@ fn authenticated_client_creates_and_lists_a_group() {
 
     // a malformed group id is an honest Error, never a panic.
     line.clear();
-    writeln!(writer, "{{\"op\":\"send\",\"group\":\"nothex\",\"text\":\"hi\"}}").unwrap();
+    writeln!(reader.get_mut(), "{{\"op\":\"send\",\"group\":\"nothex\",\"text\":\"hi\"}}").unwrap();
     reader.read_line(&mut line).unwrap();
     assert!(matches!(
         serde_json::from_str::<Response>(line.trim()).unwrap(),
@@ -97,10 +105,8 @@ fn authenticated_client_creates_and_lists_a_group() {
 #[test]
 fn a_wrong_bearer_is_rejected_before_any_request() {
     let (path, _bearer) = spawn_server("badauth");
-    let stream = UnixStream::connect(&path).expect("connect");
-    let mut writer = stream.try_clone().unwrap();
-    let mut reader = BufReader::new(stream);
-    writeln!(writer, "{{\"type\":\"auth\",\"token\":\"{}\"}}", "z".repeat(64)).unwrap();
+    let mut reader = connect_client(&path);
+    writeln!(reader.get_mut(), "{{\"type\":\"auth\",\"token\":\"{}\"}}", "z".repeat(64)).unwrap();
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     assert!(line.contains("unauthorized"), "got {line}");

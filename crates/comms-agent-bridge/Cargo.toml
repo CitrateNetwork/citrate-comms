@@ -22,6 +22,9 @@ tokio = { workspace = true }
 getrandom = { workspace = true }
 # Constant-time bearer-token comparison.
 subtle = { workspace = true }
+# Cross-platform local IPC transport: Unix-domain socket on Unix, named pipe on Windows. The
+# bridge runs on the tokio runtime, so it opts into the async (`tokio`) integration.
+interprocess = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 blake3 = { workspace = true }
