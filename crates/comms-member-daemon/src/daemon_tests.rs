@@ -170,6 +170,103 @@ fn add_member_without_a_published_key_package_is_an_honest_error() {
     assert!(matches!(r, Err(DaemonError::NoKeyPackage(_))), "got {r:?}");
 }
 
+// ── Issue #3: durable MLS + group persistence across a full daemon restart ──
+
+#[test]
+fn groups_survive_a_full_restart_and_stay_usable() {
+    let domain = "relay.test";
+    let tmp = tempfile::tempdir().expect("tmp dir");
+    let state_dir = tmp.path().join("state");
+
+    // A STABLE identity: the seed is the anchor across restarts.
+    let wallet = EthWallet::generate();
+    let seed = wallet.secret_bytes();
+    let owner_addr = wallet.address();
+
+    // ── Boot 1: create a group and add bob (real MLS commit → epoch 1), then drop. ──
+    let (gid, epoch_before);
+    {
+        let mut owner =
+            MemberDaemon::new_persistent(wallet, domain, 1000, state_dir.clone(), &seed)
+                .expect("owner boot 1");
+        gid = owner.create_group("deals").expect("create");
+        let bob = EthWallet::generate();
+        onboard_member(&mut owner, domain, gid, &bob);
+        epoch_before = owner.mls_epoch(gid).expect("epoch");
+        assert_eq!(epoch_before, 1, "one add ⇒ MLS epoch 1");
+        assert_eq!(owner.list_groups().len(), 1);
+        assert_eq!(role_in(&owner.roster(gid).unwrap(), bob.address()), Some(Role::Member));
+    } // daemon (and its ephemeral in-process relay) dropped — a full shutdown.
+
+    // The encrypted state file was written.
+    assert!(
+        state_dir.join(crate::persist::STATE_FILE_NAME).exists(),
+        "state file must be written"
+    );
+
+    // ── Boot 2: a FRESH daemon (new process, new in-process relay), same seed + dir. ──
+    let wallet2 = EthWallet::from_secret_key(&seed).expect("re-derive wallet");
+    assert_eq!(wallet2.address(), owner_addr);
+    // A SUCCESSFUL boot is itself a signer-liveness proof: `build` re-publishes a fresh
+    // KeyPackage, which the RESTORED signer must sign and the restored provider must build.
+    let owner2 = MemberDaemon::new_persistent(wallet2, domain, 9000, state_dir.clone(), &seed)
+        .expect("owner boot 2 (restart)");
+
+    // (1) The group came back WITHOUT any re-create — the primary bug in #3.
+    let groups = owner2.list_groups();
+    assert_eq!(groups.len(), 1, "groups must survive the restart, got {groups:?}");
+    assert_eq!(groups[0].0, gid);
+    assert_eq!(groups[0].1, "deals");
+
+    // (2) The daemon roster (bob included, roles preserved) survived.
+    let roster = owner2.roster(gid).expect("roster");
+    assert_eq!(role_in(&roster, owner_addr), Some(Role::Owner));
+    assert_eq!(roster.len(), 2, "owner + bob must be restored, got {roster:?}");
+
+    // (3) The reloaded OpenMLS group is real and at the SAME epoch — proof the epoch
+    //     secrets deserialized, not just the registry counter (`MlsGroup::load` worked).
+    assert_eq!(
+        owner2.mls_epoch(gid).expect("epoch after restart"),
+        epoch_before,
+        "the restored MLS group must be at the pre-restart epoch"
+    );
+
+    // (4) It persists again across a SECOND restart (idempotent rehydrate → re-persist).
+    drop(owner2);
+    let wallet3 = EthWallet::from_secret_key(&seed).expect("re-derive");
+    let owner3 = MemberDaemon::new_persistent(wallet3, domain, 20000, state_dir.clone(), &seed)
+        .expect("owner boot 3");
+    assert_eq!(owner3.roster(gid).expect("roster").len(), 2);
+    assert_eq!(owner3.mls_epoch(gid).expect("epoch"), epoch_before);
+}
+
+#[test]
+fn restart_with_the_wrong_seed_fails_closed() {
+    let domain = "relay.test";
+    let tmp = tempfile::tempdir().expect("tmp dir");
+    let state_dir = tmp.path().join("state");
+
+    let wallet = EthWallet::generate();
+    let seed = wallet.secret_bytes();
+    {
+        let mut owner =
+            MemberDaemon::new_persistent(wallet, domain, 1000, state_dir.clone(), &seed)
+                .expect("owner boot 1");
+        owner.create_group("deals").expect("create");
+    }
+
+    // A DIFFERENT identity pointed at the same state dir must NOT silently start empty:
+    // the AEAD key is derived from the seed, so decryption fails and the daemon errors.
+    let attacker = EthWallet::generate();
+    let bad_seed = attacker.secret_bytes();
+    let r = MemberDaemon::new_persistent(attacker, domain, 5000, state_dir.clone(), &bad_seed);
+    assert!(
+        matches!(r, Err(DaemonError::Persist(_))),
+        "a wrong-seed restart must fail closed, got {:?}",
+        r.as_ref().map(|_| "Ok")
+    );
+}
+
 #[test]
 fn relay_status_op_reports_connected_for_the_in_process_relay() {
     // Flag-A — the health query maps straight to Relay::is_connected. The in-process relay is always

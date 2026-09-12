@@ -1148,15 +1148,19 @@ dependencies = [
 name = "comms-member-daemon"
 version = "0.0.1"
 dependencies = [
+ "aes-gcm-siv",
  "blake3",
+ "ciborium",
  "comms-core",
  "comms-proto",
  "comms-relay",
  "comms-wire",
+ "getrandom 0.2.17",
  "hex",
  "serde",
  "serde_json",
  "subtle",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "zeroize",

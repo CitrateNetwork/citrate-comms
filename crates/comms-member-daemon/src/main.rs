@@ -47,17 +47,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Every copy of the secret key material is held in `Zeroizing` so it is wiped from
     // memory on drop rather than left resident for the daemon's lifetime (CM2-B-A009):
     // the hex text, the decoded bytes, and the fixed 32-byte array.
-    let seed_hex = Zeroizing::new(
-        match env::var("CITRATE_MEMBER_SEED_FILE")
-            .ok()
-            .filter(|p| !p.is_empty())
-        {
-            Some(path) => {
-                fs::read_to_string(&path).map_err(|e| format!("reading seed file {path}: {e}"))?
-            }
-            None => required("CITRATE_MEMBER_SEED")?,
-        },
-    );
+    let seed_file_path = env::var("CITRATE_MEMBER_SEED_FILE")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    let seed_hex = Zeroizing::new(match &seed_file_path {
+        Some(path) => fs::read_to_string(path)
+            .map_err(|e| format!("reading seed file {}: {e}", path.display()))?,
+        None => required("CITRATE_MEMBER_SEED")?,
+    });
     let seed_trimmed = seed_hex.trim();
     if seed_trimmed.is_empty() {
         return Err("seed is empty (fail closed)".into());
@@ -76,14 +74,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(1);
 
+    // Durable MLS + group state (issue #3): groups survive a full restart. State dir is
+    // CITRATE_COMMS_STATE_DIR, else `<parent of the seed file>/state`. With an inline seed
+    // and no explicit dir there is no anchor directory, so persistence is disabled (the
+    // historical in-memory behavior) — the seed FILE is the production path.
+    let state_dir: Option<PathBuf> = env::var("CITRATE_COMMS_STATE_DIR")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            seed_file_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|parent| parent.join("state"))
+        });
+    if state_dir.is_none() {
+        eprintln!(
+            "comms-member-daemon: persistence DISABLED (no CITRATE_COMMS_STATE_DIR and no seed \
+             file to anchor a default) — groups will NOT survive a restart"
+        );
+    }
+
     // Relay transport: a shared networked relay (CITRATE_MEMBER_RELAY_URL, ws://|wss://) for
     // cross-node groups, else a local in-process relay (single node).
-    let daemon = match env::var("CITRATE_MEMBER_RELAY_URL").ok().filter(|u| !u.is_empty()) {
-        Some(url) => {
-            let ws: Box<dyn Relay> = Box::new(WsRelay::connect(&url).map_err(|e| format!("relay {url}: {e}"))?);
-            MemberDaemon::new_with_relay(wallet, ws, domain, now)?
+    let relay_url = env::var("CITRATE_MEMBER_RELAY_URL")
+        .ok()
+        .filter(|u| !u.is_empty());
+    let relay: Option<Box<dyn Relay>> = match relay_url {
+        Some(url) => Some(Box::new(
+            WsRelay::connect(&url).map_err(|e| format!("relay {url}: {e}"))?,
+        )),
+        None => None,
+    };
+    let daemon = match (state_dir, relay) {
+        (Some(dir), Some(ws)) => {
+            MemberDaemon::new_with_relay_persistent(wallet, ws, domain, now, dir, &seed)?
         }
-        None => MemberDaemon::new(wallet, domain, now)?,
+        (Some(dir), None) => MemberDaemon::new_persistent(wallet, domain, now, dir, &seed)?,
+        (None, Some(ws)) => MemberDaemon::new_with_relay(wallet, ws, domain, now)?,
+        (None, None) => MemberDaemon::new(wallet, domain, now)?,
     };
     eprintln!(
         "comms-member-daemon: owner {} serving on {}",

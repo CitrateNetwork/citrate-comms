@@ -22,7 +22,11 @@ use comms_proto::{
     RoleAssertion, WalletAddress, CITRATE_CHAIN_ID,
 };
 
+use std::path::PathBuf;
+use zeroize::Zeroizing;
+
 pub mod ipc;
+pub mod persist;
 pub mod relay;
 pub mod server;
 
@@ -45,6 +49,8 @@ pub enum DaemonError {
     Rbac(String),
     #[error("invalid utf-8 in a decrypted message")]
     BadUtf8,
+    #[error("state persistence error: {0}")]
+    Persist(String),
 }
 
 /// A member of a group as the daemon tracks it: the wallet, the MLS signature pubkey (to map to a
@@ -106,6 +112,18 @@ pub struct MemberDaemon {
     groups: Vec<GroupState>,
     /// A monotonically-advancing clock (ms) so SIWE nonces/challenges stay fresh across ops.
     now: u64,
+    /// Durable-state config (issue #3). `None` = in-memory only (groups do NOT survive a
+    /// restart — the historical behavior, kept for tests and the inline-seed fallback).
+    /// `Some` = snapshot every MLS + registry mutation to an encrypted file and rehydrate
+    /// it on startup.
+    persist: Option<PersistCtx>,
+}
+
+/// Where and how the daemon persists its encrypted state.
+struct PersistCtx {
+    dir: PathBuf,
+    /// The 32-byte state key, derived from the identity seed and wiped on drop.
+    key: Zeroizing<[u8; 32]>,
 }
 
 impl MemberDaemon {
@@ -124,27 +142,172 @@ impl MemberDaemon {
 
     /// Bring up the daemon for `wallet` over an INJECTED relay (in-process or a networked WS relay):
     /// mint the MLS identity, authenticate (SIWE), and publish the owner's key package.
+    /// In-memory only — for a restart-durable daemon use [`Self::new_with_relay_persistent`].
     pub fn new_with_relay(
         wallet: EthWallet,
-        mut relay: Box<dyn Relay>,
+        relay: Box<dyn Relay>,
         domain: impl Into<String>,
         now: u64,
     ) -> Result<Self, DaemonError> {
+        Self::build(wallet, relay, domain.into(), now, None)
+    }
+
+    /// Like [`Self::new`] but DURABLE (issue #3): snapshots MLS + group state to an
+    /// encrypted file under `state_dir` and rehydrates it on startup, so groups survive
+    /// a full restart. `seed` is the 32-byte identity seed (the daemon derives the
+    /// state key from it and holds only the derived key, not the seed).
+    pub fn new_persistent(
+        wallet: EthWallet,
+        domain: impl Into<String>,
+        now: u64,
+        state_dir: PathBuf,
+        seed: &[u8; 32],
+    ) -> Result<Self, DaemonError> {
         let domain = domain.into();
-        let mls =
-            MlsMember::new(&wallet.address().0).map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let relay: Box<dyn Relay> =
+            Box::new(InProcessRelay::new(&domain, wallet.address()).map_err(DaemonError::Relay)?);
+        Self::new_with_relay_persistent(wallet, relay, domain, now, state_dir, seed)
+    }
+
+    /// Like [`Self::new_with_relay`] but DURABLE (issue #3): see [`Self::new_persistent`].
+    pub fn new_with_relay_persistent(
+        wallet: EthWallet,
+        relay: Box<dyn Relay>,
+        domain: impl Into<String>,
+        now: u64,
+        state_dir: PathBuf,
+        seed: &[u8; 32],
+    ) -> Result<Self, DaemonError> {
+        let ctx = PersistCtx {
+            dir: state_dir,
+            key: persist::derive_state_key(seed),
+        };
+        Self::build(wallet, relay, domain.into(), now, Some(ctx))
+    }
+
+    /// The one construction path. `persist = Some` rehydrates any existing encrypted
+    /// state (fail-closed on a corrupt/foreign file — never a silent empty start) and
+    /// snapshots the freshly-published KeyPackage before returning; `None` is the
+    /// historical in-memory behavior.
+    fn build(
+        wallet: EthWallet,
+        mut relay: Box<dyn Relay>,
+        domain: String,
+        now: u64,
+        persist: Option<PersistCtx>,
+    ) -> Result<Self, DaemonError> {
+        let identity = wallet.address().0;
+
+        // Rehydrate from disk if persistence is on and a state file exists.
+        let restored = match &persist {
+            Some(ctx) => {
+                match persist::load_state(&ctx.dir, &ctx.key, &identity)
+                    .map_err(|e| DaemonError::Persist(e.to_string()))?
+                {
+                    Some(state) => Some(Self::rehydrate(state)?),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+
+        let (mls, groups) = match restored {
+            Some(mg) => mg,
+            None => (
+                MlsMember::new(&identity).map_err(|e| DaemonError::Mls(e.to_string()))?,
+                Vec::new(),
+            ),
+        };
+
+        // Authenticate + (re)publish this member's KeyPackage to whatever relay we were
+        // given (a fresh in-process relay, or a reconnected WS relay). `publish_kp`
+        // mints a new KeyPackage into the keystore, so we persist afterwards.
         let mut d_now = now;
         login(relay.as_mut(), &wallet, &domain, d_now)?;
         d_now += 1;
         publish_kp(relay.as_mut(), &wallet, &mls, &domain, d_now)?;
-        Ok(MemberDaemon {
+
+        let daemon = MemberDaemon {
             domain,
             wallet,
             mls,
             relay,
-            groups: Vec::new(),
+            groups,
             now: d_now + 1,
-        })
+            persist,
+        };
+        daemon.persist_state()?;
+        Ok(daemon)
+    }
+
+    /// Rebuild the MLS member + group registry from a decrypted, identity-verified
+    /// [`persist::StateFile`]. Each group is reloaded from the rehydrated keystore via
+    /// `MlsGroup::load` — no re-create, no new epoch.
+    fn rehydrate(state: persist::StateFile) -> Result<(MlsMember, Vec<GroupState>), DaemonError> {
+        let mls = MlsMember::restore(&state.identity, &state.sig_pubkey, &state.mls_snapshot)
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let mut groups = Vec::with_capacity(state.groups.len());
+        for pg in state.groups {
+            let handle = mls
+                .load_group(&pg.mls_group_id)
+                .map_err(|e| DaemonError::Mls(e.to_string()))?;
+            groups.push(GroupState {
+                id: pg.id,
+                name: pg.name,
+                handle,
+                epoch: pg.epoch,
+                members: pg
+                    .members
+                    .into_iter()
+                    .map(|m| MemberInfo {
+                        wallet: m.wallet,
+                        sig_pubkey: m.sig_pubkey,
+                        role: m.role,
+                    })
+                    .collect(),
+            });
+        }
+        Ok((mls, groups))
+    }
+
+    /// Snapshot MLS secrets + the group registry to the encrypted state file. No-op
+    /// when persistence is disabled. Called after every state mutation.
+    fn persist_state(&self) -> Result<(), DaemonError> {
+        let ctx = match &self.persist {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let mls_snapshot = self
+            .mls
+            .snapshot_storage()
+            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| persist::PersistedGroup {
+                id: g.id,
+                mls_group_id: g.handle.group_id(),
+                name: g.name.clone(),
+                epoch: g.epoch,
+                members: g
+                    .members
+                    .iter()
+                    .map(|m| persist::PersistedMember {
+                        wallet: m.wallet,
+                        sig_pubkey: m.sig_pubkey.clone(),
+                        role: m.role,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let state = persist::StateFile::new(
+            self.wallet.address().0.to_vec(),
+            self.mls.sig_pubkey(),
+            mls_snapshot,
+            groups,
+        );
+        persist::write_state(&ctx.dir, &ctx.key, &state)
+            .map_err(|e| DaemonError::Persist(e.to_string()))
     }
 
     /// The owner's wallet address.
@@ -179,12 +342,25 @@ impl MemberDaemon {
                 role: Role::Owner,
             }],
         });
+        self.persist_state()?;
         Ok(gid)
     }
 
     /// The owner's groups, as `(id, name)`.
     pub fn list_groups(&self) -> Vec<(GroupId, String)> {
         self.groups.iter().map(|g| (g.id, g.name.clone())).collect()
+    }
+
+    /// The live MLS epoch of `gid`, read from the (possibly restored) group handle.
+    /// After a restart this reflects the reloaded OpenMLS group state — proof that a
+    /// persisted group came back as a real, usable MLS group and not just a registry
+    /// row (issue #3).
+    pub fn mls_epoch(&self, gid: GroupId) -> Result<u64, DaemonError> {
+        self.groups
+            .iter()
+            .find(|g| g.id == gid)
+            .map(|g| g.handle.epoch())
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))
     }
 
     /// Join a group this member was ADDED to on a shared relay (cross-node). Fetches the pending
@@ -239,6 +415,7 @@ impl MemberDaemon {
             epoch,
             members,
         });
+        self.persist_state()?;
         Ok(())
     }
 
@@ -308,6 +485,7 @@ impl MemberDaemon {
             ratchet_tree.clone(),
             now,
         )?;
+        self.persist_state()?;
         Ok(AddResult {
             member,
             welcome,
@@ -349,6 +527,9 @@ impl MemberDaemon {
                 now,
             )
             .map_err(|e| DaemonError::Relay(e.to_string()))?;
+        // `create_message` ratcheted the MLS message-generation state; persist so a
+        // restart does not reuse a generation (which would reuse an AEAD nonce).
+        self.persist_state()?;
         Ok(())
     }
 
@@ -382,6 +563,11 @@ impl MemberDaemon {
                 sender,
                 body,
             });
+        }
+        // Decrypting advanced the inbound ratchet; persist so the restored state
+        // reflects the messages already consumed. Skip the write if nothing changed.
+        if !out.is_empty() {
+            self.persist_state()?;
         }
         Ok(out)
     }
@@ -457,6 +643,7 @@ impl MemberDaemon {
             .find(|m| m.wallet == assertion.subject)
             .ok_or_else(|| DaemonError::NoMember(hex::encode(assertion.subject.0)))?;
         mi.role = assertion.role;
+        self.persist_state()?;
         Ok(())
     }
 
@@ -491,6 +678,7 @@ impl MemberDaemon {
             .find(|m| m.wallet == assertion.subject)
             .ok_or_else(|| DaemonError::NoMember(hex::encode(assertion.subject.0)))?;
         mi.role = assertion.role;
+        self.persist_state()?;
         Ok(())
     }
 
@@ -540,6 +728,7 @@ impl MemberDaemon {
         self.relay
             .offboard(gid, owner, member, remove_commit_env, ratchet_tree, now)
             .map_err(DaemonError::Relay)?;
+        self.persist_state()?;
         Ok(())
     }
 

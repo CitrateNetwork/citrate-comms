@@ -92,6 +92,98 @@ impl MlsMember {
         self.signer.public().to_vec()
     }
 
+    /// Snapshot this member's entire provider keystore (every MLS secret it holds:
+    /// the signer, KeyPackage private material, and — once groups exist — the group
+    /// epoch/exporter secrets and ratchet state OpenMLS persists to its storage) to
+    /// opaque bytes.
+    ///
+    /// The [`OpenMlsRustCrypto`] provider keeps its keystore in an in-memory
+    /// `MemoryStorage`, whose `values` map (`HashMap<Vec<u8>, Vec<u8>>`) is a public
+    /// field. We copy that map out verbatim; the daemon encrypts the result at rest
+    /// (never plaintext) and re-imports it via [`Self::restore`] after a restart.
+    ///
+    /// Note on the CM2-B-A009 residual: this does NOT change the zeroization posture.
+    /// These bytes are the same secrets already resident in the provider's heap that
+    /// OpenMLS does not wipe on drop; snapshotting them to an encrypted-at-rest blob
+    /// is orthogonal to whether the live heap copies are zeroized (they still are not
+    /// — the accepted residual documented at the top of this module stands). The
+    /// daemon holds the snapshot bytes in a wiped-on-drop buffer at the call site.
+    pub fn snapshot_storage(&self) -> Result<Vec<u8>, MlsError> {
+        let guard = self
+            .provider
+            .storage()
+            .values
+            .read()
+            .map_err(|_| MlsError::Crypto("keystore lock poisoned".into()))?;
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> =
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut buf = Vec::new();
+        ciborium::into_writer(&pairs, &mut buf)
+            .map_err(|e| MlsError::Codec(format!("keystore snapshot encode: {e:?}")))?;
+        Ok(buf)
+    }
+
+    /// Reconstruct a member whose provider keystore is rehydrated from a
+    /// [`Self::snapshot_storage`] blob — the restart path.
+    ///
+    /// `identity` and `sig_pubkey` must be exactly those captured at first creation
+    /// (the daemon re-derives them from the persisted, seed-anchored wallet and the
+    /// persisted `sig_pubkey`). The signer is re-read from the rehydrated keystore
+    /// (it was stored there by [`Self::new`] via `signer.store`), so no private key
+    /// travels outside the snapshot. Fails closed if the keystore does not contain
+    /// the expected signer (corrupt/foreign snapshot).
+    pub fn restore(identity: &[u8], sig_pubkey: &[u8], snapshot: &[u8]) -> Result<Self, MlsError> {
+        let provider = OpenMlsRustCrypto::default();
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = ciborium::from_reader(snapshot)
+            .map_err(|e| MlsError::Codec(format!("keystore snapshot decode: {e:?}")))?;
+        {
+            let mut guard = provider
+                .storage()
+                .values
+                .write()
+                .map_err(|_| MlsError::Crypto("keystore lock poisoned".into()))?;
+            for (k, v) in pairs {
+                guard.insert(k, v);
+            }
+        }
+        let signer = SignatureKeyPair::read(
+            provider.storage(),
+            sig_pubkey,
+            CIPHERSUITE.signature_algorithm(),
+        )
+        .ok_or_else(|| {
+            MlsError::Crypto("restored keystore does not contain the expected signer".into())
+        })?;
+        let credential = BasicCredential::new(identity.to_vec());
+        let credential_with_key = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: signer.public().into(),
+        };
+        Ok(Self {
+            provider,
+            signer,
+            credential_with_key,
+        })
+    }
+
+    /// Reload a group this member belongs to from its (rehydrated) provider keystore,
+    /// by the MLS group id. Rebuilds a live [`GroupHandle`] with the full epoch
+    /// secrets — after this the member can send/receive and change membership exactly
+    /// as before the restart. Returns [`MlsError::Group`] if no such group is present
+    /// in the keystore.
+    pub fn load_group(&self, mls_group_id: &[u8]) -> Result<GroupHandle, MlsError> {
+        let group_id = GroupId::from_slice(mls_group_id);
+        let group = MlsGroup::load(self.provider.storage(), &group_id)
+            .map_err(|e| MlsError::Group(format!("group load: {e:?}")))?
+            .ok_or_else(|| {
+                MlsError::Group(format!(
+                    "no persisted group {} in keystore",
+                    hex::encode(mls_group_id)
+                ))
+            })?;
+        Ok(GroupHandle { group })
+    }
+
     /// Build a fresh single-use KeyPackage; private parts are kept in this
     /// member's keystore so it can later join from the Welcome. Returns the
     /// TLS-serialized public KeyPackage to publish to the relay directory.
@@ -632,7 +724,7 @@ mod tests {
         let alice = MlsMember::new(&alice_wallet.address().0).unwrap();
         let mut alice_group = alice.create_group().unwrap();
         let add = alice_group
-            .add_many(&alice, &[forged.key_package.clone()])
+            .add_many(&alice, std::slice::from_ref(&forged.key_package))
             .expect("raw MLS add accepts the forged KeyPackage — the A001 primitive");
         let mut relay_group = relay_member.join(&add.welcome, &add.ratchet_tree).unwrap();
         let secret = b"acquisition price is 240M, do not forward";
@@ -648,6 +740,57 @@ mod tests {
         let err = verify_incoming_key_package(&forged, &bob.address())
             .expect_err("GREEN: the client gate must reject the forged KeyPackage");
         assert!(matches!(err, MlsError::Binding(_)), "got {err:?}");
+    }
+
+    // ── Issue #3: snapshot/restore the keystore + reload a group after a "restart" ──
+
+    #[test]
+    fn snapshot_restore_reloads_a_usable_group() {
+        // Alice creates a group and adds Bob (epoch 1), then we SNAPSHOT her keystore —
+        // exactly what the daemon persists across a restart.
+        let alice = MlsMember::new(b"alice-identity").unwrap();
+        let alice_sig = alice.sig_pubkey();
+        let bob = MlsMember::new(b"bob-identity").unwrap();
+        let bob_kp = bob.fresh_key_package().unwrap();
+
+        let mut alice_group = alice.create_group().unwrap();
+        let mls_gid = alice_group.group_id();
+        alice_group.add(&alice, &bob_kp).unwrap();
+        assert_eq!(alice_group.epoch(), 1);
+
+        let snapshot = alice.snapshot_storage().expect("snapshot");
+        // Drop the live member + group — simulate a full process restart.
+        drop(alice_group);
+        drop(alice);
+
+        // Restore Alice from the snapshot alone (identity + sig pubkey are the persisted
+        // anchors) and reload the group by its MLS id.
+        let alice2 = MlsMember::restore(b"alice-identity", &alice_sig, &snapshot).expect("restore");
+        let mut group2 = alice2.load_group(&mls_gid).expect("reload group");
+        assert_eq!(group2.group_id(), mls_gid);
+        assert_eq!(group2.epoch(), 1, "reloaded group is at the pre-restart epoch");
+
+        // USABLE: the restored member can still commit a NEW member (Carol) — this needs
+        // the live signer + epoch secrets — and Carol joins from the produced Welcome.
+        let carol = MlsMember::new(b"carol-identity").unwrap();
+        let carol_kp = carol.fresh_key_package().unwrap();
+        let add = group2.add(&alice2, &carol_kp).expect("add after restore");
+        assert_eq!(group2.epoch(), 2, "the post-restore add advanced the epoch");
+        let carol_group = carol.join(&add.welcome, &add.ratchet_tree).expect("carol joins");
+        assert_eq!(carol_group.group_id(), mls_gid);
+    }
+
+    #[test]
+    fn restore_with_the_wrong_signer_pubkey_fails() {
+        let alice = MlsMember::new(b"alice-identity").unwrap();
+        let snapshot = alice.snapshot_storage().unwrap();
+        // A sig pubkey that is not in the keystore ⇒ no signer to read ⇒ hard error.
+        // (`MlsMember` is not `Debug`, so match rather than `expect_err`.)
+        match MlsMember::restore(b"alice-identity", &[0u8; 32], &snapshot) {
+            Err(MlsError::Crypto(_)) => {}
+            Ok(_) => panic!("a signer absent from the keystore must fail closed"),
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
     }
 
     #[test]
