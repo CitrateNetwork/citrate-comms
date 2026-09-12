@@ -28,3 +28,14 @@ hex = "0.4"
 subtle = { workspace = true }
 # Wipe the wallet seed copies from memory on drop (CM2-B-A009).
 zeroize = { workspace = true }
+# Durable MLS state at rest (issue #3). PURE-RUST AEAD only — the daemon must keep
+# cross-compiling to x86_64-pc-windows-*, so we deliberately do NOT pull comms-core's
+# `store` feature (RocksDB). AES-256-GCM-SIV (RFC 8452) is nonce-misuse-resistant, and
+# `getrandom` supplies the per-write nonce. Both are pure Rust.
+aes-gcm-siv = { workspace = true }
+getrandom = { workspace = true }
+# CBOR for the (encrypted) group-registry snapshot record.
+ciborium = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

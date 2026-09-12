@@ -492,6 +492,7 @@ impl DeliveryService {
     /// Onboard a member: add to the roster, stash the public ratchet tree, and
     /// deliver the Welcome to the joiner's mailbox. The MLS Add/Commit themselves
     /// are submitted as envelopes; this updates the routing roster + audit.
+    #[allow(clippy::too_many_arguments)] // each argument is a distinct onboard input; grouping them would only obscure.
     pub fn onboard(
         &mut self,
         group_id: GroupId,
