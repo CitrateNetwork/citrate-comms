@@ -58,7 +58,7 @@ fn now_ms() -> u64 {
 // here unchanged, so every existing `comms_relay::ws::…` path — including this
 // crate's own tests — resolves to exactly the same types.
 pub use comms_wire::client::{NotifyPush, RelayClient, WsError};
-pub use comms_wire::frames::{ClientFrame, ServerFrame};
+pub use comms_wire::frames::{ClientFrame, RedeemInviteResult, ServerFrame};
 
 // ─────────────────────────── server ───────────────────────────
 
@@ -228,6 +228,9 @@ impl RelayServer {
                 | ClientFrame::Submit(_)
                 | ClientFrame::SubmitClaim(_)
                 | ClientFrame::Offboard { .. }
+                | ClientFrame::PublishInvite { .. }
+                | ClientFrame::RevokeInvite { .. }
+                | ClientFrame::RedeemInvite { .. }
         );
         if mutating && self.is_paused() {
             return send_err(out_tx, "relay is paused");
@@ -407,6 +410,71 @@ impl RelayServer {
                     }
                     _ => send_err(out_tx, "not a member of this group"),
                 }
+            }
+            ClientFrame::PublishInvite {
+                group_id,
+                token_hash,
+                group_info,
+                expires_at,
+            } => {
+                // INVITE-S2: bind the inviter to THIS connection's authenticated principal
+                // (never a client-named identity) — a session may only mint invites as
+                // itself, and only into a group it is a member of.
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = {
+                    self.service.lock().await.publish_invite(
+                        addr,
+                        group_id,
+                        token_hash,
+                        group_info,
+                        expires_at,
+                    )
+                };
+                match r {
+                    Ok(_) => ack(out_tx, None),
+                    Err(e) => send_err(out_tx, &e.to_string()),
+                }
+            }
+            ClientFrame::RevokeInvite { token_hash } => {
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = { self.service.lock().await.revoke_invite(addr, token_hash) };
+                match r {
+                    Ok(_) => ack(out_tx, None),
+                    Err(e) => send_err(out_tx, &e.to_string()),
+                }
+            }
+            ClientFrame::RedeemInvite {
+                group_id,
+                token,
+                key_package,
+            } => {
+                // INVITE-S2: the redeemer is SIWE-authenticated (but need not yet be a
+                // member — this is the self-admit path). Bind the joiner identity that is
+                // recorded in the referral + added to the roster to the session principal.
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = {
+                    self.service.lock().await.redeem_invite(
+                        addr,
+                        group_id,
+                        &token,
+                        &key_package,
+                        now,
+                    )
+                };
+                let result = match r {
+                    Ok((group_info, epoch)) => RedeemInviteResult::Ok { group_info, epoch },
+                    // A typed business refusal is delivered IN-BAND (fail-closed reason),
+                    // not as a transport error, so the client can branch on it.
+                    Err(crate::RelayError::InviteRedeem(reason)) => RedeemInviteResult::Err(reason),
+                    Err(e) => return send_err(out_tx, &e.to_string()),
+                };
+                let _ = out_tx.send(ServerFrame::RedeemInvite(result));
             }
             ClientFrame::Offboard {
                 group_id,

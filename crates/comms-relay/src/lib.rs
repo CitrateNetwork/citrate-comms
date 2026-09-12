@@ -44,6 +44,7 @@ use comms_proto::{
     canonical, AuditEvent, AuditRecord, ClaimSubmission, Envelope, EnvelopeKind, EpochId, GroupId,
     KeyPackagePublication, KeyPackageRef, RoleAssertion, WalletAddress,
 };
+use comms_wire::frames::RedeemError;
 use serde::{Deserialize, Serialize};
 
 /// Per-group routing + ordering state. Holds NO secrets — only ciphertext, the
@@ -94,6 +95,37 @@ impl GroupState {
     }
 }
 
+/// INVITE-S2 — a single-use, group-bound, owner-TTL'd invite the relay stores against a
+/// token hash. It holds the PUBLIC MLS `GroupInfo` (public group state a token-holder
+/// self-admits with by external commit) and NO group secret — the server-blind invariant
+/// is unchanged. `consumed`/`revoked` are the fail-closed tombstones.
+#[derive(Clone, Serialize, Deserialize)]
+struct InviteRecord {
+    group_id: GroupId,
+    /// The owner's exported `GroupInfo` (opaque to the relay).
+    group_info: Vec<u8>,
+    /// The wallet that minted the invite (the referral attributes joins to this address).
+    inviter: WalletAddress,
+    /// Unix milliseconds after which the invite is dead.
+    expires_at: u64,
+    /// Set once redeemed (single-use).
+    consumed: bool,
+    /// Set if the minter revoked it.
+    revoked: bool,
+}
+
+/// INVITE-S2 — one append-only referral row: who admitted whom, into which group, under
+/// which invite, and when. The airdrop/attribution scorer reads these; scoring itself is
+/// out of scope for the relay.
+#[derive(Clone, Serialize, Deserialize)]
+struct ReferralRecord {
+    inviter: WalletAddress,
+    joiner: WalletAddress,
+    group_id: GroupId,
+    token_hash: [u8; 32],
+    ts: u64,
+}
+
 /// Parameters for [`DeliveryService::offboard`]. Bundled so the call site reads as
 /// one intent ("offboard this member with this Remove commit").
 pub struct OffboardRequest<'a> {
@@ -120,6 +152,12 @@ pub struct DeliveryService {
     /// CONNECT-S1 — the server-blind claims-inbox, keyed by invite `token_hash`. Ciphertext ONLY
     /// (opaque). In-memory + ephemeral by design (a dropped connect-request is just re-submitted).
     claims: HashMap<[u8; 32], Vec<ClaimSubmission>>,
+    /// INVITE-S2 — single-use, group-bound invites keyed by BLAKE3(token). Public
+    /// `GroupInfo` only (never a group secret). Durable in `CF_INVITES`.
+    invites: HashMap<[u8; 32], InviteRecord>,
+    /// INVITE-S2 — append-only referral ledger (who admitted whom). Durable in
+    /// `CF_REFERRALS`; the row index is the vector position (never deleted).
+    referrals: Vec<ReferralRecord>,
     groups: HashMap<GroupId, GroupState>,
     /// Per-wallet delivery mailboxes (the fan-out target).
     mailboxes: HashMap<WalletAddress, Vec<Envelope>>,
@@ -143,6 +181,8 @@ impl DeliveryService {
             nonces: InMemoryNonceStore::new(),
             key_packages: HashMap::new(),
             claims: HashMap::new(),
+            invites: HashMap::new(),
+            referrals: Vec::new(),
             groups: HashMap::new(),
             mailboxes: HashMap::new(),
             sessions: BTreeSet::new(),
@@ -220,12 +260,38 @@ impl DeliveryService {
             key_packages.insert(wallet, queue.into());
         }
 
+        // INVITE-S2 — replay the invite store (public GroupInfo + tombstones) and the
+        // append-only referral ledger so self-admit + attribution survive a restart (R10).
+        let mut invites: HashMap<[u8; 32], InviteRecord> = HashMap::new();
+        for (k, v) in store.scan(store::CF_INVITES)? {
+            let token_hash: [u8; 32] = k
+                .as_slice()
+                .try_into()
+                .map_err(|_| RelayError::CorruptKey)?;
+            let rec: InviteRecord = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            invites.insert(token_hash, rec);
+        }
+        let mut referral_rows: Vec<(u64, ReferralRecord)> = Vec::new();
+        for (k, v) in store.scan(store::CF_REFERRALS)? {
+            let seq = u64::from_be_bytes(
+                k.as_slice()
+                    .try_into()
+                    .map_err(|_| RelayError::CorruptKey)?,
+            );
+            let rec: ReferralRecord = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            referral_rows.push((seq, rec));
+        }
+        referral_rows.sort_by_key(|(seq, _)| *seq);
+        let referrals: Vec<ReferralRecord> = referral_rows.into_iter().map(|(_, r)| r).collect();
+
         Ok(Self {
             domain: domain.into(),
             owner,
             nonces: InMemoryNonceStore::new(),
             key_packages,
             claims: HashMap::new(),
+            invites,
+            referrals,
             groups,
             mailboxes: HashMap::new(),
             sessions: BTreeSet::new(),
@@ -292,6 +358,31 @@ impl DeliveryService {
                 store::CF_KEYPACKAGES,
                 &wallet.0,
                 &canonical::to_vec(&queue).map_err(RelayError::Decode)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Persist one invite record (the consumed/revoked tombstone lives here too, so a
+    /// consumed invite does not resurrect after restart — no replay of a single-use link).
+    fn persist_invite(&self, token_hash: &[u8; 32]) -> Result<(), RelayError> {
+        if let (Some(s), Some(inv)) = (&self.store, self.invites.get(token_hash)) {
+            s.put(
+                store::CF_INVITES,
+                token_hash,
+                &canonical::to_vec(inv).map_err(RelayError::Decode)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Persist one append-only referral row at its sequence index.
+    fn persist_referral(&self, seq: u64, referral: &ReferralRecord) -> Result<(), RelayError> {
+        if let Some(s) = &self.store {
+            s.put(
+                store::CF_REFERRALS,
+                &seq.to_be_bytes(),
+                &canonical::to_vec(referral).map_err(RelayError::Decode)?,
             )?;
         }
         Ok(())
@@ -466,6 +557,181 @@ impl DeliveryService {
     /// Clear the inbox for a `token_hash` once the owner has consumed the (one-time) invite.
     pub fn clear_claims(&mut self, token_hash: &[u8; 32]) {
         self.claims.remove(token_hash);
+    }
+
+    // ─────────────────── INVITE-S2 token-authorized self-admit ───────────────────
+
+    /// Ceiling on live invites the relay stores, so a member cannot grow `CF_INVITES`
+    /// without bound. Generous versus any real workspace's outstanding invites.
+    const MAX_INVITES: usize = 4096;
+
+    /// **INVITE-S2 (owner mints).** Store a single-use, group-bound invite: `token_hash ->
+    /// {group_info, inviter, expires_at}`. `group_info` is the owner's exported PUBLIC MLS
+    /// group state (opaque to the relay — the server-blind invariant is unchanged: the
+    /// relay stores/serves it but holds no group secret). Only a current member of the
+    /// group may mint an invite into it, and the `inviter` is bound to the authenticated
+    /// session by the WS layer (it cannot be spoofed). Idempotent per `token_hash`
+    /// (re-publishing the same token overwrites its record rather than growing the store).
+    pub fn publish_invite(
+        &mut self,
+        inviter: WalletAddress,
+        group_id: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), RelayError> {
+        self.require_session(&inviter)?;
+        {
+            let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
+            if !state.members.contains(&inviter) {
+                return Err(RelayError::NotAMember);
+            }
+        }
+        // Bound the stored blob (A005-style DoS cap) — an empty GroupInfo is meaningless.
+        if group_info.is_empty() || group_info.len() > Self::MAX_CIPHERTEXT_BYTES {
+            return Err(RelayError::CiphertextTooLarge {
+                size: group_info.len() as u64,
+                max: Self::MAX_CIPHERTEXT_BYTES as u64,
+            });
+        }
+        // Cap the number of live invites (only new tokens count toward the ceiling).
+        if !self.invites.contains_key(&token_hash) && self.invites.len() >= Self::MAX_INVITES {
+            return Err(RelayError::InviteQuotaExceeded {
+                max: Self::MAX_INVITES,
+            });
+        }
+        self.invites.insert(
+            token_hash,
+            InviteRecord {
+                group_id,
+                group_info,
+                inviter,
+                expires_at,
+                consumed: false,
+                revoked: false,
+            },
+        );
+        self.persist_invite(&token_hash)?;
+        Ok(())
+    }
+
+    /// **INVITE-S2 (owner revokes).** Tombstone a previously-minted invite so every later
+    /// redeem of it fails closed. Only the wallet that minted it may revoke it (bound to
+    /// the authenticated session by the WS layer).
+    pub fn revoke_invite(
+        &mut self,
+        caller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<(), RelayError> {
+        self.require_session(&caller)?;
+        let record = self
+            .invites
+            .get_mut(&token_hash)
+            .ok_or(RelayError::InviteUnknown)?;
+        if record.inviter != caller {
+            return Err(RelayError::NotAuthorized);
+        }
+        record.revoked = true;
+        self.persist_invite(&token_hash)?;
+        Ok(())
+    }
+
+    /// **INVITE-S2 (joiner self-admits).** Validate the presented raw `token` against the
+    /// invite store — must exist, be for `group_id` (group-bound), be unrevoked,
+    /// unconsumed, and unexpired — then CONSUME it (single-use), add the redeemer to the
+    /// routing roster (so it can publish its external commit and receive fan-out, exactly
+    /// as `onboard` does), append the referral row (inviter = the minter, joiner = the
+    /// redeemer), and return the stored PUBLIC `GroupInfo` + the group's current routing
+    /// epoch. Fails closed on any invalid/expired/consumed/revoked token or an
+    /// out-of-bound KeyPackage.
+    ///
+    /// The relay is server-blind: it NEVER parses the MLS KeyPackage (that would link the
+    /// MLS engine into the relay). Its only KeyPackage check is a structural bound; the
+    /// existing members validate the KeyPackage cryptographically when they merge the
+    /// resulting external commit. `joiner` is bound to the authenticated session upstream.
+    pub fn redeem_invite(
+        &mut self,
+        joiner: WalletAddress,
+        group_id: GroupId,
+        token: &[u8],
+        key_package: &[u8],
+        now_ms: u64,
+    ) -> Result<(Vec<u8>, u64), RelayError> {
+        // Structural KeyPackage bound only (server-blind — no MLS parse here).
+        if key_package.is_empty() || key_package.len() > Self::MAX_CIPHERTEXT_BYTES {
+            return Err(RelayError::InviteRedeem(RedeemError::InvalidKeyPackage));
+        }
+        let token_hash = *blake3::hash(token).as_bytes();
+        let (group_info, inviter) = {
+            let record = self
+                .invites
+                .get(&token_hash)
+                .ok_or(RelayError::InviteRedeem(RedeemError::UnknownToken))?;
+            // Group-bound: the token admits ONLY into the group it was minted for.
+            if record.group_id != group_id {
+                return Err(RelayError::InviteRedeem(RedeemError::UnknownToken));
+            }
+            if record.revoked {
+                return Err(RelayError::InviteRedeem(RedeemError::Revoked));
+            }
+            if record.consumed {
+                return Err(RelayError::InviteRedeem(RedeemError::Consumed));
+            }
+            if now_ms > record.expires_at {
+                return Err(RelayError::InviteRedeem(RedeemError::Expired));
+            }
+            (record.group_info.clone(), record.inviter)
+        };
+        // The group must still exist; take its current routing epoch and add the redeemer
+        // to the roster (the moment it legitimately becomes a routing member).
+        let epoch = {
+            let state = self
+                .groups
+                .get_mut(&group_id)
+                .ok_or(RelayError::InviteRedeem(RedeemError::UnknownToken))?;
+            state.members.insert(joiner);
+            state.current_epoch
+        };
+        // Consume (single-use) + record the referral. Persist all three mutations; a store
+        // failure is a hard error BEFORE we hand back the GroupInfo, so a redeem we could
+        // not durably mark consumed is never observable (no single-use replay after crash).
+        if let Some(rec) = self.invites.get_mut(&token_hash) {
+            rec.consumed = true;
+        }
+        let seq = self.referrals.len() as u64;
+        let referral = ReferralRecord {
+            inviter,
+            joiner,
+            group_id,
+            token_hash,
+            ts: now_ms,
+        };
+        self.referrals.push(referral);
+        self.persist_invite(&token_hash)?;
+        self.persist_group(&group_id)?;
+        self.persist_referral(seq, &self.referrals[seq as usize])?;
+        Ok((group_info, epoch))
+    }
+
+    /// **INVITE-S2 attribution.** Per inviter, the count of DISTINCT joiners they admitted
+    /// (a re-used token can only be redeemed once, but an inviter may mint many invites;
+    /// distinctness dedupes any joiner counted twice). The airdrop scorer consumes this;
+    /// scoring is out of scope here.
+    pub fn referral_tally(&self) -> Vec<(WalletAddress, u64)> {
+        let mut per_inviter: std::collections::BTreeMap<WalletAddress, BTreeSet<WalletAddress>> =
+            std::collections::BTreeMap::new();
+        for r in &self.referrals {
+            per_inviter.entry(r.inviter).or_default().insert(r.joiner);
+        }
+        per_inviter
+            .into_iter()
+            .map(|(inviter, joiners)| (inviter, joiners.len() as u64))
+            .collect()
+    }
+
+    /// The number of referral rows recorded (introspection / tests).
+    pub fn referral_count(&self) -> usize {
+        self.referrals.len()
     }
 
     // ─────────────────────────── groups ───────────────────────────
@@ -851,6 +1117,12 @@ pub enum RelayError {
     NoKeyPackage,
     #[error("key package quota exceeded for wallet (max {max})")]
     KeyPackageQuotaExceeded { max: usize },
+    #[error("no such invite")]
+    InviteUnknown,
+    #[error("invite quota exceeded (max {max})")]
+    InviteQuotaExceeded { max: usize },
+    #[error("invite redeem refused: {}", .0.as_str())]
+    InviteRedeem(RedeemError),
     #[error("rbac check failed: {0}")]
     Rbac(RbacError),
     #[error(transparent)]
@@ -1617,5 +1889,226 @@ mod tests {
             matches!(big, RelayError::CiphertextTooLarge { .. }),
             "oversized ciphertext must be refused, got {big:?}"
         );
+    }
+
+    // ─────────────────── INVITE-S2 token-authorized self-admit ───────────────────
+
+    /// Build a group owned by `owner` and return its id. The stored GroupInfo is opaque to
+    /// the relay, so these relay-level tests use a stand-in blob (the MLS-level self-admit
+    /// is proven in `comms-core::mls`; the full stack in the daemon's ws tests).
+    fn owner_group(relay: &mut DeliveryService, owner: &EthWallet, gid: GroupId, now: u64) {
+        relay.register_group(gid, owner.address(), now).unwrap();
+    }
+
+    #[test]
+    fn invite_redeem_is_single_use_and_records_the_referral() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate(); // authenticated, but NOT a member yet
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([21; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+
+        let token = b"invite-token-abc".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+        let group_info = b"PUBLIC-GROUP-INFO-BLOB".to_vec();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, group_info.clone(), u64::MAX)
+            .unwrap();
+
+        // First redeem: succeeds, returns the stored GroupInfo, adds the joiner to the roster.
+        let (gi, _epoch) = relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP-BYTES", 100)
+            .expect("first redeem succeeds");
+        assert_eq!(gi, group_info, "redeem returns the stored public GroupInfo");
+        assert!(
+            relay.group_members(&gid).unwrap().contains(&invitee.address()),
+            "redeemer joins the routing roster"
+        );
+        // Attribution recorded: inviter -> 1 distinct joiner.
+        assert_eq!(relay.referral_count(), 1);
+        assert_eq!(relay.referral_tally(), vec![(owner.address(), 1)]);
+
+        // Second redeem of the SAME token: single-use → Consumed (a leaked link is now dead).
+        let err = relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP-BYTES", 101)
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::InviteRedeem(RedeemError::Consumed)),
+            "second redeem must fail closed as consumed, got {err:?}"
+        );
+        assert_eq!(relay.referral_count(), 1, "a refused redeem records no referral");
+    }
+
+    #[test]
+    fn invite_expired_token_is_refused() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([22; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        let token = b"ttl-token".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, b"GI".to_vec(), 1_000)
+            .unwrap();
+        // now (2_000) is past expires_at (1_000).
+        let err = relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP", 2_000)
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::InviteRedeem(RedeemError::Expired)),
+            "expired token must be refused, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn invite_revoked_token_is_refused_and_only_minter_may_revoke() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([23; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        let token = b"revoke-token".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, b"GI".to_vec(), u64::MAX)
+            .unwrap();
+
+        // A non-minter cannot revoke.
+        let denied = relay.revoke_invite(invitee.address(), token_hash).unwrap_err();
+        assert!(matches!(denied, RelayError::NotAuthorized), "got {denied:?}");
+
+        // The minter revokes → redeem then fails closed.
+        relay.revoke_invite(owner.address(), token_hash).unwrap();
+        let err = relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::InviteRedeem(RedeemError::Revoked)),
+            "revoked token must be refused, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn invite_unknown_token_wrong_group_and_bad_key_package_are_refused() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([24; 32]);
+        let other = GroupId([99; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        owner_group(&mut relay, &owner, other, 13);
+        let token = b"known-token".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, b"GI".to_vec(), u64::MAX)
+            .unwrap();
+
+        // Unknown token.
+        let unknown = relay
+            .redeem_invite(invitee.address(), gid, b"never-minted", b"KP", 100)
+            .unwrap_err();
+        assert!(matches!(unknown, RelayError::InviteRedeem(RedeemError::UnknownToken)));
+
+        // Known token, WRONG group (group-bound) → UnknownToken (fail closed).
+        let wrong_group = relay
+            .redeem_invite(invitee.address(), other, &token, b"KP", 100)
+            .unwrap_err();
+        assert!(matches!(
+            wrong_group,
+            RelayError::InviteRedeem(RedeemError::UnknownToken)
+        ));
+
+        // Empty KeyPackage → InvalidKeyPackage (structural bound; the relay never parses MLS).
+        let bad_kp = relay
+            .redeem_invite(invitee.address(), gid, &token, b"", 100)
+            .unwrap_err();
+        assert!(matches!(
+            bad_kp,
+            RelayError::InviteRedeem(RedeemError::InvalidKeyPackage)
+        ));
+
+        // None of the refusals consumed the invite: the genuine redeem still works.
+        relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
+            .expect("the invite survived every refused attempt");
+    }
+
+    #[test]
+    fn non_member_cannot_mint_an_invite() {
+        let owner = EthWallet::generate();
+        let stranger = EthWallet::generate(); // authenticated, not a member of the group
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &stranger, 11);
+        let gid = GroupId([25; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        let err = relay
+            .publish_invite(stranger.address(), gid, [7; 32], b"GI".to_vec(), u64::MAX)
+            .unwrap_err();
+        assert!(matches!(err, RelayError::NotAMember), "got {err:?}");
+    }
+
+    #[test]
+    fn invites_and_referrals_survive_restart_single_use_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let gid = GroupId([26; 32]);
+        let master = [4u8; 32];
+        let token = b"durable-token".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", owner.address(), master, 0)
+                    .unwrap();
+            login(&mut relay, &owner, 10);
+            login(&mut relay, &invitee, 11);
+            relay.register_group(gid, owner.address(), 12).unwrap();
+            relay
+                .publish_invite(owner.address(), gid, token_hash, b"GI-DURABLE".to_vec(), u64::MAX)
+                .unwrap();
+            relay
+                .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
+                .expect("redeem before restart");
+            assert_eq!(relay.referral_count(), 1);
+        }
+
+        // Reopen the SAME store: the consumed invite + the referral replay from disk.
+        {
+            let relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", owner.address(), master, 999)
+                    .unwrap();
+            assert_eq!(relay.referral_count(), 1, "referral survived restart");
+            assert_eq!(relay.referral_tally(), vec![(owner.address(), 1)]);
+            assert!(
+                relay.group_members(&gid).unwrap().contains(&invitee.address()),
+                "the redeemer's roster membership survived restart"
+            );
+        }
+
+        // A redeem AFTER restart must still see the invite as consumed (no single-use replay).
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", owner.address(), master, 1000)
+                    .unwrap();
+            login(&mut relay, &invitee, 1001);
+            let err = relay
+                .redeem_invite(invitee.address(), gid, &token, b"KP", 1002)
+                .unwrap_err();
+            assert!(
+                matches!(err, RelayError::InviteRedeem(RedeemError::Consumed)),
+                "single-use must survive restart, got {err:?}"
+            );
+        }
     }
 }
