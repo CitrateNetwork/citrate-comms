@@ -405,7 +405,7 @@ impl RelayServer {
                     Some(roster) if roster.contains(&addr) => {
                         let _ = out_tx.send(ServerFrame::Members(members));
                     }
-                    _ => return send_err(out_tx, "not a member of this group"),
+                    _ => send_err(out_tx, "not a member of this group"),
                 }
             }
             ClientFrame::Offboard {
