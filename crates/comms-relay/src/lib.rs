@@ -60,6 +60,12 @@ struct GroupState {
     ratchet_tree: Vec<u8>,
     /// The ordered ciphertext log (the durable, replayable relay state).
     log: Vec<Envelope>,
+    /// The wallet that created this group (`register_group`) — the per-group admin,
+    /// authorized for THIS group's membership ops (onboard/offboard) without an
+    /// owner-signed assertion. `None` for groups persisted before this field existed
+    /// (and any group whose creation predates the audit trail): those fall back to
+    /// global-owner-only authorization, never an auth bypass.
+    creator: Option<WalletAddress>,
 }
 
 /// The serializable, on-disk projection of a group's metadata (everything but the
@@ -71,6 +77,10 @@ struct GroupSnapshot {
     next_seq: u64,
     accepted_commit: Vec<(u64, [u8; 32])>,
     ratchet_tree: Vec<u8>,
+    /// `#[serde(default)]` → already-persisted snapshots (written before this field)
+    /// deserialize to `None`, i.e. the global-owner-only fallback.
+    #[serde(default)]
+    creator: Option<WalletAddress>,
 }
 
 impl GroupState {
@@ -81,6 +91,7 @@ impl GroupState {
             next_seq: self.next_seq,
             accepted_commit: self.accepted_commit.iter().map(|(k, v)| (*k, *v)).collect(),
             ratchet_tree: self.ratchet_tree.clone(),
+            creator: self.creator,
         }
     }
     fn from_snapshot(s: GroupSnapshot) -> Self {
@@ -91,6 +102,7 @@ impl GroupState {
             accepted_commit: s.accepted_commit.into_iter().collect(),
             ratchet_tree: s.ratchet_tree,
             log: Vec::new(), // rebuilt from the envelopes CF
+            creator: s.creator,
         }
     }
 }
@@ -210,6 +222,16 @@ impl DeliveryService {
         for (_k, v) in store.scan(store::CF_AUDIT)? {
             audit_records.push(canonical::from_slice(&v).map_err(RelayError::Decode)?);
         }
+        // Creator backfill map: each group's creator from the EARLIEST GroupCreated audit
+        // event (records scan in sequence order, so `or_insert` keeps the first). Lets
+        // groups persisted before `GroupSnapshot.creator` existed still authorize their
+        // creator; groups with no GroupCreated on record stay `None` (owner-only).
+        let mut creator_by_group: HashMap<GroupId, WalletAddress> = HashMap::new();
+        for r in &audit_records {
+            if let AuditEvent::GroupCreated { group_id, creator } = &r.event {
+                creator_by_group.entry(*group_id).or_insert(*creator);
+            }
+        }
         let audit = if audit_records.is_empty() {
             let chain = AuditChain::new(genesis_ts_ms)?;
             for r in chain.records() {
@@ -234,6 +256,14 @@ impl DeliveryService {
             );
             let snap: GroupSnapshot = canonical::from_slice(&v).map_err(RelayError::Decode)?;
             groups.insert(gid, GroupState::from_snapshot(snap));
+        }
+        // Apply the creator backfill to any group whose persisted snapshot predates the
+        // `creator` field (creator == None); groups without a GroupCreated audit record
+        // remain None → global-owner-only authorization (no auth bypass).
+        for (gid, g) in groups.iter_mut() {
+            if g.creator.is_none() {
+                g.creator = creator_by_group.get(gid).copied();
+            }
         }
         for (k, v) in store.scan(store::CF_ENVELOPES)? {
             if k.len() < 32 {
@@ -748,6 +778,7 @@ impl DeliveryService {
             return Err(RelayError::GroupExists);
         }
         let mut state = GroupState::default();
+        state.creator = Some(creator);
         state.members.insert(creator);
         self.groups.insert(group_id, state);
         self.persist_group(&group_id)?;
@@ -775,12 +806,30 @@ impl DeliveryService {
         // owner-signed assertion whose role carries `AddMember`. Without this any
         // member could insert an arbitrary joiner into the routing roster and
         // overwrite the stored public ratchet tree served to future joiners.
-        if admin != self.owner {
-            let a = admin_assertion.ok_or(RelayError::NotAuthorized)?;
-            rbac::verify_grant_chain(a, admin, self.owner, now_ms).map_err(RelayError::Rbac)?;
-            if !rbac::can(a.role, Capability::AddMember) {
-                return Err(RelayError::NotAuthorized);
-            }
+        // Look up THIS group's creator, scoped strictly to `group_id` (never a global
+        // list) — the creator of group A must not gain any authority over group B.
+        let group_creator = self
+            .groups
+            .get(&group_id)
+            .ok_or(RelayError::GroupUnknown)?
+            .creator;
+        // RBAC (FWA-C11-03): adding a member is a membership-mutating op. Authorized iff
+        // the actor is the global workspace owner, THIS group's creator (their own group),
+        // or presents an owner-signed assertion whose role carries `AddMember`. A plain
+        // member with none of these is rejected — otherwise any member could insert an
+        // arbitrary joiner into the routing roster and overwrite the stored ratchet tree.
+        let authorized = admin == self.owner
+            || group_creator == Some(admin)
+            || match admin_assertion {
+                Some(a) => {
+                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
+                        .map_err(RelayError::Rbac)?;
+                    rbac::can(a.role, Capability::AddMember)
+                }
+                None => false,
+            };
+        if !authorized {
+            return Err(RelayError::NotAuthorized);
         }
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
@@ -848,12 +897,32 @@ impl DeliveryService {
         self.require_session(&admin)?;
         // RBAC: owner is the trust anchor; anyone else must present an owner-signed
         // assertion whose role carries RemoveMember.
-        if admin != self.owner {
-            let a = admin_assertion.ok_or(RelayError::NotAuthorized)?;
-            rbac::verify_grant_chain(a, admin, self.owner, now_ms).map_err(RelayError::Rbac)?;
-            if !rbac::can(a.role, Capability::RemoveMember) {
-                return Err(RelayError::NotAuthorized);
-            }
+        // Look up THIS group's creator, scoped strictly to `group_id`.
+        let group_creator = self
+            .groups
+            .get(&group_id)
+            .ok_or(RelayError::GroupUnknown)?
+            .creator;
+        // Guardrail: only the global workspace owner may offboard the global owner. A
+        // per-group creator (or a delegated assertion-holder) must never be able to
+        // remove the trust anchor, even from a group they created.
+        if removed == self.owner && admin != self.owner {
+            return Err(RelayError::NotAuthorized);
+        }
+        // RBAC: authorized iff the global owner, THIS group's creator (their own group),
+        // or an owner-signed assertion whose role carries RemoveMember.
+        let authorized = admin == self.owner
+            || group_creator == Some(admin)
+            || match admin_assertion {
+                Some(a) => {
+                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
+                        .map_err(RelayError::Rbac)?;
+                    rbac::can(a.role, Capability::RemoveMember)
+                }
+                None => false,
+            };
+        if !authorized {
+            return Err(RelayError::NotAuthorized);
         }
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
@@ -1714,6 +1783,300 @@ mod tests {
             .group_members(&gid)
             .unwrap()
             .contains(&victim.address()));
+    }
+
+    /// Per-group creator RBAC — the wallet that CREATED a group is authorized for that
+    /// group's membership ops (onboard + offboard) WITHOUT an owner-signed assertion,
+    /// even though it is not the global workspace owner. This is the fix for
+    /// "actor not authorized for this membership operation" on user-owned groups.
+    #[test]
+    fn creator_can_onboard_and_offboard_their_own_group() {
+        let owner = EthWallet::generate(); // global workspace owner (trust anchor)
+        let creator = EthWallet::generate(); // a normal user who creates a group
+        let member = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 1);
+        login(&mut relay, &creator, 2);
+        login(&mut relay, &member, 3);
+        let gid = GroupId([10; 32]);
+        relay.register_group(gid, creator.address(), 4).unwrap();
+
+        // Creator onboards a member into their OWN group — no assertion.
+        relay
+            .onboard(
+                gid,
+                creator.address(),
+                None,
+                member.address(),
+                envelope(
+                    gid,
+                    creator.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w",
+                    &[member.address()],
+                ),
+                b"rt".to_vec(),
+                5,
+            )
+            .unwrap();
+        assert!(
+            relay.group_members(&gid).unwrap().contains(&member.address()),
+            "the group creator must be able to onboard into their own group"
+        );
+
+        // Creator offboards the member — no assertion. The Remove commit is the group's
+        // next contiguous epoch (group is at 0, so epoch 1).
+        relay
+            .offboard(
+                OffboardRequest {
+                    group_id: gid,
+                    admin: creator.address(),
+                    admin_assertion: None,
+                    removed: member.address(),
+                    remove_commit: envelope(
+                        gid,
+                        creator.address(),
+                        EnvelopeKind::Commit,
+                        1,
+                        b"rm",
+                        &[],
+                    ),
+                    ratchet_tree: b"rt2".to_vec(),
+                },
+                6,
+            )
+            .unwrap();
+        assert!(
+            !relay.group_members(&gid).unwrap().contains(&member.address()),
+            "the group creator must be able to offboard from their own group"
+        );
+    }
+
+    /// Per-group SCOPING — the creator of group A has NO authority in group B, even when
+    /// they are an ordinary member of B. Authorization compares against THIS group's
+    /// creator, never a global list.
+    #[test]
+    fn creator_of_group_a_is_rejected_in_group_b() {
+        let owner = EthWallet::generate();
+        let creator_a = EthWallet::generate();
+        let creator_b = EthWallet::generate();
+        let victim = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 1);
+        login(&mut relay, &creator_a, 2);
+        login(&mut relay, &creator_b, 3);
+        let gid_b = GroupId([12; 32]);
+        relay.register_group(gid_b, creator_b.address(), 4).unwrap();
+        // B's creator adds A's creator as an ordinary member of B (so the rejection below
+        // is the AUTH check, not the membership check).
+        relay
+            .onboard(
+                gid_b,
+                creator_b.address(),
+                None,
+                creator_a.address(),
+                envelope(
+                    gid_b,
+                    creator_b.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w",
+                    &[creator_a.address()],
+                ),
+                b"rt".to_vec(),
+                5,
+            )
+            .unwrap();
+        // creator_a is a MEMBER of B but not B's creator → must be rejected.
+        let err = relay
+            .onboard(
+                gid_b,
+                creator_a.address(),
+                None,
+                victim.address(),
+                envelope(
+                    gid_b,
+                    creator_a.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w2",
+                    &[victim.address()],
+                ),
+                b"rt2".to_vec(),
+                6,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::NotAuthorized),
+            "creator of A must not be authorized in B, got {err:?}"
+        );
+        assert!(
+            !relay.group_members(&gid_b).unwrap().contains(&victim.address()),
+            "victim must NOT have entered group B's roster"
+        );
+    }
+
+    /// A plain member of a creator-owned group (not creator, not owner, no assertion) is
+    /// still rejected — the per-group-creator grant does not leak to other members.
+    #[test]
+    fn plain_member_of_a_creator_group_is_rejected() {
+        let owner = EthWallet::generate();
+        let creator = EthWallet::generate();
+        let member = EthWallet::generate();
+        let victim = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 1);
+        login(&mut relay, &creator, 2);
+        login(&mut relay, &member, 3);
+        let gid = GroupId([13; 32]);
+        relay.register_group(gid, creator.address(), 4).unwrap();
+        relay
+            .onboard(
+                gid,
+                creator.address(),
+                None,
+                member.address(),
+                envelope(
+                    gid,
+                    creator.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w",
+                    &[member.address()],
+                ),
+                b"rt".to_vec(),
+                5,
+            )
+            .unwrap();
+        let err = relay
+            .onboard(
+                gid,
+                member.address(),
+                None,
+                victim.address(),
+                envelope(
+                    gid,
+                    member.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w2",
+                    &[victim.address()],
+                ),
+                b"rt2".to_vec(),
+                6,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::NotAuthorized),
+            "a plain member (non-creator) must be rejected, got {err:?}"
+        );
+    }
+
+    /// Backward-compat fallback — a group whose persisted snapshot predates the `creator`
+    /// field (creator == None) authorizes ONLY the global owner, never a former creator,
+    /// and must not panic. Also proves an old 5-field snapshot deserializes to None.
+    #[test]
+    fn creator_none_falls_back_to_owner_only() {
+        // (a) An old on-disk snapshot (the exact 5 pre-change fields, no `creator`) must
+        // still deserialize — ciborium encodes structs as maps, so the missing key is
+        // filled by #[serde(default)] → None (this is the on-disk backward-compat path).
+        #[derive(serde::Serialize)]
+        struct OldSnapshot {
+            members: Vec<WalletAddress>,
+            current_epoch: u64,
+            next_seq: u64,
+            accepted_commit: Vec<(u64, [u8; 32])>,
+            ratchet_tree: Vec<u8>,
+        }
+        let old = OldSnapshot {
+            members: Vec::new(),
+            current_epoch: 0,
+            next_seq: 0,
+            accepted_commit: Vec::new(),
+            ratchet_tree: Vec::new(),
+        };
+        let bytes = canonical::to_vec(&old).unwrap();
+        let snap: GroupSnapshot = canonical::from_slice(&bytes).unwrap();
+        assert!(
+            snap.creator.is_none(),
+            "a pre-change snapshot must default creator to None (no decode error)"
+        );
+
+        // (b) A group with creator == None authorizes only the global owner.
+        let owner = EthWallet::generate();
+        let alice = EthWallet::generate(); // the would-be creator
+        let victim = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 1);
+        login(&mut relay, &alice, 2);
+        let gid = GroupId([14; 32]);
+        relay.register_group(gid, alice.address(), 3).unwrap();
+        // Alice (creator) adds the owner as a member, so we can show the owner path works
+        // under the fallback; then we simulate a pre-change group by clearing `creator`.
+        relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                owner.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w0",
+                    &[owner.address()],
+                ),
+                b"rt0".to_vec(),
+                4,
+            )
+            .unwrap();
+        relay.groups.get_mut(&gid).unwrap().creator = None;
+
+        // Alice (would-be creator, now None) is no longer authorized without an assertion.
+        let err = relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                victim.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w1",
+                    &[victim.address()],
+                ),
+                b"rt1".to_vec(),
+                5,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::NotAuthorized),
+            "creator=None must fall back to owner-only, got {err:?}"
+        );
+        // The global owner (a member) still can, under the fallback.
+        relay
+            .onboard(
+                gid,
+                owner.address(),
+                None,
+                victim.address(),
+                envelope(
+                    gid,
+                    owner.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"w2",
+                    &[victim.address()],
+                ),
+                b"rt2".to_vec(),
+                6,
+            )
+            .unwrap();
+        assert!(relay.group_members(&gid).unwrap().contains(&victim.address()));
     }
 
     /// CM2-B-A003 red→green — commit epochs MUST be contiguous. A member cannot
