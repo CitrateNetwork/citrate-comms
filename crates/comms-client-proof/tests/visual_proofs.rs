@@ -1,6 +1,6 @@
 //! Visual proof harness (PoC) — render the real client UI headless via
 //! `MinimalSoftwareWindow::take_snapshot()` and lock against committed golden PNGs.
-//! Mirrors `citrate-boeing-shell`'s `*_proof` pattern.
+//! Mirrors `citrate-defense_prime-shell`'s `*_proof` pattern.
 //!
 //! Regenerate goldens (then eyeball each against the design before committing):
 //!   COMMS_REGEN_GOLDENS=1 cargo test -p comms-client-proof --test visual_proofs
@@ -86,7 +86,7 @@ macro_rules! render_window {
 /// Render the real screens (with their design-time fixtures) headless across the
 /// responsiveness matrix → committed golden PNGs. ALL renders live in ONE test function:
 /// the software platform hosts one window lifecycle per process, so separate
-/// window-creating test fns would conflict (mirrors citrate-boeing-shell's single-lock).
+/// window-creating test fns would conflict (mirrors citrate-defense_prime-shell's single-lock).
 #[test]
 fn screen_goldens_across_sizes() {
     init_test_platform();

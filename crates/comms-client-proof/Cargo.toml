@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "citrate-comms visual proof harness — renders the client's Slint screens headless via MinimalSoftwareWindow::take_snapshot() to committed golden PNGs (COMMS-S5). Mirrors citrate-boeing-shell's *_proof pattern."
+description = "citrate-comms visual proof harness — renders the client's Slint screens headless via MinimalSoftwareWindow::take_snapshot() to committed golden PNGs (COMMS-S5). Mirrors citrate-defense_prime-shell's *_proof pattern."
 
 [dependencies]
 # Software renderer + a custom test Platform → headless PNG snapshots, no display.
