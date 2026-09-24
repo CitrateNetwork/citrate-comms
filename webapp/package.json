@@ -1,6 +1,7 @@
 {
   "name": "citrate-comms-web",
   "version": "0.1.0",
+  "license": "BUSL-1.1",
   "private": true,
   "description": "Trusted-tier web client for citrate-comms — agentic team workspace (Comms + CRM + PM). Authenticates via the citrate-identity OIDC spine; shares one workspace with the native app via the comms-web-gateway bridge.",
   "type": "module",
