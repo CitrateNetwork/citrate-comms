@@ -911,6 +911,13 @@ export function citrateCommsTools(ctx: ToolContext) {
         // internal services) — only escalate when static extraction was genuinely thin.
         if (page.blocked) return page;
         if (page.available && page.text.length > 200) return page;
+        // PBA-L3c-010: the runner's Playwright fetcher follows JS redirects and re-resolves
+        // DNS on its own, so the BFF's one-shot SSRF check does not cover it. Escalate only
+        // when the operator attests the runner enforces the private-address guard on EVERY
+        // request it makes (COMMS_RUNNER_FETCH_GUARDED=1); otherwise return the static result.
+        if (process.env.COMMS_RUNNER_FETCH_GUARDED !== "1") {
+          return page.available ? page : { url: a.url, title: "", text: "", available: false, note: page.note };
+        }
         try {
           const dyn = await webFetch(a.url);
           if (dyn && typeof dyn.text === "string" && dyn.text.length > 0) return { ...dyn, available: true };

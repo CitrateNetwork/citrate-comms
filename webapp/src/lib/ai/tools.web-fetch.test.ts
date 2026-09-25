@@ -51,11 +51,25 @@ describe("web.fetch SSRF escalation guard (CM2-B-B006)", () => {
     expect(res.available).toBe(false);
   });
 
-  it("DOES escalate to the runner when static extraction was merely thin", async () => {
+  it("does NOT escalate a thin page unless the runner is attested as SSRF-guarded (PBA-L3c-010)", async () => {
+    delete process.env.COMMS_RUNNER_FETCH_GUARDED;
     fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
     webFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
     const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { text: string };
-    expect(webFetch).toHaveBeenCalledOnce();
-    expect(res.text).toBe("the full dynamic body");
+    expect(webFetch).not.toHaveBeenCalled();
+    expect(res.text).toBe("short");
+  });
+
+  it("DOES escalate a thin page when COMMS_RUNNER_FETCH_GUARDED=1", async () => {
+    process.env.COMMS_RUNNER_FETCH_GUARDED = "1";
+    try {
+      fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
+      webFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
+      const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { text: string };
+      expect(webFetch).toHaveBeenCalledOnce();
+      expect(res.text).toBe("the full dynamic body");
+    } finally {
+      delete process.env.COMMS_RUNNER_FETCH_GUARDED;
+    }
   });
 });
