@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { Capability, requireCapability } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { documentFinalizeSchema } from "@/lib/validation/schemas";
-import { recordExists } from "@/lib/domain/crm";
-import { ingestDocument } from "@/lib/domain/documents";
+import { ingestDocument, badDocScope } from "@/lib/domain/documents";
 import { ingestTable } from "@/lib/domain/import-store";
 import { isTabularFile, summarizeParsed, parseWorkbook } from "@/lib/domain/import-parse";
-import { isParseable, MAX_PARSE_BYTES } from "@/lib/attachments";
+import { isAllowed, isParseable, MAX_PARSE_BYTES } from "@/lib/attachments";
+import { isOwnBlobUrl } from "@/lib/security/blob-host";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -16,7 +16,7 @@ export const maxDuration = 120;
  * within the parse cap) fetch it back, extract + encrypt text, and embed chunks for RAG.
  * Images/video are recorded as metadata only. Member+ (CreateRecord).
  *
- * SSRF guard: only Vercel Blob URLs are fetched server-side.
+ * SSRF guard: only this deployment's Blob store is fetched server-side (PBA-L3c-009).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -26,17 +26,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
     const { blobUrl, name, mime, accountId, dealId, channelId } = parsed.data;
 
-    // Only ever fetch Vercel Blob URLs (no arbitrary server-side fetch).
-    let host = "";
-    try {
-      host = new URL(blobUrl).hostname;
-    } catch {
-      return NextResponse.json({ error: "bad_url" }, { status: 400 });
-    }
-    if (!host.endsWith(".blob.vercel-storage.com")) return NextResponse.json({ error: "bad_host" }, { status: 400 });
+    // PBA-L3c-009: only ever fetch/record objects of THIS deployment's Blob store — not
+    // any *.blob.vercel-storage.com host (an attacker's own store would be proxied).
+    if (!isOwnBlobUrl(blobUrl)) return NextResponse.json({ error: "bad_host" }, { status: 400 });
 
-    if (accountId && !(await recordExists(id, "account", accountId))) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    if (dealId && !(await recordExists(id, "deal", dealId))) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    // PBA-L3c-027: file type allowlist + every scope id must be THIS workspace's (and the
+    // uploader must be seated in a channel they attach to).
+    if (!isAllowed(name, mime ?? null)) return NextResponse.json({ error: "unsupported_type" }, { status: 415 });
+    const bad = await badDocScope(id, ctx.sub, { accountId: accountId ?? null, dealId: dealId ?? null, channelId: channelId ?? null });
+    if (bad) return NextResponse.json({ error: bad }, { status: bad === "bad_scope" ? 400 : 404 });
 
     // Parseable docs (within the cap) → fetch + parse for RAG. Media → metadata only.
     let buffer: Buffer | undefined;

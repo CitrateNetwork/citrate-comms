@@ -222,7 +222,7 @@ export function RecordFile({
                 {file.documents.map((d) => (
                   <Attachment
                     key={d.id}
-                    item={{ id: d.id, name: d.name, mime: d.mime, url: d.blobUrl, downloadUrl: `/api/workspaces/${workspaceId}/documents/${d.id}/download` }}
+                    item={{ id: d.id, name: d.name, mime: d.mime, url: d.blobUrl ? `/api/workspaces/${workspaceId}/documents/${d.id}/download?inline=1` : "", downloadUrl: `/api/workspaces/${workspaceId}/documents/${d.id}/download` }}
                   />
                 ))}
               </div>
