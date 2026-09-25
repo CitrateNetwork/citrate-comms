@@ -32,7 +32,7 @@ import { fetchReadable } from "@/lib/research/fetch";
 import type { CrmEntity } from "@/lib/domain/crm-enums";
 import { getMemoryStore, neonMemoryStore, crmRepo, type TrustTier } from "@/lib/memory";
 import { logToolCall, finishToolCall, type ToolAuditCtx } from "./audit";
-import type { ToolName } from "./personas";
+import { HITL_TOOLS, type ToolName } from "./personas";
 
 export interface ToolContext {
   workspaceId: string;
@@ -703,7 +703,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         // outside channel replies). In a channel reply the output goes to everyone seated,
         // so details additionally require EVERY seated member to be a participant;
         // everything else is busy-only.
-        const readers = ctx.audience ? ctx.audience.map((r) => r.sub) : null;
+        // Active agent seats (incl. the replying agent) don't count: human readers decide.
+        const readers = ctx.audience ? ctx.audience.filter((r) => !r.agent).map((r) => r.sub) : null;
         const invokerSees = (e: (typeof events)[number]) =>
           e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub) || (!readers && isAdminRole(invokerRole));
         const detailed = (e: (typeof events)[number]) => invokerSees(e) && (!readers || everyReaderParticipates(e, readers));
@@ -1014,9 +1015,10 @@ export function citrateCommsTools(ctx: ToolContext) {
   // Filter to the persona allow-list (if provided) AND to what the caller may use — a
   // tool the (agent, invoker) pair is not permitted is never offered (PBA-L3c-002).
   // A reply read by a channel audience never gets the open-web tools (a URL is an exfil
-  // path), regardless of the caller's allow-list — enforced here, not only by callers.
+  // path) or the HITL write/propose tools (read-only posture), regardless of the caller's
+  // allow-list — enforced here, not only by callers.
   const entries = Object.entries(all).filter(
-    ([key]) => (!ctx.allow || ctx.allow.has(key as ToolName)) && permitted(key as ToolName) && !(ctx.audience && CHANNEL_REPLY_DENY.includes(key)),
+    ([key]) => (!ctx.allow || ctx.allow.has(key as ToolName)) && permitted(key as ToolName) && !(ctx.audience && (CHANNEL_REPLY_DENY.includes(key) || HITL_TOOLS.has(key as ToolName))),
   );
   return Object.fromEntries(entries) as Partial<typeof all>;
 }

@@ -30,11 +30,14 @@ import type { DocViewer } from "./documents";
  */
 export async function channelAudience(workspaceId: string, channelId: string): Promise<DocViewer[]> {
   const rows = await db()
-    .select({ sub: channelMembers.sub, role: members.role, status: members.status })
+    .select({ sub: channelMembers.sub, role: members.role, status: members.status, isAgent: members.isAgent })
     .from(channelMembers)
     .leftJoin(members, and(eq(members.workspaceId, channelMembers.workspaceId), eq(members.sub, channelMembers.sub)))
     .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)));
-  return rows.map((r) => ({ sub: r.sub, internal: r.status === "active" && Boolean(r.role) && isInternalRole(r.role as Role) }));
+  return rows.map((r) => {
+    const active = r.status === "active" && Boolean(r.role);
+    return { sub: r.sub, internal: active && isInternalRole(r.role as Role), agent: active && r.role === "Agent" && r.isAgent === true };
+  });
 }
 
 /** The tool scope for an agent reply into `channelId`: the audience, and the invoker role

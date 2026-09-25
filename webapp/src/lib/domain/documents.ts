@@ -43,6 +43,9 @@ export interface DocViewer {
   sub: string;
   /** Holds ReadWorkspace (Owner/Admin/Member/Agent). */
   internal: boolean;
+  /** An ACTIVE agent seat (set by channelAudience). Agents don't read a channel the way
+   *  humans do, so human readers decide calendar-participation rules. */
+  agent?: boolean;
 }
 
 /** Visible to EVERY viewer in the set (an audience) — the AND of documentVisibleTo. */

@@ -11,7 +11,7 @@ import { documents, documentChunks, calendarEvents, eventAttendees, channelMembe
 import { createWorkspace } from "@/lib/domain/workspaces";
 import { createChannel, addChannelMembers } from "@/lib/domain/channels";
 import { agentReplyScope, replyScopeStillValid, CHANNEL_REPLY_DENY, channelReplyAllow } from "@/lib/domain/channel-agent";
-import { ALL_TOOL_NAMES } from "@/lib/ai/personas";
+import { ALL_TOOL_NAMES, HITL_TOOLS } from "@/lib/ai/personas";
 import { listDocuments } from "@/lib/domain/documents";
 import { listMessages, sendMessage } from "@/lib/domain/messages";
 import { postAndPinCalendarSummary, everyReaderParticipates } from "@/lib/domain/calendar";
@@ -168,5 +168,38 @@ describe("pass-4: invoker visibility AND whole-audience participation", () => {
     // outside a channel reply (1:1 chat / MCP) bob may still summarize a channel he's in
     const solo = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("bob"), agentRole: "Agent", invokerRole: "Member", audit: false }) as unknown as T;
     expect(JSON.stringify(await solo["thread.summarize"]!.execute({ channelId: lead, limit: 20 }))).toContain(`LEAD-ONLY ${run}`);
+  });
+});
+
+describe("pass-5: agent seats don't block calendar details; registry is read-only under an audience", () => {
+  it("alice+bob+agent channel shows the alice/bob event in full; a non-participant human forces busy-only", async () => {
+    await addMember(ws, "agent1", "Agent");
+    await addMember(ws, "carol", "Member");
+    const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: `ab-agent-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob"), sub("agent1")] })).id;
+    const start = new Date(Date.now() + 86400_000);
+    const [ev] = await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, `ab sync ${run}`), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning();
+    await db().insert(eventAttendees).values({ workspaceId: ws, eventId: ev!.id, sub: sub("bob") } as never);
+    expect(JSON.stringify(await (await tools("alice", ch))["calendar.read"]!.execute({}))).toContain(`ab sync ${run}`);
+    // the pinned summary follows the same rule (the pinning agent is seated)
+    await postAndPinCalendarSummary(ws, ch, sub("agent1"), 7);
+    expect((await listMessages(ws, ch)).map((m) => m.body).join("\n")).toContain(`ab sync ${run}`);
+    // an INACTIVE agent seat is not exempt: it counts as external -> Partner scope, no calendar at all (fail closed)
+    await db().update(members).set({ status: "offboarded" }).where(and(eq(members.workspaceId, ws), eq(members.sub, sub("agent1"))));
+    expect((await tools("alice", ch))["calendar.read"]).toBeUndefined();
+    await db().update(members).set({ status: "active" }).where(and(eq(members.workspaceId, ws), eq(members.sub, sub("agent1"))));
+    // a seated human who isn't a participant forces busy-only again
+    await addChannelMembers(ws, ch, [sub("carol")]);
+    const txt = JSON.stringify(await (await tools("alice", ch))["calendar.read"]!.execute({}));
+    expect(txt).not.toContain(`ab sync ${run}`);
+    expect(txt).toContain("busy");
+  });
+
+  it("with an audience set, the registry withholds HITL write tools and web.* even if the caller allows them", () => {
+    const allow = new Set(["crm.write", "terminal.exec", "calendar.schedule", "web.fetch", "crm.read"] as never[]);
+    const scoped = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("alice"), agentRole: "Agent", invokerRole: "Member", audience: [{ sub: sub("alice"), internal: true }], allow: allow as never, audit: false });
+    expect(Object.keys(scoped)).toEqual(["crm.read"]);
+    const full = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("alice"), agentRole: "Agent", invokerRole: "Member", audit: false });
+    for (const t of HITL_TOOLS) if (t in (full as object)) expect(Object.keys(citrateCommsTools({ workspaceId: ws, invokedBySub: sub("alice"), agentRole: "Agent", invokerRole: "Member", audience: [{ sub: sub("alice"), internal: true }] }))).not.toContain(t);
+    expect(Object.keys(full)).toContain("crm.write"); // unchanged outside channel replies
   });
 });

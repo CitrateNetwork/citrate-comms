@@ -589,7 +589,16 @@ export async function postAndPinCalendarSummary(workspaceId: string, channelId: 
   const all = await listWorkspaceEventsInRange(workspaceId, now.toISOString(), to.toISOString());
   // A summary posted INTO a channel is read by everyone seated there, so it may only
   // describe events that EVERY seated member is a participant of (organizer or attendee).
-  const seated = (await db().select({ sub: channelMembers.sub }).from(channelMembers).where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)))).map((r) => r.sub);
+  // Active agent seats (incl. the pinning agent) don't count: human readers decide.
+  const seated = (
+    await db()
+      .select({ sub: channelMembers.sub, role: members.role, status: members.status, isAgent: members.isAgent })
+      .from(channelMembers)
+      .leftJoin(members, and(eq(members.workspaceId, channelMembers.workspaceId), eq(members.sub, channelMembers.sub)))
+      .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)))
+  )
+    .filter((r) => !(r.status === "active" && r.role === "Agent" && r.isAgent === true))
+    .map((r) => r.sub);
   const events = all.filter((e) => everyReaderParticipates(e, seated));
   const msg = await sendMessage({ workspaceId, channelId, authorSub: agentSub, body: renderSummary(events, days), fromAgent: true });
   // retire the agent's previous summary pin(s) in this channel, then pin the fresh one
