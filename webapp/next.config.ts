@@ -3,8 +3,9 @@ import type { NextConfig } from "next";
 /**
  * Static, request-independent security headers. The CSP carries a per-request
  * nonce and is applied in `src/proxy.ts` from `src/lib/security/csp.ts`
- * (script-src is `'nonce-…' 'strict-dynamic'`, never `'unsafe-inline'`). Pattern
- * ported from citrate-dataroom (SECREM-02 / FUA-EXPLORER-04).
+ * (script-src is `'nonce-…' 'strict-dynamic'`, never `'unsafe-inline'` or
+ * `'unsafe-eval'`). Pattern ported from citrate-dataroom (SECREM-02 / FUA-EXPLORER-04).
+ * PBA-L3c-008: csp.ts now exists and proxy.test.ts asserts the header is emitted.
  */
 const securityHeaders = [
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
