@@ -16,7 +16,7 @@ import { agentResources, agentConfigGrants, members } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { can, Capability, isInternalRole, type Role } from "@/lib/rbac/matrix";
-import { documents } from "@/lib/db/schema";
+import { getVisibleDocument } from "./documents";
 import { assertPersonaInWorkspace, personaInWorkspace } from "./persona-scope";
 
 // ── Resources ────────────────────────────────────────────────────────────────
@@ -79,14 +79,10 @@ export async function addResource(
     values.url = u.slice(0, 2000);
   } else if (input.kind === "document") {
     if (!input.documentId) return null;
-    // PBA-L3c-027: the pinned document must belong to THIS workspace.
-    if (!/^[0-9a-f-]{36}$/i.test(input.documentId)) return null;
-    const [doc] = await db()
-      .select({ id: documents.id })
-      .from(documents)
-      .where(and(eq(documents.workspaceId, workspaceId), eq(documents.id, input.documentId)))
-      .limit(1);
-    if (!doc) return null;
+    // PBA-L3c-027 + verifier: the pinned document must be one of THIS workspace's that
+    // the configurer can see (no existence oracle for DM/private-channel files).
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.documentId)) return null;
+    if (!(await getVisibleDocument(workspaceId, input.documentId, { sub: by, internal: true }))) return null;
     values.documentId = input.documentId;
   } else {
     return null;
