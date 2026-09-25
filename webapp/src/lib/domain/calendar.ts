@@ -12,11 +12,12 @@
  */
 import { and, asc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { calendarEvents, eventAttendees, eventReminders, members, workspaces, notifications } from "@/lib/db/schema";
+import { calendarEvents, eventAttendees, eventReminders, members, workspaces, notifications, channelMembers } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { sendCalendarEmail } from "@/lib/email/send";
 import { emitNotify, toNotificationEvent } from "@/lib/realtime/notify-events";
 import { sendMessage, setMessagePinned, listPinnedMessages } from "./messages";
+import { isAdminRole, type Role } from "@/lib/rbac/matrix";
 
 export type RaciRole = "R" | "A" | "C" | "I";
 export type EventKind = "meeting" | "deadline" | "focus" | "external";
@@ -343,6 +344,20 @@ export async function listWorkspaceEventsInRange(workspaceId: string, fromISO: s
   return hydrate(workspaceId, rows);
 }
 
+/**
+ * Event read authority (PBA-L3c-007): the organizer, an attendee, or a workspace
+ * Owner/Admin. Mirrors listEventsInRange's attendee scoping so the item route never
+ * reveals what the list hides.
+ */
+export function canSeeEvent(ev: Pick<CalendarEvent, "createdBySub" | "attendees">, sub: string, role: Role): boolean {
+  return isAdminRole(role) || ev.createdBySub === sub || ev.attendees.some((a) => a.sub === sub);
+}
+
+/** Event write authority (PBA-L3c-007): the organizer or a workspace Owner/Admin. */
+export function canEditEvent(ev: Pick<CalendarEvent, "createdBySub">, sub: string, role: Role): boolean {
+  return isAdminRole(role) || ev.createdBySub === sub;
+}
+
 /** A single event with attendees (workspace-scoped; caller membership checked upstream). */
 export async function getEvent(workspaceId: string, eventId: string): Promise<CalendarEvent | null> {
   const rows = await db()
@@ -379,8 +394,9 @@ export async function updateEvent(workspaceId: string, eventId: string, patch: U
   await db().update(calendarEvents).set(set).where(and(eq(calendarEvents.workspaceId, workspaceId), eq(calendarEvents.id, eventId)));
 
   if (patch.startsAt !== undefined) {
-    const [ev] = await db().select({ startsAt: calendarEvents.startsAt }).from(calendarEvents).where(eq(calendarEvents.id, eventId)).limit(1);
-    const subs = (await db().select({ sub: eventAttendees.sub }).from(eventAttendees).where(eq(eventAttendees.eventId, eventId))).map((a) => a.sub);
+    // PBA-L3c-035: the re-read is workspace-scoped like every other event query.
+    const [ev] = await db().select({ startsAt: calendarEvents.startsAt }).from(calendarEvents).where(and(eq(calendarEvents.workspaceId, workspaceId), eq(calendarEvents.id, eventId))).limit(1);
+    const subs = (await db().select({ sub: eventAttendees.sub }).from(eventAttendees).where(and(eq(eventAttendees.workspaceId, workspaceId), eq(eventAttendees.eventId, eventId)))).map((a) => a.sub);
     if (ev) await scheduleReminders(workspaceId, eventId, ev.startsAt, subs);
   }
 }
@@ -562,7 +578,15 @@ function renderSummary(events: CalendarEvent[], days: number): string {
 export async function postAndPinCalendarSummary(workspaceId: string, channelId: string, agentSub: string, days = 7): Promise<{ messageId: string; events: number }> {
   const now = new Date();
   const to = new Date(now.getTime() + days * 86400_000);
-  const events = await listWorkspaceEventsInRange(workspaceId, now.toISOString(), to.toISOString());
+  const all = await listWorkspaceEventsInRange(workspaceId, now.toISOString(), to.toISOString());
+  // PBA-L3c-007 (variant): a summary posted INTO a channel may only describe events that
+  // belong to that channel's audience — tied to the channel, or whose organizer and
+  // every attendee are seated in it. Private events of other people never leak into a
+  // shared channel through the pin.
+  const seated = new Set(
+    (await db().select({ sub: channelMembers.sub }).from(channelMembers).where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)))).map((r) => r.sub),
+  );
+  const events = all.filter((e) => e.channelId === channelId || (seated.has(e.createdBySub) && e.attendees.every((a) => seated.has(a.sub))));
   const msg = await sendMessage({ workspaceId, channelId, authorSub: agentSub, body: renderSummary(events, days), fromAgent: true });
   // retire the agent's previous summary pin(s) in this channel, then pin the fresh one
   const pinned = await listPinnedMessages(workspaceId, channelId);

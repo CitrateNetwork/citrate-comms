@@ -674,25 +674,33 @@ export function citrateCommsTools(ctx: ToolContext) {
         fromISO: z.string().datetime({ offset: true }).optional().describe("window start (ISO); default: now"),
         toISO: z.string().datetime({ offset: true }).optional().describe("window end (ISO); default: 30 days out"),
       }),
-      execute: audited("calendar.read", Capability.ReadChannel, async (a: { fromISO?: string; toISO?: string }) => {
+      execute: audited("calendar.read", async (a: { fromISO?: string; toISO?: string }) => {
         const now = new Date();
         const from = a.fromISO ?? now.toISOString();
         const to = a.toISO ?? new Date(now.getTime() + 30 * 86400_000).toISOString();
         const events = await listWorkspaceEventsInRange(ctx.workspaceId, from, to);
+        // PBA-L3c-007: the team calendar is free/busy for events the invoker neither
+        // created nor attends (unless an Owner/Admin) — the slot is visible for
+        // scheduling, the title/location/attendees are not.
+        const seesAll = isAdminRole(invokerRole);
         return {
           window: { from, to },
           count: events.length,
-          events: events.slice(0, 200).map((e) => ({
-            id: e.id,
-            title: e.title,
-            kind: e.kind,
-            startsAt: e.startsAt,
-            endsAt: e.endsAt,
-            allDay: e.allDay,
-            timezone: e.timezone,
-            location: e.location,
-            attendees: e.attendees.map((at) => ({ sub: at.sub, raci: at.raciRole, rsvp: at.response })),
-          })),
+          events: events.slice(0, 200).map((e) =>
+            seesAll || e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub)
+              ? {
+                  id: e.id,
+                  title: e.title,
+                  kind: e.kind,
+                  startsAt: e.startsAt,
+                  endsAt: e.endsAt,
+                  allDay: e.allDay,
+                  timezone: e.timezone,
+                  location: e.location,
+                  attendees: e.attendees.map((at) => ({ sub: at.sub, raci: at.raciRole, rsvp: at.response })),
+                }
+              : { busy: true, startsAt: e.startsAt, endsAt: e.endsAt, allDay: e.allDay, timezone: e.timezone },
+          ),
         };
       }),
     }),
