@@ -15,7 +15,7 @@ import { db } from "@/lib/db/client";
 import { invites, members, workspaces, channels, channelMembers } from "@/lib/db/schema";
 import { hashToken } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
-import type { Role } from "@/lib/rbac/matrix";
+import { can, canGrant, Capability, type Role } from "@/lib/rbac/matrix";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -77,15 +77,51 @@ type Db = Pick<ReturnType<typeof db>, "select">;
  * DM must not be able to mint an invite that seats anyone — themself or a sock-puppet —
  * into it).
  */
-export async function scopeChannelAllowed(workspaceId: string, channelId: string, inviterSub: string, d: Db = db()): Promise<boolean> {
+export async function scopeChannelAllowed(
+  workspaceId: string,
+  channelId: string,
+  inviterSub: string,
+  d: Db = db(),
+  opts: { lock?: boolean } = {},
+): Promise<boolean> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(channelId)) return false;
-  const [c] = await d
+  const q = d
     .select({ kind: channels.kind, seat: channelMembers.sub })
     .from(channels)
     .innerJoin(channelMembers, and(eq(channelMembers.channelId, channels.id), eq(channelMembers.sub, inviterSub)))
     .where(and(eq(channels.workspaceId, workspaceId), eq(channels.id, channelId)))
     .limit(1);
+  // At redemption (inside the claim transaction) the channel row and the inviter's seat
+  // are locked FOR SHARE, so a concurrent kind change or un-seating can't slip between
+  // this check and the seat insert (verifier pass 2).
+  const [c] = opts.lock ? await q.for("share") : await q;
   return Boolean(c) && c!.kind !== "dm";
+}
+
+/**
+ * Is the inviter STILL entitled to have issued this invite (verifier pass 2)? An active
+ * member of the workspace whose current role holds AddMember and may grant the invited
+ * role. Checked at redemption so an offboarded or demoted inviter's pending invites die.
+ */
+async function inviterStillEntitled(d: Db, workspaceId: string, inviterSub: string, invitedRole: Role): Promise<boolean> {
+  const [m] = await d
+    .select({ role: members.role, status: members.status })
+    .from(members)
+    .where(and(eq(members.workspaceId, workspaceId), eq(members.sub, inviterSub)))
+    .limit(1);
+  if (!m || m.status !== "active") return false;
+  const role = m.role as Role;
+  return can(role, Capability.AddMember) && canGrant(role, invitedRole);
+}
+
+/** Revoke (expire now) every pending invite a member issued — called on offboard. */
+export async function revokePendingInvitesBy(workspaceId: string, inviterSub: string): Promise<number> {
+  const rows = await db()
+    .update(invites)
+    .set({ expiresAt: new Date() })
+    .where(and(eq(invites.workspaceId, workspaceId), eq(invites.invitedBySub, inviterSub), isNull(invites.acceptedAt), gt(invites.expiresAt, new Date())))
+    .returning({ tokenHash: invites.tokenHash });
+  return rows.length;
 }
 
 /** Resolve a raw invite token to its (unexpired, unaccepted) details, or null. */
@@ -160,6 +196,10 @@ export async function acceptInvite(args: {
       .where(and(eq(invites.tokenHash, tokenHash), isNull(invites.acceptedAt), gt(invites.expiresAt, new Date())))
       .returning({ workspaceId: invites.workspaceId, email: invites.email, role: invites.role, scopeChannelId: invites.scopeChannelId, invitedBySub: invites.invitedBySub });
     if (!invite) return null;
+    // Verifier pass 2: an invite is only as good as its issuer's CURRENT standing. An
+    // offboarded/demoted inviter's pending invite is burned (the claim above commits) and
+    // admits nobody.
+    if (!(await inviterStillEntitled(tx, invite.workspaceId, invite.invitedBySub, invite.role as Role))) return "revoked" as const;
 
     // Contact email for the member row = their real verified email if we have one,
     // else the address the invite was sent to (best-effort for display/contact).
@@ -198,7 +238,7 @@ export async function acceptInvite(args: {
     // an identity that was already an active member is never seated through an invite,
     // and the scope is re-checked at redemption (non-DM, inviter still seated), so an
     // invite can't be used to walk into a channel the inviter can't see.
-    if (invite.scopeChannelId && !alreadyMember && (await scopeChannelAllowed(invite.workspaceId, invite.scopeChannelId, invite.invitedBySub, tx))) {
+    if (invite.scopeChannelId && !alreadyMember && (await scopeChannelAllowed(invite.workspaceId, invite.scopeChannelId, invite.invitedBySub, tx, { lock: true }))) {
       await tx
         .insert(channelMembers)
         .values({ workspaceId: invite.workspaceId, channelId: invite.scopeChannelId, sub: args.sub })
@@ -207,7 +247,7 @@ export async function acceptInvite(args: {
     return { workspaceId: invite.workspaceId, alreadyMember, memberEmail };
   });
 
-  if (!result) return { ok: false, reason: "invalid" };
+  if (!result || result === "revoked") return { ok: false, reason: "invalid" };
   if (!result.alreadyMember) {
     await appendAudit({ workspaceId: result.workspaceId, actorSub: args.sub, event: "member_joined", target: result.memberEmail });
   }

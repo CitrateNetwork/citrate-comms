@@ -6,6 +6,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { members, roleAssertions } from "@/lib/db/schema";
 import { appendAudit } from "@/lib/audit/chain";
+import { revokePendingInvitesBy } from "./invites";
 import type { Role } from "@/lib/rbac/matrix";
 
 export interface MemberRow {
@@ -86,6 +87,8 @@ export async function offboard(workspaceId: string, subjectSub: string, actorSub
     .update(roleAssertions)
     .set({ revokedAt: new Date() })
     .where(and(eq(roleAssertions.workspaceId, workspaceId), eq(roleAssertions.subjectSub, subjectSub), isNull(roleAssertions.revokedAt)));
+  // Verifier pass 2: an offboarded member's pending invites die with their access.
+  await revokePendingInvitesBy(workspaceId, subjectSub);
   await appendAudit({ workspaceId, actorSub, event: "member_offboarded", target: subjectSub });
 }
 
