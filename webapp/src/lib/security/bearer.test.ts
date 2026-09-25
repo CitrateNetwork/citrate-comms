@@ -15,3 +15,12 @@ describe("bearerMatches — constant-time machine-route auth (PBA-L3c-035)", () 
     expect(bearerMatches("Bearer x", undefined)).toBe(false);
   });
 });
+
+describe("bearerMatches — scheme parsing (mutation hardening)", () => {
+  it("anchors the scheme and tolerates extra whitespace", () => {
+    expect(bearerMatches("xBearer s3cret", "s3cret")).toBe(false);
+    expect(bearerMatches("s3cretBearer ", "s3cret")).toBe(false);
+    expect(bearerMatches("Bearer  s3cret", "s3cret")).toBe(true);
+    expect(bearerMatches("Bearer\ts3cret", "s3cret")).toBe(true);
+  });
+});

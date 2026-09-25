@@ -23,3 +23,10 @@ describe("Blob host pinning (PBA-L3c-009)", () => {
     expect(configuredBlobHost({ BLOB_READ_WRITE_TOKEN: "garbage" })).toBeNull();
   });
 });
+
+describe("Blob host pinning — token parsing (mutation hardening)", () => {
+  it("requires the token to START with the read-write prefix", () => {
+    expect(configuredBlobHost({ BLOB_READ_WRITE_TOKEN: "xvercel_blob_rw_Abc_s" })).toBeNull();
+    expect(configuredBlobHost({ BLOB_READ_WRITE_TOKEN: "vercel_blob_ro_Abc_s" })).toBeNull();
+  });
+});

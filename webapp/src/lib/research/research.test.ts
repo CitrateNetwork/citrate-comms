@@ -224,3 +224,30 @@ describe("RES — node:http transport plumbing (PBA-L3c-025)", () => {
     await new Promise<void>((r) => srv.close(() => r()));
   });
 });
+
+describe("RES — SSRF guard boundaries (PBA-L3c-025 mutation hardening)", () => {
+  it("addresses NEXT TO the refused prefixes stay public", () => {
+    for (const ip of ["2606:ff9b::1", "64:ff9a::1", "2606:0:1::1", "2606:db8::1", "2001:1::1", "100:0:0:1::1", "100:1::1", "2003::1", "2606::1", "2a00::1"]) {
+      expect(isPrivateIp(ip), ip).toBe(false);
+    }
+  });
+
+  it("the connect-time lookup asks for ALL addresses, passes resolver errors through, and refuses an empty answer", async () => {
+    const seen: unknown[] = [];
+    const strict = makeGuardedLookup((_h, o, cb) => {
+      seen.push(o);
+      cb(null, [{ address: "93.184.216.34", family: 4 }]);
+    });
+    await new Promise((res) => strict("x.test", undefined as never, (_e, a) => res(a)));
+    expect(seen).toEqual([{ all: true }]);
+    const dnsErr = Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
+    const failing = makeGuardedLookup((_h, _o, cb) => cb(dnsErr, []));
+    await expect(new Promise((res, rej) => failing("x.test", {}, (e, a) => (e ? rej(e) : res(a))))).rejects.toBe(dnsErr);
+    const empty = makeGuardedLookup((_h, _o, cb) => cb(null, []));
+    await expect(new Promise((res, rej) => empty("x.test", {}, (e, a) => (e ? rej(e) : res(a))))).rejects.toThrow("host did not resolve");
+    const priv = makeGuardedLookup((_h, _o, cb) => cb(null, [{ address: "10.1.2.3", family: 4 }]));
+    await expect(new Promise((res, rej) => priv("x.test", {}, (e, a) => (e ? rej(e) : res(a))))).rejects.toThrow("resolves to a private address");
+    const fam = await new Promise<number | undefined>((res) => strict("x.test", 4 as never, (_e, _a, f) => res(f)));
+    expect(fam).toBe(4);
+  });
+});
