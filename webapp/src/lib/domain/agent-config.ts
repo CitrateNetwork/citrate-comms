@@ -15,7 +15,9 @@ import { db } from "@/lib/db/client";
 import { agentResources, agentConfigGrants, members } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
-import { can, Capability, type Role } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole, type Role } from "@/lib/rbac/matrix";
+import { documents } from "@/lib/db/schema";
+import { assertPersonaInWorkspace, personaInWorkspace } from "./persona-scope";
 
 // ── Resources ────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,7 @@ export async function addResource(
   input: { kind: ResourceKind; title: string; content?: string; url?: string; documentId?: string },
   by: string,
 ): Promise<string | null> {
+  await assertPersonaInWorkspace(workspaceId, personaId); // PBA-L3c-001
   const title = input.title.trim().slice(0, 200) || "Untitled";
   const values: typeof agentResources.$inferInsert = {
     workspaceId,
@@ -76,6 +79,14 @@ export async function addResource(
     values.url = u.slice(0, 2000);
   } else if (input.kind === "document") {
     if (!input.documentId) return null;
+    // PBA-L3c-027: the pinned document must belong to THIS workspace.
+    if (!/^[0-9a-f-]{36}$/i.test(input.documentId)) return null;
+    const [doc] = await db()
+      .select({ id: documents.id })
+      .from(documents)
+      .where(and(eq(documents.workspaceId, workspaceId), eq(documents.id, input.documentId)))
+      .limit(1);
+    if (!doc) return null;
     values.documentId = input.documentId;
   } else {
     return null;
@@ -181,6 +192,8 @@ export async function listConfigGrants(workspaceId: string): Promise<ConfigGrant
 
 /** Grant config rights (idempotent on (grantee, personaId)). personaId null = all personas. */
 export async function grantConfig(workspaceId: string, granteeSub: string, personaId: string | null, by: string): Promise<void> {
+  // PBA-L3c-001: a grant can only name a persona of THIS workspace.
+  if (personaId !== null) await assertPersonaInWorkspace(workspaceId, personaId);
   const dupe = await db()
     .select({ id: agentConfigGrants.id })
     .from(agentConfigGrants)
@@ -203,12 +216,16 @@ export async function revokeConfig(workspaceId: string, grantId: string, by: str
 }
 
 /**
- * The single config-rights authority. Admins (ManageWorkspace) always pass. Otherwise the
- * member must hold a grant covering this persona — either a workspace-wide grant
- * (personaId null) or one specifically for this persona.
+ * The single config-rights authority. The persona must belong to THIS workspace
+ * (PBA-L3c-001 — an Owner of workspace X holds ManageWorkspace only over X's personas).
+ * Admins (ManageWorkspace) then pass. Otherwise the member must be INTERNAL (PBA-L3c-002)
+ * and hold a grant covering this persona — either a workspace-wide grant (personaId
+ * null) or one specifically for this persona.
  */
 export async function canConfigurePersona(workspaceId: string, sub: string, role: Role, personaId: string): Promise<boolean> {
+  if (!(await personaInWorkspace(workspaceId, personaId))) return false;
   if (can(role, Capability.ManageWorkspace)) return true;
+  if (!isInternalRole(role)) return false;
   const [g] = await db()
     .select({ id: agentConfigGrants.id })
     .from(agentConfigGrants)

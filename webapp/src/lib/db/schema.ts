@@ -36,6 +36,7 @@ import {
   index,
   primaryKey,
   uniqueIndex,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 
 /** Embedding width for the gateway bge model (bge-large / bge-m3 → 1024 dims). */
@@ -508,6 +509,8 @@ export const agentPersonas = pgTable(
   (t) => [
     uniqueIndex("agent_personas_ws_key").on(t.workspaceId, t.key),
     index("agent_personas_ws").on(t.workspaceId),
+    // PBA-L3c-001: target of the (workspace_id, persona_id) composite FKs below.
+    uniqueIndex("agent_personas_ws_id").on(t.workspaceId, t.id),
   ],
 );
 
@@ -524,7 +527,11 @@ export const agentPrompts = pgTable(
     updatedBySub: text("updated_by_sub").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("agent_prompts_persona_layer").on(t.personaId, t.layer)],
+  (t) => [
+    uniqueIndex("agent_prompts_persona_layer").on(t.personaId, t.layer),
+    // PBA-L3c-001: a prompt row's persona must belong to the row's workspace.
+    foreignKey({ name: "agent_prompts_ws_persona_fk", columns: [t.workspaceId, t.personaId], foreignColumns: [agentPersonas.workspaceId, agentPersonas.id] }),
+  ],
 );
 
 /** Agentile skill bundles (rules + a workflow) a workspace enables per persona. */
@@ -538,7 +545,11 @@ export const agentSkills = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     configJson: jsonb("config_json"),
   },
-  (t) => [uniqueIndex("agent_skills_persona_skill").on(t.personaId, t.skillKey)],
+  (t) => [
+    uniqueIndex("agent_skills_persona_skill").on(t.personaId, t.skillKey),
+    // PBA-L3c-001: a skill row's persona must belong to the row's workspace.
+    foreignKey({ name: "agent_skills_ws_persona_fk", columns: [t.workspaceId, t.personaId], foreignColumns: [agentPersonas.workspaceId, agentPersonas.id] }),
+  ],
 );
 
 /** A chat thread between a human and an agent persona, scoped to a channel/deal. */
@@ -894,7 +905,11 @@ export const agentResources = pgTable(
     createdBySub: text("created_by_sub").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("agent_resources_persona").on(t.workspaceId, t.personaId)],
+  (t) => [
+    index("agent_resources_persona").on(t.workspaceId, t.personaId),
+    // PBA-L3c-001: a resource's persona must belong to the row's workspace.
+    foreignKey({ name: "agent_resources_ws_persona_fk", columns: [t.workspaceId, t.personaId], foreignColumns: [agentPersonas.workspaceId, agentPersonas.id] }),
+  ],
 );
 
 /** Config-rights delegation (CFG): an Owner/Admin grants a member the right to configure
@@ -910,7 +925,12 @@ export const agentConfigGrants = pgTable(
     grantedBySub: text("granted_by_sub").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("agent_config_grants_ws").on(t.workspaceId, t.granteeSub)],
+  (t) => [
+    index("agent_config_grants_ws").on(t.workspaceId, t.granteeSub),
+    // PBA-L3c-001: a persona-scoped grant must name a persona of the grant's workspace
+    // (NULL persona_id = all personas; MATCH SIMPLE leaves those unconstrained).
+    foreignKey({ name: "agent_config_grants_ws_persona_fk", columns: [t.workspaceId, t.personaId], foreignColumns: [agentPersonas.workspaceId, agentPersonas.id] }),
+  ],
 );
 
 // ── MEN-2: notifications (pings) ─────────────────────────────────────────────
