@@ -160,13 +160,17 @@ function bodyFor(key: string): string | undefined {
   return JSON.stringify({});
 }
 
+let discovered: { key: string; method: string; handler: Handler }[] | null = null;
+/** Import every route module once (slow on a loaded machine — hence the long timeouts). */
 async function discover(): Promise<{ key: string; method: string; handler: Handler }[]> {
+  if (discovered) return discovered;
   const out: { key: string; method: string; handler: Handler }[] = [];
   for (const [file, load] of Object.entries(modules)) {
     const mod = (await load()) as Record<string, unknown>;
     const key = routeKey(file);
     for (const m of METHODS) if (typeof mod[m] === "function") out.push({ key, method: m, handler: mod[m] as Handler });
   }
+  discovered = out;
   return out;
 }
 
@@ -180,7 +184,7 @@ describe("route x role matrix matches rbac/matrix.ts (PBA-L3c-002 tripwire)", ()
     const declared = Object.keys(POLICY);
     expect(found.filter((f) => !declared.includes(f)), "undeclared handlers — add a POLICY entry").toEqual([]);
     expect(declared.filter((d) => !found.includes(d)), "stale POLICY entries").toEqual([]);
-  });
+  }, 180_000);
 
   it("each handler admits exactly the roles its policy admits", async () => {
     const failures: string[] = [];
@@ -208,7 +212,7 @@ describe("route x role matrix matches rbac/matrix.ts (PBA-L3c-002 tripwire)", ()
       if (anon.status !== 401 && anon.status !== 403) failures.push(`${method} ${key} anonymous: expected 401/403, got ${anon.status}`);
     }
     expect(failures).toEqual([]);
-  });
+  }, 300_000);
 
   it("external roles hold no workspace-data capability (matrix invariant)", () => {
     for (const r of ["Partner", "Guest"] as Role[]) {

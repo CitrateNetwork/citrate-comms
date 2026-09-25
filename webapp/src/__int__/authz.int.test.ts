@@ -10,10 +10,11 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 
 const limitCalls: string[] = [];
+const limiter = { denyPrefix: null as string | null };
 vi.mock("@/lib/security/ratelimit", () => ({
   limit: async (key: string) => {
     limitCalls.push(key);
-    return { success: true, remaining: 99 };
+    return { success: !(limiter.denyPrefix && key.startsWith(limiter.denyPrefix)), remaining: 99 };
   },
   rateLimitConfigured: () => true,
 }));
@@ -26,7 +27,8 @@ import { createChannel } from "@/lib/domain/channels";
 import { listPersonas, seedDefaultPersonas, resolvePersona, setPromptLayer, setSkillEnabled } from "@/lib/domain/personas";
 import { addResource, grantConfig, canConfigurePersona } from "@/lib/domain/agent-config";
 import { createInvite, acceptInvite } from "@/lib/domain/invites";
-import { encryptField } from "@/lib/security/crypto";
+import { encryptField, hashToken } from "@/lib/security/crypto";
+import { personaInWorkspace } from "@/lib/domain/persona-scope";
 import { witness } from "@/lib/witness/ledger";
 
 import * as promptsRoute from "@/app/api/workspaces/[id]/personas/[personaId]/prompts/route";
@@ -413,5 +415,110 @@ describe("PBA-L3c-027 foreign ids are validated before they are persisted", () =
     const [foreignDoc] = await db().insert(documents).values({ workspaceId: attackerWs, blobUrl: "", name: "f.txt", mime: "text/plain", uploadedBySub: sub("mallory") }).returning();
     const id = await addResource(victimWs, victimPersonaId, { kind: "document", title: "x", documentId: foreignDoc!.id }, sub("vowner"));
     expect(id).toBeNull();
+  });
+});
+
+describe("mutation hardening — positive paths and edges of the new guards", () => {
+  it("persona binding: malformed ids are refused without touching the DB; workspace-wide grants still work", async () => {
+    expect(await personaInWorkspace(victimWs, "not-a-uuid")).toBe(false);
+    expect(await personaInWorkspace(victimWs, `${victimPersonaId}x`)).toBe(false);
+    expect(await personaInWorkspace(victimWs, `x${victimPersonaId}`)).toBe(false);
+    expect(await canConfigurePersona(victimWs, sub("vowner"), "Owner", "not-a-uuid")).toBe(false);
+    await expect(grantConfig(victimWs, sub("alice"), null, sub("vowner"))).resolves.toBeUndefined();
+  });
+
+  it("delegated config rights: an internal grantee may configure, an external grantee may not", async () => {
+    await grantConfig(victimWs, sub("bob"), victimPersonaId, sub("vowner"));
+    await grantConfig(victimWs, sub("partner"), victimPersonaId, sub("vowner"));
+    expect(await canConfigurePersona(victimWs, sub("bob"), "Member", victimPersonaId)).toBe(true);
+    expect(await canConfigurePersona(victimWs, sub("partner"), "Partner", victimPersonaId)).toBe(false);
+    expect(await canConfigurePersona(victimWs, sub("eve"), "Member", victimPersonaId)).toBe(false);
+  });
+
+  it("persona resources: own document/text/link pin fine; malformed document id is refused cleanly", async () => {
+    const [own] = await db().insert(documents).values({ workspaceId: victimWs, blobUrl: "", name: "own.txt", mime: "text/plain", uploadedBySub: sub("vowner") }).returning();
+    expect(await addResource(victimWs, victimPersonaId, { kind: "document", title: "d", documentId: own!.id }, sub("vowner"))).toBeTruthy();
+    expect(await addResource(victimWs, victimPersonaId, { kind: "document", title: "d", documentId: "nope" }, sub("vowner"))).toBeNull();
+    expect(await addResource(victimWs, victimPersonaId, { kind: "document", title: "d", documentId: `${own!.id}0` }, sub("vowner"))).toBeNull();
+    expect(await addResource(victimWs, victimPersonaId, { kind: "text", title: "t", content: "hello" }, sub("vowner"))).toBeTruthy();
+    expect(await addResource(victimWs, victimPersonaId, { kind: "link", title: "l", url: "https://example.com" }, sub("vowner"))).toBeTruthy();
+  });
+
+  it("calendar item route: a malformed event id is a clean 404, never a DB error", async () => {
+    const id = crypto.randomUUID();
+    for (const bad of [`${id}x`, `x${id}`, "nope"]) {
+      expect((await calEventRoute.GET(req(`/api/workspaces/${victimWs}/calendar/${bad}`, "vowner"), P({ id: victimWs, eventId: bad }))).status).toBe(404);
+    }
+  });
+
+  it("download proxy: forbidden body, text-only doc 404, download disposition + no-store", async () => {
+    const dm = await createChannel({ workspaceId: victimWs, kind: "dm", name: `m-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] });
+    const [d] = await db().insert(documents).values({ workspaceId: victimWs, channelId: dm.id, blobUrl: "https://store1.public.blob.vercel-storage.com/m.pdf", name: "m.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+    const f = await dlRoute.GET(req(`/api/workspaces/${victimWs}/documents/${d!.id}/download`, "eve"), P({ id: victimWs, docId: d!.id }));
+    expect(await f.json()).toEqual({ error: "forbidden" });
+    const nf = await dlRoute.GET(req(`/api/workspaces/${victimWs}/documents/${crypto.randomUUID()}/download`, "eve"), P({ id: victimWs, docId: crypto.randomUUID() }));
+    expect(nf.status).toBe(404);
+    expect(await nf.json()).toEqual({ error: "not_found" });
+    const ok = await dlRoute.GET(req(`/api/workspaces/${victimWs}/documents/${d!.id}/download`, "bob"), P({ id: victimWs, docId: d!.id }));
+    expect(ok.headers.get("location")).toBe("https://store1.public.blob.vercel-storage.com/m.pdf?download=1");
+    expect(ok.headers.get("cache-control")).toBe("private, no-store");
+    const [t] = await db().insert(documents).values({ workspaceId: victimWs, channelId: dm.id, blobUrl: "", name: "gen.md", mime: "text/markdown", uploadedBySub: sub("alice") }).returning();
+    expect((await dlRoute.GET(req(`/api/workspaces/${victimWs}/documents/${t!.id}/download`, "bob"), P({ id: victimWs, docId: t!.id }))).status).toBe(404);
+  });
+
+  it("MCP: an exhausted request token is 429; an exhausted per-call token refuses that call", async () => {
+    limiter.denyPrefix = "mcp:";
+    try {
+      const r = await mcpRoute.POST(req(`/api/workspaces/${victimWs}/mcp`, "eve", { method: "POST", body: mcpCall("documents.list", { limit: 1 }) }), P({ id: victimWs }));
+      expect(r.status).toBe(429);
+    } finally {
+      limiter.denyPrefix = null;
+    }
+    limiter.denyPrefix = "mcp-call:";
+    try {
+      const r = await mcpRoute.POST(req(`/api/workspaces/${victimWs}/mcp`, "eve", { method: "POST", body: mcpCall("documents.list", { limit: 1 }) }), P({ id: victimWs }));
+      const j = (await r.json()) as McpResult;
+      expect(j.error?.message).toBe("Rate limit exceeded");
+      expect(j.result).toBeUndefined();
+    } finally {
+      limiter.denyPrefix = null;
+    }
+  });
+
+  it("tags: deals are checked against the deals table; the creator may be listed in memberSubs", async () => {
+    const { createAccount, createDeal } = await import("@/lib/domain/crm");
+    const { createTag } = await import("@/lib/domain/crm-tags");
+    const acct = await createAccount(victimWs, `DealParent ${run}`, null, sub("vowner"));
+    const deal = await createDeal({ workspaceId: victimWs, accountId: acct.id, name: `Deal ${run}`, valueMinor: 100, ownerSub: sub("vowner") });
+    const tag = await createTag(victimWs, `dtag-${run}`);
+    const b = await bulkTagRoute.POST(req(`/api/workspaces/${victimWs}/crm/deal/bulk-tag`, "vowner", { method: "POST", body: JSON.stringify({ tagId: tag.id, recordIds: [deal.id, acct.id] }) }), P({ id: victimWs, entity: "deal" }));
+    expect(((await b.json()) as { tagged: number }).tagged).toBe(1);
+    const ch = await createChannel({ workspaceId: victimWs, kind: "channel", name: `self-${run}`, createdBySub: sub("vowner"), memberSubs: [sub("vowner"), sub("alice")] });
+    const seats = (await db().select().from(channelMembers).where(eq(channelMembers.channelId, ch.id))).map((x) => x.sub).sort();
+    expect(seats).toEqual([sub("alice"), sub("vowner")].sort());
+  });
+
+  it("acceptInvite: existing active member keeps role; offboarded member is reactivated; a forged foreign scope is never seated", async () => {
+    const { members } = await import("@/lib/db/schema");
+    const i1 = await createInvite({ workspaceId: victimWs, email: `own-${run}@example.com`, role: "Guest", invitedBySub: sub("vowner") });
+    const a1 = await acceptInvite({ token: i1.token, sub: sub("vowner") });
+    expect(a1).toEqual({ ok: true, workspaceId: victimWs, alreadyMember: true });
+    const [owner] = await db().select().from(members).where(and(eq(members.workspaceId, victimWs), eq(members.sub, sub("vowner"))));
+    expect(owner!.role).toBe("Owner");
+
+    await addMember(victimWs, "gone", "Member");
+    await db().update(members).set({ status: "offboarded" }).where(and(eq(members.workspaceId, victimWs), eq(members.sub, sub("gone"))));
+    const i2 = await createInvite({ workspaceId: victimWs, email: `back-${run}@example.com`, role: "Guest", invitedBySub: sub("vowner") });
+    const a2 = await acceptInvite({ token: i2.token, sub: sub("gone") });
+    expect(a2).toEqual({ ok: true, workspaceId: victimWs, alreadyMember: false });
+    const [g] = await db().select().from(members).where(and(eq(members.workspaceId, victimWs), eq(members.sub, sub("gone"))));
+    expect([g!.status, g!.role]).toEqual(["active", "Guest"]);
+
+    const foreign = await createChannel({ workspaceId: attackerWs, kind: "channel", name: `fs-${run}`, createdBySub: sub("mallory") });
+    const token = `forged-${run}`;
+    await db().insert(invites).values({ tokenHash: hashToken(token), workspaceId: victimWs, email: `f-${run}@example.com`, role: "Guest", scopeChannelId: foreign.id, invitedBySub: sub("vowner"), expiresAt: new Date(Date.now() + 3600_000) });
+    expect((await acceptInvite({ token, sub: sub("forged") })).ok).toBe(true);
+    expect(await db().select().from(channelMembers).where(eq(channelMembers.sub, sub("forged")))).toHaveLength(0);
+    expect((await acceptInvite({ token, sub: sub("forged2") })).ok).toBe(false);
   });
 });
