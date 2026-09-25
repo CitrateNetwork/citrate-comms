@@ -24,7 +24,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ID_COOKIE, ACCESS_COOKIE, REFRESH_COOKIE, REFRESH_MAX_AGE, serializeAuthCookie } from "@/lib/auth/cookies";
 import { buildCsp, newNonce } from "@/lib/security/csp";
-import { isForgedMutation } from "@/lib/security/csrf";
+import { isForgedMutation, isUnsafeBodyType } from "@/lib/security/csrf";
 
 const ID_TTL = 60 * 60; // 1h, matches the authority's id_token TTL
 const REFRESH_SKEW_MS = 120_000; // refresh when within 2 min of expiry
@@ -52,6 +52,9 @@ export default async function proxy(request: NextRequest): Promise<NextResponse>
   const hasSession = Boolean(request.cookies.get(ID_COOKIE)?.value || request.cookies.get(REFRESH_COOKIE)?.value);
   if (isForgedMutation(request, pathname, hasSession)) {
     return NextResponse.json({ error: "cross-origin request refused" }, { status: 403 });
+  }
+  if (isUnsafeBodyType(request, pathname, hasSession)) {
+    return NextResponse.json({ error: "unsupported content-type" }, { status: 415 });
   }
 
   // B. CSP — per-request nonce on the forwarded request + the response.

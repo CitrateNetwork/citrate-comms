@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildCsp, newNonce } from "./csp";
-import { isSameOrigin, isForgedMutation } from "./csrf";
+import { isSameOrigin, isForgedMutation, isUnsafeBodyType } from "./csrf";
 
 describe("buildCsp — exact policy", () => {
   it("matches the reviewed policy byte for byte (dev, issuer configured)", () => {
@@ -55,5 +55,25 @@ describe("isSameOrigin / isForgedMutation — edges", () => {
     expect(isForgedMutation(r("POST", x), "/api/w", false)).toBe(false);
     expect(isForgedMutation(r("POST", { ...x, authorization: "Bearer t" }), "/api/w", true)).toBe(false);
     expect(isForgedMutation(r("post", x), "/api/w", true)).toBe(true);
+  });
+});
+
+describe("isUnsafeBodyType — CORS-simple bodies on cookie-auth mutations (PBA-L3c-026)", () => {
+  const b = (method: string, h: Record<string, string>) => new Request("https://comms.example/api/x", { method, headers: h });
+  it("refuses text/plain, urlencoded and an untyped non-empty body", () => {
+    expect(isUnsafeBodyType(b("POST", { "content-type": "text/plain;charset=UTF-8" }), "/api/w", true)).toBe(true);
+    expect(isUnsafeBodyType(b("PATCH", { "content-type": "application/x-www-form-urlencoded" }), "/api/w", true)).toBe(true);
+    expect(isUnsafeBodyType(b("POST", { "content-length": "12" }), "/api/w", true)).toBe(true);
+  });
+  it("admits JSON, +json, multipart, body-less calls, safe methods, non-API paths, bearer and cookie-less callers", () => {
+    expect(isUnsafeBodyType(b("POST", { "content-type": "application/json" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("POST", { "content-type": "application/merge-patch+json" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("POST", { "content-type": "multipart/form-data; boundary=x" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("DELETE", {}), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("DELETE", { "content-length": "0" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("GET", { "content-type": "text/plain" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("POST", { "content-type": "text/plain" }), "/auth/logout", true)).toBe(false);
+    expect(isUnsafeBodyType(b("POST", { "content-type": "text/plain", authorization: "Bearer t" }), "/api/w", true)).toBe(false);
+    expect(isUnsafeBodyType(b("POST", { "content-type": "text/plain" }), "/api/unsubscribe", false)).toBe(false);
   });
 });

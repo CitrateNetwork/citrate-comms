@@ -47,3 +47,24 @@ export function isForgedMutation(req: Request, pathname: string, hasSessionCooki
   if (req.headers.get("authorization")) return false;
   return !isSameOrigin(req);
 }
+
+/**
+ * PBA-L3c-026 (content-type half): a cookie-authenticated, bearer-less, state-changing
+ * /api call that carries a body must declare JSON or multipart (file upload). A
+ * CORS-simple `text/plain` / `application/x-www-form-urlencoded` body — the shape a
+ * cross-site form can submit without a preflight — is refused with 415. Body-less calls
+ * (no content-type, content-length 0/absent) pass.
+ */
+export function isUnsafeBodyType(req: Request, pathname: string, hasSessionCookie: boolean): boolean {
+  if (SAFE_METHODS.has(req.method.toUpperCase())) return false;
+  if (!pathname.startsWith("/api/")) return false;
+  if (!hasSessionCookie || req.headers.get("authorization")) return false;
+  const ct = (req.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!ct) {
+    const len = req.headers.get("content-length");
+    return len !== null && len !== "0";
+  }
+  if (ct === "application/json" || (ct.startsWith("application/") && ct.endsWith("+json"))) return false;
+  if (ct === "multipart/form-data") return false;
+  return true;
+}

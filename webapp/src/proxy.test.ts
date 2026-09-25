@@ -64,3 +64,12 @@ describe("proxy: cross-site mutation guard (PBA-L3c-026)", () => {
     expect(ok(await proxy(mk("/api/unsubscribe", { method: "POST", headers: { "sec-fetch-site": "cross-site" } })))).toBe(true);
   });
 });
+
+describe("proxy: CORS-simple body types on cookie-auth mutations (PBA-L3c-026)", () => {
+  it("415 for a same-origin text/plain POST that rides the cookie; JSON passes", async () => {
+    const r = await proxy(mk("/api/workspaces/w1/accounts", { method: "POST", headers: { cookie: COOKIE, "sec-fetch-site": "same-origin", "content-type": "text/plain" } }));
+    expect(r.status).toBe(415);
+    const ok = await proxy(mk("/api/workspaces/w1/accounts", { method: "POST", headers: { cookie: COOKIE, "sec-fetch-site": "same-origin", "content-type": "application/json" } }));
+    expect(ok.status).not.toBe(415);
+  });
+});
