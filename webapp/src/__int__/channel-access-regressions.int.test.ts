@@ -1,6 +1,5 @@
 /**
- * Independent verifier bypass attempts for PR #16 (COMMS R2), kept as a regression suite.
- * real Postgres, mock auth. Assertions describe the SECURE outcome; a failing test = bypass.
+ * Channel and document access behaviour across roles (real Postgres, mock auth).
  */
 import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
@@ -40,7 +39,7 @@ let ws: string, other: string, dmId: string, dmDocId: string, sharedCh: string, 
 
 beforeAll(async () => {
   ws = (await createWorkspace({ name: `v ${run}`, ownerSub: sub("own"), ownerWallet: null, ownerEmail: null })).id;
-  other = (await createWorkspace({ name: `o ${run}`, ownerSub: sub("mal"), ownerWallet: null, ownerEmail: null })).id;
+  other = (await createWorkspace({ name: `o ${run}`, ownerSub: sub("otherown"), ownerWallet: null, ownerEmail: null })).id;
   await addMember(ws, "adm", "Admin");
   await addMember(ws, "alice", "Member");
   await addMember(ws, "bob", "Member");
@@ -49,21 +48,21 @@ beforeAll(async () => {
   await addMember(ws, "gst", "Guest");
   const dm = await createChannel({ workspaceId: ws, kind: "dm", name: "alice-bob", createdBySub: sub("alice"), memberSubs: [sub("bob")] });
   dmId = dm.id;
-  await sendMessage({ workspaceId: ws, channelId: dmId, authorSub: sub("alice"), body: "PRIVATE: bob's salary is 250k" });
+  await sendMessage({ workspaceId: ws, channelId: dmId, authorSub: sub("alice"), body: "RESTRICTED: dm-only content" });
   const [d] = await db().insert(documents).values({ workspaceId: ws, channelId: dmId, blobUrl: "https://x.public.blob.vercel-storage.com/offer.pdf", name: "offer.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
   dmDocId = d!.id;
   sharedCh = (await createChannel({ workspaceId: ws, kind: "channel", name: "shared", createdBySub: sub("own"), memberSubs: [sub("mem"), sub("par"), sub("gst")] })).id;
-  otherCh = (await createChannel({ workspaceId: other, kind: "channel", name: "o", createdBySub: sub("mal") })).id;
+  otherCh = (await createChannel({ workspaceId: other, kind: "channel", name: "o", createdBySub: sub("otherown") })).id;
   await seedDefaultPersonas(ws, sub("own"));
-  await seedDefaultPersonas(other, sub("mal"));
+  await seedDefaultPersonas(other, sub("otherown"));
   personaId = (await listPersonas(ws))[0]!.id;
 });
 
-describe("V-002a invite scopeChannelId: Admin not in a DM seats themself into it", () => {
-  it("Admin invites own identity scoped to alice-bob DM, accepts, then reads the DM (should be refused)", async () => {
+describe("invite scope is limited to channels the inviter can use", () => {
+  it("an invite scoped to a DM the inviter is not in grants no access to it", async () => {
     const r = await invitesRoute.POST(req(`/api/workspaces/${ws}/invites`, "adm", { method: "POST", body: JSON.stringify({ workspaceId: ws, email: "adm@example.com", role: "Member", scopeChannelId: dmId }) }), P({ id: ws }));
     const j = (await r.json()) as { link?: string; error?: string };
-    // Secure outcome A: inviter who is not seated in the scope channel is refused.
+    // Expected (A): inviter who is not seated in the scope channel is refused.
     if (r.status !== 201) {
       expect([400, 403]).toContain(r.status);
       return;
@@ -74,37 +73,37 @@ describe("V-002a invite scopeChannelId: Admin not in a DM seats themself into it
     const m = await msgRoute.GET(req(`/api/channels/${dmId}/messages`, "adm"), P({ id: dmId }));
     const body = await m.text();
     const d = await dlRoute.GET(req(`/api/workspaces/${ws}/documents/${dmDocId}/download`, "adm"), P({ id: ws, docId: dmDocId }));
-    // Secure outcome B: even if the invite is minted, accepting it must not seat an existing member into a DM.
-    expect({ msgStatus: m.status, leaks: body.includes("salary"), dl: d.status }).toEqual({ msgStatus: 403, leaks: false, dl: 403 });
+    // Expected (B): even if the invite is minted, accepting it must not seat an existing member into a DM.
+    expect({ msgStatus: m.status, includesRestricted: body.includes("dm-only content"), dl: d.status }).toEqual({ msgStatus: 403, includesRestricted: false, dl: 403 });
   });
-  it("same via invites/batch as a Guest sock-puppet", async () => {
-    const r = await batchRoute.POST(req(`/api/workspaces/${ws}/invites/batch`, "adm", { method: "POST", body: JSON.stringify({ workspaceId: ws, emails: ["sock@example.com"], role: "Guest", scopeChannelId: dmId }) }), P({ id: ws }));
+  it("batch invites follow the same scope rule", async () => {
+    const r = await batchRoute.POST(req(`/api/workspaces/${ws}/invites/batch`, "adm", { method: "POST", body: JSON.stringify({ workspaceId: ws, emails: ["batch@example.com"], role: "Guest", scopeChannelId: dmId }) }), P({ id: ws }));
     const txt = await r.text();
     if (r.status !== 201 && r.status !== 200) {
       expect([400, 403]).toContain(r.status);
       return;
     }
     const link = /\/join\/([A-Za-z0-9_-]+)/.exec(txt)?.[1];
-    if (!link) return; // links not returned by batch -> not exploitable via this route here
-    await joinRoute.POST(req(`/api/join`, "sock", { method: "POST", body: JSON.stringify({ token: link }) }));
-    const m = await msgRoute.GET(req(`/api/channels/${dmId}/messages`, "sock"), P({ id: dmId }));
-    expect((await m.text()).includes("salary")).toBe(false);
+    if (!link) return; // links not returned by batch -> nothing to redeem via this route
+    await joinRoute.POST(req(`/api/join`, "batchinvitee", { method: "POST", body: JSON.stringify({ token: link }) }));
+    const m = await msgRoute.GET(req(`/api/channels/${dmId}/messages`, "batchinvitee"), P({ id: dmId }));
+    expect((await m.text()).includes("dm-only content")).toBe(false);
   });
 });
 
-describe("V-002b role change while session live", () => {
+describe("role changes apply on the next request", () => {
   it("Member demoted to Guest loses CRM on the very next request", async () => {
-    await addMember(ws, "demo", "Member");
-    expect((await accountsRoute.GET(req(`/api/workspaces/${ws}/accounts`, "demo"), P({ id: ws }))).status).toBe(200);
-    const pr = await membersRoute.PATCH(req(`/api/workspaces/${ws}/members`, "own", { method: "PATCH", body: JSON.stringify({ sub: sub("demo"), role: "Guest" }) }), P({ id: ws }));
+    await addMember(ws, "demoted", "Member");
+    expect((await accountsRoute.GET(req(`/api/workspaces/${ws}/accounts`, "demoted"), P({ id: ws }))).status).toBe(200);
+    const pr = await membersRoute.PATCH(req(`/api/workspaces/${ws}/members`, "own", { method: "PATCH", body: JSON.stringify({ sub: sub("demoted"), role: "Guest" }) }), P({ id: ws }));
     expect(pr.status).toBe(200);
-    expect((await accountsRoute.GET(req(`/api/workspaces/${ws}/accounts`, "demo"), P({ id: ws }))).status).toBe(403);
-    const mc = (await (await mcpRoute.POST(req(`/api/workspaces/${ws}/mcp`, "demo", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }), P({ id: ws }))).json()) as { result: { tools: { name: string }[] } };
+    expect((await accountsRoute.GET(req(`/api/workspaces/${ws}/accounts`, "demoted"), P({ id: ws }))).status).toBe(403);
+    const mc = (await (await mcpRoute.POST(req(`/api/workspaces/${ws}/mcp`, "demoted", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }), P({ id: ws }))).json()) as { result: { tools: { name: string }[] } };
     expect(mc.result.tools.map((t) => t.name)).toEqual(["thread.summarize"]);
   });
 });
 
-describe("V-002c foreign / unseated channel ids on /api/channels/*", () => {
+describe("channel routes require a seat in the channel", () => {
   it("Partner: foreign-workspace channel and unseated DM are refused", async () => {
     for (const ch of [otherCh, dmId]) {
       expect((await msgRoute.GET(req(`/api/channels/${ch}/messages`, "par"), P({ id: ch }))).status).toBe(403);
@@ -134,35 +133,35 @@ describe("V-002c foreign / unseated channel ids on /api/channels/*", () => {
   });
 });
 
-describe("V-001 other persona write paths", () => {
+describe("persona write paths are workspace-bound", () => {
   it("clone / export / resources / grants / import with a foreign persona id", async () => {
-    expect((await cloneRoute.POST(req(`/api/workspaces/${other}/personas/${personaId}/clone`, "mal", { method: "POST", body: JSON.stringify({ name: "stolen" }) }), P({ id: other, personaId }))).status).toBe(404);
-    expect((await personaRoute.GET(req(`/api/workspaces/${other}/personas/${personaId}?export=1`, "mal"), P({ id: other, personaId }))).status).toBe(403);
-    expect((await personaRoute.PATCH(req(`/api/workspaces/${other}/personas/${personaId}`, "mal", { method: "PATCH", body: JSON.stringify({ name: "pwn" }) }), P({ id: other, personaId }))).status).toBe(403);
-    expect((await resourcesRoute.POST(req(`/api/workspaces/${other}/personas/${personaId}/resources`, "mal", { method: "POST", body: JSON.stringify({ kind: "text", title: "x", content: "INJECT" }) }), P({ id: other, personaId }))).status).toBe(403);
-    const g = await grantsRoute.POST(req(`/api/workspaces/${other}/persona-config-grants`, "mal", { method: "POST", body: JSON.stringify({ granteeSub: sub("mal"), personaId }) }), P({ id: other }));
+    expect((await cloneRoute.POST(req(`/api/workspaces/${other}/personas/${personaId}/clone`, "otherown", { method: "POST", body: JSON.stringify({ name: "copy" }) }), P({ id: other, personaId }))).status).toBe(404);
+    expect((await personaRoute.GET(req(`/api/workspaces/${other}/personas/${personaId}?export=1`, "otherown"), P({ id: other, personaId }))).status).toBe(403);
+    expect((await personaRoute.PATCH(req(`/api/workspaces/${other}/personas/${personaId}`, "otherown", { method: "PATCH", body: JSON.stringify({ name: "renamed" }) }), P({ id: other, personaId }))).status).toBe(403);
+    expect((await resourcesRoute.POST(req(`/api/workspaces/${other}/personas/${personaId}/resources`, "otherown", { method: "POST", body: JSON.stringify({ kind: "text", title: "x", content: "note" }) }), P({ id: other, personaId }))).status).toBe(403);
+    const g = await grantsRoute.POST(req(`/api/workspaces/${other}/persona-config-grants`, "otherown", { method: "POST", body: JSON.stringify({ granteeSub: sub("otherown"), personaId }) }), P({ id: other }));
     expect([400, 403, 404]).toContain(g.status);
-    const im = await importRoute.POST(req(`/api/workspaces/${other}/personas/import`, "mal", { method: "POST", body: JSON.stringify({ persona: { name: "imp", layers: [{ layer: 1, content: "x" }] } }) }), P({ id: other }));
+    const im = await importRoute.POST(req(`/api/workspaces/${other}/personas/import`, "otherown", { method: "POST", body: JSON.stringify({ persona: { name: "imp", layers: [{ layer: 1, content: "x" }] } }) }), P({ id: other }));
     expect(im.status).toBeLessThan(500);
   });
   it("DB-level: a cross-tenant prompt/skill row is rejected by the composite FK", async () => {
-    await expect(db().insert(agentPrompts).values({ workspaceId: other, personaId, layer: 3, contentEnc: "x", updatedBySub: sub("mal") })).rejects.toThrow();
+    await expect(db().insert(agentPrompts).values({ workspaceId: other, personaId, layer: 3, contentEnc: "x", updatedBySub: sub("otherown") })).rejects.toThrow();
     await expect(db().insert(agentSkills).values({ workspaceId: other, personaId, skillKey: "zz", enabled: true })).rejects.toThrow();
   });
   it("race: 20 concurrent cross-tenant prompt writes never land", async () => {
     const { setPromptLayer } = await import("@/lib/domain/personas");
-    await Promise.allSettled(Array.from({ length: 20 }, (_, i) => setPromptLayer(other, personaId, 1 + (i % 4), `ATTACK${i}`, sub("mal"))));
+    await Promise.allSettled(Array.from({ length: 20 }, (_, i) => setPromptLayer(other, personaId, 1 + (i % 4), `OTHERWS${i}`, sub("otherown"))));
     const rows = await db().select().from(agentPrompts).where(eq(agentPrompts.personaId, personaId));
-    expect(rows.filter((r) => r.updatedBySub === sub("mal"))).toEqual([]);
+    expect(rows.filter((r) => r.updatedBySub === sub("otherown"))).toEqual([]);
   });
 });
 
-describe("V-003 residual document paths", () => {
-  it("persona resource can pin a DM document the configurer cannot see (nit probe)", async () => {
+describe("document access follows visibility", () => {
+  it("persona resources only pin documents the configurer can see", async () => {
     const id = await addResource(ws, personaId, { kind: "document", title: "t", documentId: dmDocId }, sub("own"));
     const res = await listResources(ws, personaId);
     // record observed behaviour
-    console.log("[V-003 probe] addResource(DM doc by non-participant owner) ->", id ? "ACCEPTED" : "refused", "documentId surfaced:", res.some((r) => r.documentId === dmDocId));
+    console.log("[persona resource] addResource(DM doc by non-participant owner) ->", id ? "ACCEPTED" : "refused", "documentId surfaced:", res.some((r) => r.documentId === dmDocId));
     expect({ id: id ? "ACCEPTED" : null, surfaced: res.some((r) => r.documentId === dmDocId) }).toEqual({ id: null, surfaced: false });
   });
   it("Owner/Admin (not in DM) cannot download the DM doc", async () => {
@@ -214,21 +213,21 @@ describe("Regressions: scoped external + internal capability", () => {
   });
 });
 
-describe("V-003b CRM record file lists channel-scoped docs unscoped (raw blob URL in RSC props)", () => {
-  it("a doc uploaded into the alice-bob DM and linked to an account is visible to any internal viewer of the account page", async () => {
+describe("CRM record documents are viewer-scoped", () => {
+  it("a DM document linked to an account is only listed for DM participants", async () => {
     const { createAccount } = await import("@/lib/domain/crm");
     const { getAccountFile } = await import("@/lib/domain/crm-file");
     const { badDocScope } = await import("@/lib/domain/documents");
     const acct = await createAccount(ws, "Acme DM-linked", null, sub("alice"));
     // alice (seated in the DM) may legitimately scope an upload to both the DM and the account
     expect(await badDocScope(ws, sub("alice"), { accountId: acct.id, dealId: null, channelId: dmId })).toBeNull();
-    const [d] = await db().insert(documents).values({ workspaceId: ws, channelId: dmId, accountId: acct.id, blobUrl: "https://x.public.blob.vercel-storage.com/bob-comp-plan.pdf", name: "bob-comp-plan.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+    const [d] = await db().insert(documents).values({ workspaceId: ws, channelId: dmId, accountId: acct.id, blobUrl: "https://x.public.blob.vercel-storage.com/bob-plan.pdf", name: "bob-plan.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
     // download proxy correctly refuses mem ...
     expect((await dlRoute.GET(req(`/api/workspaces/${ws}/documents/${d!.id}/download`, "mem"), P({ id: ws, docId: d!.id }))).status).toBe(403);
-    // ... but the account page loader (rendered for any internal member, props serialized to the client) is not viewer-scoped
+    // the account page loader is viewer-scoped
     const file = await getAccountFile(ws, acct.id, { sub: sub("mem"), internal: true });
-    const leaked = file!.documents.find((x) => x.id === d!.id);
-    expect(leaked?.blobUrl ?? null, "raw blob URL of a DM document reaches a non-participant's account page").toBeNull();
+    const found = file!.documents.find((x) => x.id === d!.id);
+    expect(found?.blobUrl ?? null, "DM document not listed for a non-participant").toBeNull();
     // the DM participant still sees it, but only as the access-controlled proxy URL
     const own = (await getAccountFile(ws, acct.id, { sub: sub("alice"), internal: true }))!.documents.find((x) => x.id === d!.id);
     expect(own?.blobUrl).toBe(`/api/workspaces/${ws}/documents/${d!.id}/download?inline=1`);

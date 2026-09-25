@@ -1,5 +1,5 @@
 /**
- * PBA-R2 follow-up (verifier pass 2): offboarded/demoted inviters' invites die, and an
+ * PBA-R2 follow-up: offboarded/demoted inviters' invites die, and an
  * @-mentioned agent's tools are bounded by the channel's audience.
  */
 import { describe, it, expect, vi, beforeAll } from "vitest";
@@ -29,7 +29,7 @@ beforeAll(async () => {
   wsDoc = (await db().insert(documents).values({ workspaceId: ws, blobUrl: "", name: "handbook.txt", mime: "text/plain", uploadedBySub: sub("own") }).returning())[0]!.id;
 });
 
-describe("invites die with their issuer's standing (verifier pass 2)", () => {
+describe("invites die with their issuer's standing", () => {
   it("an offboarded inviter's pending scoped invite admits nobody, and offboard revokes it", async () => {
     const inv = await createInvite({ workspaceId: ws, email: `o-${run}@x.io`, role: "Guest", invitedBySub: sub("adm"), scopeChannelId: room });
     await offboard(ws, sub("adm"), sub("own"));
@@ -84,7 +84,7 @@ describe("the redemption re-check is serialized against concurrent channel chang
   });
 });
 
-describe("@-mentioned agents are bounded by the channel audience (verifier pass 2, MEDIUM)", () => {
+describe("@-mentioned agents are bounded by the channel audience", () => {
   it("a channel with a Partner seated runs the agent with Partner-level tools, whoever invokes", async () => {
     const scope = await agentReplyScope(ws, room, "Member");
     expect(scope.effectiveInvokerRole).toBe("Partner");

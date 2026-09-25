@@ -1,4 +1,4 @@
-/** Verifier pass-3 probes, kept as a regression suite (secure outcome asserted). */
+/** Invite standing and channel-agent scope behaviour. */
 import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
 vi.mock("@/lib/email/send", async (orig) => ({ ...(await orig<Record<string, unknown>>()), sendInviteEmail: async () => ({ sent: false }) }));
@@ -36,7 +36,7 @@ beforeAll(async () => {
   wsDoc = (await db().insert(documents).values({ workspaceId: ws, blobUrl: "https://x.public.blob.vercel-storage.com/w.pdf", name: "w.pdf", mime: "application/pdf", uploadedBySub: sub("own") }).returning())[0]!.id;
 });
 
-describe("pass1/2 probes re-run", () => {
+describe("invite redemption respects scope and standing", () => {
   it("offboarded inviter (via real offboard route): pending invite dead + row expired", async () => {
     const m = await mint("adm2", { email: "o@x.io", role: "Guest", scopeChannelId: shared });
     expect(m.status).toBe(201);
@@ -93,12 +93,12 @@ describe("agent tool restriction", () => {
     const t = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("mem"), agentRole: "Agent", invokerRole: s.effectiveInvokerRole, audience: s.audience });
     expect(Object.keys(t)).toEqual(["thread.summarize"]);
   });
-  it("Guest seated AFTER scope computed (mid-turn TOCTOU): scope is stale", async () => {
-    const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: "toctou", createdBySub: sub("adm"), memberSubs: [sub("mem")] })).id;
+  it("a Guest seated after the scope is computed changes the recomputed scope", async () => {
+    const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: "midrun", createdBySub: sub("adm"), memberSubs: [sub("mem")] })).id;
     const before = await agentReplyScope(ws, ch, "Member");
     await addChannelMembers(ws, ch, [sub("gst")]); // e.g. Admin seats a Guest / scoped invite accepted during the turn
     const after = await agentReplyScope(ws, ch, "Member");
-    (globalThis as Record<string, unknown>).__toctou = { before: before.effectiveInvokerRole, after: after.effectiveInvokerRole };
+    (globalThis as Record<string, unknown>).__scopeBeforeAfter = { before: before.effectiveInvokerRole, after: after.effectiveInvokerRole };
     expect(before.effectiveInvokerRole).toBe("Member");
     expect(after.effectiveInvokerRole).toBe("Partner");
   });
@@ -113,7 +113,7 @@ describe("agent tool restriction", () => {
     const { linkMessageAttachments } = await import("@/lib/domain/messages");
     await linkMessageAttachments(ws, m.id, [wsDoc]);
     await addChannelMembers(ws, internal, [sub("par")]);
-    (globalThis as Record<string, unknown>).__later = Boolean(await getVisibleDocument(ws, wsDoc, { sub: sub("par"), internal: false }));
+    (globalThis as Record<string, unknown>).__laterMemberSeesAttachment = Boolean(await getVisibleDocument(ws, wsDoc, { sub: sub("par"), internal: false }));
     await db().delete(channelMembers).where(and(eq(channelMembers.channelId, internal), eq(channelMembers.sub, sub("par"))));
     expect(true).toBe(true);
   });

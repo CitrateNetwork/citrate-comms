@@ -111,7 +111,7 @@ describe("channel-reply reads are bounded by every seated member's view", () => 
     expect(txt).toContain("busy");
   });
 
-  it("a channel reply never gets web.search / web.fetch or any HITL tool", () => {
+  it("a channel reply never gets web.search / web.fetch or any HIC tool", () => {
     const allow = channelReplyAllow(ALL_TOOL_NAMES);
     expect([...CHANNEL_REPLY_DENY].sort()).toEqual(["web.fetch", "web.search"]);
     for (const t of ["web.fetch", "web.search", "crm.write", "terminal.exec"]) expect(allow.has(t as never), t).toBe(false);
@@ -158,7 +158,7 @@ describe("pass-4: invoker visibility AND whole-audience participation", () => {
 
   it("thread.summarize in a channel reply: only channels every reader is seated in (current channel ok)", async () => {
     const lead = (await createChannel({ workspaceId: ws, kind: "channel", name: `lead-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] })).id;
-    await sendMessage({ workspaceId: ws, channelId: lead, authorSub: sub("alice"), body: `LEAD-ONLY ${run}` });
+    await sendMessage({ workspaceId: ws, channelId: lead, authorSub: sub("alice"), body: `LEADERSHIP-CHANNEL ${run}` });
     const gen = (await createChannel({ workspaceId: ws, kind: "channel", name: `g2-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob"), sub("mem")] })).id;
     await sendMessage({ workspaceId: ws, channelId: gen, authorSub: sub("mem"), body: `GEN ${run}` });
     const t = await tools("bob", gen);
@@ -167,7 +167,7 @@ describe("pass-4: invoker visibility AND whole-audience participation", () => {
     expect(cur.messages.map((m) => m.body)).toContain(`GEN ${run}`);
     // outside a channel reply (1:1 chat / MCP) bob may still summarize a channel he's in
     const solo = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("bob"), agentRole: "Agent", invokerRole: "Member", audit: false }) as unknown as T;
-    expect(JSON.stringify(await solo["thread.summarize"]!.execute({ channelId: lead, limit: 20 }))).toContain(`LEAD-ONLY ${run}`);
+    expect(JSON.stringify(await solo["thread.summarize"]!.execute({ channelId: lead, limit: 20 }))).toContain(`LEADERSHIP-CHANNEL ${run}`);
   });
 });
 
@@ -194,7 +194,7 @@ describe("pass-5: agent seats don't block calendar details; registry is read-onl
     expect(txt).toContain("busy");
   });
 
-  it("with an audience set, the registry withholds HITL write tools and web.* even if the caller allows them", () => {
+  it("with an audience set, the registry withholds HIC write tools and web.* even if the caller allows them", () => {
     const allow = new Set(["crm.write", "terminal.exec", "calendar.schedule", "web.fetch", "crm.read"] as never[]);
     const scoped = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("alice"), agentRole: "Agent", invokerRole: "Member", audience: [{ sub: sub("alice"), internal: true }], allow: allow as never, audit: false });
     expect(Object.keys(scoped)).toEqual(["crm.read"]);

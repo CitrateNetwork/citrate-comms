@@ -8,7 +8,7 @@
  * A new route, or a new method on an existing route, fails the "every handler is
  * declared" test until someone decides who may call it — deny-by-default review.
  *
- * The second suite covers EVERY OTHER route family under /api (verifier follow-up):
+ * The second suite covers EVERY OTHER route family under /api:
  * channel-scoped routes (capability AND seat in the channel), channel creation, join,
  * the workspace list, bearer-only machine routes and the public unsubscribe surface.
  *
@@ -272,7 +272,7 @@ async function discoverOther(): Promise<{ key: string; method: string; handler: 
   return out;
 }
 
-describe("route x role matrix — every other /api route family (verifier follow-up)", () => {
+describe("route x role matrix — every other /api route family", () => {
   let seated: string, unseated: string, foreign: string, otherWs: string;
   beforeAll(async () => {
     await addMember(ws, "rrcreator", "Member");
@@ -337,7 +337,7 @@ describe("route x role matrix — every other /api route family (verifier follow
         if (anon !== 401) failures.push(`${tag} anonymous: expected 401, got ${anon}`);
       } else if (p.kind === "bearer") {
         const prev = process.env[p.env];
-        process.env[p.env] = "rr-machine-secret";
+        process.env[p.env] = "rr-machine-token";
         try {
           for (const who of [...ROLES.map(whoFor), null]) {
             const st = await call(h, h.method, `/api/${h.key}`, who, {});
@@ -345,7 +345,7 @@ describe("route x role matrix — every other /api route family (verifier follow
           }
           const wrong = await call(h, h.method, `/api/${h.key}`, null, {}, { dryRun: true }, { authorization: "Bearer nope" });
           if (wrong !== 401) failures.push(`${tag} wrong bearer: expected 401, got ${wrong}`);
-          const right = await call(h, h.method, `/api/${h.key}`, null, {}, { dryRun: true, workspaceId: ws }, { authorization: "Bearer rr-machine-secret" });
+          const right = await call(h, h.method, `/api/${h.key}`, null, {}, { dryRun: true, workspaceId: ws }, { authorization: "Bearer rr-machine-token" });
           if (refused(right)) failures.push(`${tag} correct bearer: expected admitted, got ${right}`);
         } finally {
           if (prev === undefined) delete process.env[p.env];
@@ -354,10 +354,10 @@ describe("route x role matrix — every other /api route family (verifier follow
       } else {
         // public-token: identity is irrelevant; a bad token never succeeds and never 5xx's
         const statuses = new Set<number>();
-        for (const who of [...ROLES.map(whoFor), null]) statuses.add(await call(h, h.method, `/api/${h.key}?u=forged`, who, {}));
+        for (const who of [...ROLES.map(whoFor), null]) statuses.add(await call(h, h.method, `/api/${h.key}?u=invalid`, who, {}));
         if (statuses.size !== 1) failures.push(`${tag}: outcome depends on identity (${[...statuses].join(",")})`);
         const st = [...statuses][0]!;
-        if (h.method === "POST" && st !== 400) failures.push(`${tag}: forged token expected 400, got ${st}`);
+        if (h.method === "POST" && st !== 400) failures.push(`${tag}: invalid token expected 400, got ${st}`);
         if (h.method === "GET" && st !== 303) failures.push(`${tag}: expected 303 to the confirmation page, got ${st}`);
       }
     }
