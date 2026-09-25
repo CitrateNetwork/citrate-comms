@@ -18,7 +18,7 @@ export default async function DealFilePage({ params }: { params: Promise<{ slug:
   if (!ctx) notFound();
   if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
-  const file = await getDealFile(ws.id, id);
+  const file = await getDealFile(ws.id, id, { sub, internal: true }); // internal-only page (checked above)
   if (!file) notFound();
   return (
     <RecordFile

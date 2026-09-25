@@ -227,8 +227,11 @@ describe("V-003b CRM record file lists channel-scoped docs unscoped (raw blob UR
     // download proxy correctly refuses mem ...
     expect((await dlRoute.GET(req(`/api/workspaces/${ws}/documents/${d!.id}/download`, "mem"), P({ id: ws, docId: d!.id }))).status).toBe(403);
     // ... but the account page loader (rendered for any internal member, props serialized to the client) is not viewer-scoped
-    const file = await getAccountFile(ws, acct.id);
+    const file = await getAccountFile(ws, acct.id, { sub: sub("mem"), internal: true });
     const leaked = file!.documents.find((x) => x.id === d!.id);
     expect(leaked?.blobUrl ?? null, "raw blob URL of a DM document reaches a non-participant's account page").toBeNull();
+    // the DM participant still sees it, but only as the access-controlled proxy URL
+    const own = (await getAccountFile(ws, acct.id, { sub: sub("alice"), internal: true }))!.documents.find((x) => x.id === d!.id);
+    expect(own?.blobUrl).toBe(`/api/workspaces/${ws}/documents/${d!.id}/download?inline=1`);
   });
 });

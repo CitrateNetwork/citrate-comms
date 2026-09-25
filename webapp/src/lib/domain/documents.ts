@@ -111,10 +111,17 @@ export async function getDocument(workspaceId: string, id: string): Promise<Docu
   return r ? { ...r, createdAt: r.createdAt.toISOString() } : null;
 }
 
-/** Documents attached to a record (by account/deal/channel scope). */
+/**
+ * Documents attached to a record (by account/deal/channel scope), as `viewer` may see them
+ * (verifier V-003b): a file uploaded into a DM/private channel that is ALSO linked to an
+ * account/deal stays invisible to non-participants on the record page. The raw Blob URL
+ * never leaves the server — `blobUrl` carries the access-controlled inline proxy URL
+ * ("" when there is no stored original).
+ */
 export async function listDocumentsForRecord(
   workspaceId: string,
   scope: { accountId?: string; dealId?: string; channelId?: string },
+  viewer: DocViewer,
 ): Promise<DocumentRow[]> {
   const col = scope.accountId
     ? eq(documents.accountId, scope.accountId)
@@ -127,9 +134,13 @@ export async function listDocumentsForRecord(
   const rows = await db()
     .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
     .from(documents)
-    .where(and(eq(documents.workspaceId, workspaceId), col))
+    .where(and(eq(documents.workspaceId, workspaceId), col, documentVisibleTo(workspaceId, viewer)))
     .orderBy(desc(documents.createdAt));
-  return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
+  return rows.map((r) => ({
+    ...r,
+    blobUrl: r.blobUrl ? `/api/workspaces/${workspaceId}/documents/${r.id}/download?inline=1` : "",
+    createdAt: r.createdAt.toISOString(),
+  }));
 }
 
 /** Documents in a workspace that `viewer` may see (newest first, bounded) — for agent

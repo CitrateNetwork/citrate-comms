@@ -199,9 +199,9 @@ export function citrateCommsTools(ctx: ToolContext) {
           if (a.id) {
             const file =
               a.entity === "account"
-                ? await getAccountFile(ctx.workspaceId, a.id)
+                ? await getAccountFile(ctx.workspaceId, a.id, viewer)
                 : a.entity === "deal"
-                  ? await getDealFile(ctx.workspaceId, a.id)
+                  ? await getDealFile(ctx.workspaceId, a.id, viewer)
                   : await getContactFile(ctx.workspaceId, a.id);
             return file ? { record: compactFile(file) } : { error: "record not found" };
           }

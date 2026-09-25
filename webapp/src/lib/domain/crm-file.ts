@@ -8,7 +8,7 @@ import { getFieldsForRecord, type FieldWithValue } from "./crm-fields";
 import { listNotes, type NoteRow } from "./crm-notes";
 import { listActivity, type ActivityRow } from "./crm-activity";
 import { tagsForRecord, type TagRow } from "./crm-tags";
-import { listDocumentsForRecord, type DocumentRow } from "./documents";
+import { listDocumentsForRecord, type DocumentRow, type DocViewer } from "./documents";
 import { getMemoryStore, crmRepo } from "@/lib/memory";
 import type { CrmEntity } from "./crm-enums";
 
@@ -65,7 +65,8 @@ async function recallMemories(workspaceId: string, entity: CrmEntity, id: string
   }
 }
 
-export async function getAccountFile(workspaceId: string, id: string): Promise<RecordFile | null> {
+/** `viewer` scopes the record's documents (PBA-L3c-003 / V-003b). */
+export async function getAccountFile(workspaceId: string, id: string, viewer: DocViewer): Promise<RecordFile | null> {
   const account = await getAccount(workspaceId, id);
   if (!account) return null;
   const [fields, tags, notes, activity, deals, contacts, documents, memories] = await Promise.all([
@@ -75,7 +76,7 @@ export async function getAccountFile(workspaceId: string, id: string): Promise<R
     listActivity(workspaceId, "account", id),
     listDealsForAccount(workspaceId, id),
     listContactsForAccount(workspaceId, id),
-    listDocumentsForRecord(workspaceId, { accountId: id }),
+    listDocumentsForRecord(workspaceId, { accountId: id }, viewer),
     recallMemories(workspaceId, "account", id, account.name),
   ]);
   return {
@@ -102,7 +103,7 @@ export async function getAccountFile(workspaceId: string, id: string): Promise<R
   };
 }
 
-export async function getDealFile(workspaceId: string, id: string): Promise<RecordFile | null> {
+export async function getDealFile(workspaceId: string, id: string, viewer: DocViewer): Promise<RecordFile | null> {
   const deal = await getDeal(workspaceId, id);
   if (!deal) return null;
   const [fields, tags, notes, activity, documents, memories] = await Promise.all([
@@ -110,7 +111,7 @@ export async function getDealFile(workspaceId: string, id: string): Promise<Reco
     tagsForRecord(workspaceId, "deal", id),
     listNotes(workspaceId, "deal", id),
     listActivity(workspaceId, "deal", id),
-    listDocumentsForRecord(workspaceId, { dealId: id }),
+    listDocumentsForRecord(workspaceId, { dealId: id }, viewer),
     recallMemories(workspaceId, "deal", id, deal.name),
   ]);
   return {
