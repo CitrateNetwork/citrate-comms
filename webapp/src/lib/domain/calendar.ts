@@ -353,6 +353,14 @@ export function canSeeEvent(ev: Pick<CalendarEvent, "createdBySub" | "attendees"
   return isAdminRole(role) || ev.createdBySub === sub || ev.attendees.some((a) => a.sub === sub);
 }
 
+/** True iff every one of `readers` is the event's organizer or an attendee — the rule for
+ *  showing an event's details to an audience (a channel). An empty audience sees nothing. */
+export function everyReaderParticipates(ev: Pick<CalendarEvent, "createdBySub" | "attendees">, readers: readonly string[]): boolean {
+  if (readers.length === 0) return false;
+  const participants = new Set([ev.createdBySub, ...ev.attendees.map((a) => a.sub)]);
+  return readers.every((r) => participants.has(r));
+}
+
 /** Event write authority (PBA-L3c-007): the organizer or a workspace Owner/Admin. */
 export function canEditEvent(ev: Pick<CalendarEvent, "createdBySub">, sub: string, role: Role): boolean {
   return isAdminRole(role) || ev.createdBySub === sub;
@@ -579,14 +587,19 @@ export async function postAndPinCalendarSummary(workspaceId: string, channelId: 
   const now = new Date();
   const to = new Date(now.getTime() + days * 86400_000);
   const all = await listWorkspaceEventsInRange(workspaceId, now.toISOString(), to.toISOString());
-  // PBA-L3c-007 (variant): a summary posted INTO a channel may only describe events that
-  // belong to that channel's audience — tied to the channel, or whose organizer and
-  // every attendee are seated in it. Private events of other people never leak into a
-  // shared channel through the pin.
-  const seated = new Set(
-    (await db().select({ sub: channelMembers.sub }).from(channelMembers).where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)))).map((r) => r.sub),
-  );
-  const events = all.filter((e) => e.channelId === channelId || (seated.has(e.createdBySub) && e.attendees.every((a) => seated.has(a.sub))));
+  // A summary posted INTO a channel is read by everyone seated there, so it may only
+  // describe events that EVERY seated member is a participant of (organizer or attendee).
+  // Active agent seats (incl. the pinning agent) don't count: human readers decide.
+  const seated = (
+    await db()
+      .select({ sub: channelMembers.sub, role: members.role, status: members.status, isAgent: members.isAgent })
+      .from(channelMembers)
+      .leftJoin(members, and(eq(members.workspaceId, channelMembers.workspaceId), eq(members.sub, channelMembers.sub)))
+      .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)))
+  )
+    .filter((r) => !(r.status === "active" && r.role === "Agent" && r.isAgent === true))
+    .map((r) => r.sub);
+  const events = all.filter((e) => everyReaderParticipates(e, seated));
   const msg = await sendMessage({ workspaceId, channelId, authorSub: agentSub, body: renderSummary(events, days), fromAgent: true });
   // retire the agent's previous summary pin(s) in this channel, then pin the fresh one
   const pinned = await listPinnedMessages(workspaceId, channelId);
