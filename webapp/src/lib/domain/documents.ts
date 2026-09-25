@@ -45,6 +45,13 @@ export interface DocViewer {
   internal: boolean;
 }
 
+/** Visible to EVERY viewer in the set (an audience) — the AND of documentVisibleTo. */
+export function documentVisibleToAll(workspaceId: string, viewers: DocViewer | DocViewer[]): SQL {
+  const list = Array.isArray(viewers) ? viewers : [viewers];
+  if (list.length === 0) return sql`false`; // fail closed: no audience, nothing visible
+  return and(...list.map((v) => documentVisibleTo(workspaceId, v)))!;
+}
+
 /** SQL predicate over `documents` that is true iff `viewer` may see the row. */
 export function documentVisibleTo(workspaceId: string, viewer: DocViewer): SQL {
   const inMyChannel = sql`${documents.channelId} IN (SELECT ${channelMembers.channelId} FROM ${channelMembers} WHERE ${channelMembers.workspaceId} = ${workspaceId} AND ${channelMembers.sub} = ${viewer.sub})`;
@@ -146,11 +153,11 @@ export async function listDocumentsForRecord(
 /** Documents in a workspace that `viewer` may see (newest first, bounded) — for agent
  *  artifact discovery. Viewer-scoped (PBA-L3c-003): private-channel/DM files are absent
  *  for non-participants. */
-export async function listDocuments(workspaceId: string, viewer: DocViewer, limit = 50): Promise<DocumentRow[]> {
+export async function listDocuments(workspaceId: string, viewer: DocViewer | DocViewer[], limit = 50): Promise<DocumentRow[]> {
   const rows = await db()
     .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
     .from(documents)
-    .where(and(eq(documents.workspaceId, workspaceId), documentVisibleTo(workspaceId, viewer)))
+    .where(and(eq(documents.workspaceId, workspaceId), documentVisibleToAll(workspaceId, viewer)))
     .orderBy(desc(documents.createdAt))
     .limit(Math.min(Math.max(limit, 1), 200));
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
@@ -343,12 +350,12 @@ function tokenize(s: string): Set<string> {
 export async function retrieveChunks(
   workspaceId: string,
   query: string,
-  viewer: DocViewer,
+  viewer: DocViewer | DocViewer[],
   opts: { scope?: DocScope; budget?: number } = {},
 ): Promise<RetrievedChunk[]> {
   const budget = Math.min(Math.max(opts.budget ?? 6, 1), 20);
   const sc = opts.scope ? scopeCol(opts.scope) : undefined;
-  const base = and(eq(documentChunks.workspaceId, workspaceId), eq(documents.workspaceId, workspaceId), documentVisibleTo(workspaceId, viewer));
+  const base = and(eq(documentChunks.workspaceId, workspaceId), eq(documents.workspaceId, workspaceId), documentVisibleToAll(workspaceId, viewer));
   const where = sc ? and(base, sc) : base;
 
   const qVec = query ? await embedOne(query).catch(() => null) : null;

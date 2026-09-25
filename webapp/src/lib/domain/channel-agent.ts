@@ -9,7 +9,7 @@ import { generateText, stepCountIs } from "ai";
 import { getInferenceModel } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { citrateCommsTools } from "@/lib/ai/tools";
-import { HITL_TOOLS } from "@/lib/ai/personas";
+import { HITL_TOOLS, type ToolName } from "@/lib/ai/personas";
 import { resolvePersona, personaIdForAgent } from "@/lib/domain/personas";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 import { listMessages, sendMessage, linkMessageAttachments, getMessageAttachments } from "@/lib/domain/messages";
@@ -42,6 +42,35 @@ export async function channelAudience(workspaceId: string, channelId: string): P
 export async function agentReplyScope(workspaceId: string, channelId: string, invokerRole: Role): Promise<{ audience: DocViewer[]; effectiveInvokerRole: Role }> {
   const audience = await channelAudience(workspaceId, channelId);
   return { audience, effectiveInvokerRole: audience.some((a) => !a.internal) ? "Partner" : invokerRole };
+}
+
+/** Tools never offered to an agent replying into a channel. */
+export const CHANNEL_REPLY_DENY: readonly string[] = ["web.fetch", "web.search"];
+
+/** The allow-set for a channel reply: the persona's tools minus HITL/mutating tools
+ *  (read-only posture) and minus the open-web tools (a URL is an exfil path). */
+export function channelReplyAllow(personaTools: readonly ToolName[]): Set<ToolName> {
+  const allow = new Set(personaTools);
+  for (const t of personaTools) if (HITL_TOOLS.has(t) || CHANNEL_REPLY_DENY.includes(t)) allow.delete(t);
+  return allow;
+}
+
+/**
+ * Is a reply scoped for (`before`, `roleBefore`) still safe to post now? True only when
+ * the effective role is unchanged and every current reader was already in the audience
+ * the tools were scoped for, with the same internal/external standing.
+ */
+export async function replyScopeStillValid(
+  workspaceId: string,
+  channelId: string,
+  invokerRole: Role,
+  before: DocViewer[],
+  roleBefore: Role,
+): Promise<boolean> {
+  const now = await agentReplyScope(workspaceId, channelId, invokerRole);
+  if (now.effectiveInvokerRole !== roleBefore) return false;
+  const was = new Map(before.map((v) => [v.sub, v.internal]));
+  return now.audience.every((v) => was.has(v.sub) && (was.get(v.sub) || !v.internal));
 }
 
 export interface ChannelAgentResult {
@@ -104,9 +133,7 @@ export async function respondInChannelAsAgent(args: {
   // audiences only) additionally requires EVERY seated member to see the document.
   const { audience, effectiveInvokerRole } = await agentReplyScope(workspaceId, channelId, invokerRole);
 
-  // Read-only allow-set (drop HITL/mutating tools) — same posture as incognito.
-  const allow = new Set(persona.tools);
-  for (const t of persona.tools) if (HITL_TOOLS.has(t)) allow.delete(t);
+  const allow = channelReplyAllow(persona.tools);
 
   // AGT-ART: collect documents the agent attaches during this turn (artifact.attach).
   const artifactIds = new Set<string>();
@@ -155,6 +182,14 @@ export async function respondInChannelAsAgent(args: {
     return { ok: false, reason: "generation_failed" };
   }
   if (!text) return { ok: false, reason: "empty" };
+
+  // The run can take minutes: re-check the audience right before posting. If anyone was
+  // seated who wasn't when the tools were scoped (or someone's standing dropped), the
+  // reply is dropped — it was produced for a different audience.
+  if (!(await replyScopeStillValid(workspaceId, channelId, invokerRole, audience, effectiveInvokerRole))) {
+    await appendAudit({ workspaceId, actorSub: invokedBySub, event: "agent_channel_reply_dropped", target: `${agent.id}:${channelId}` });
+    return { ok: false, reason: "audience_changed" };
+  }
 
   const message = await sendMessage({
     workspaceId,

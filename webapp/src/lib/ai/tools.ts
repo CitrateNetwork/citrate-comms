@@ -166,6 +166,9 @@ export function citrateCommsTools(ctx: ToolContext) {
   const permitted = (name: ToolName) => toolPermitted(name, ctx.agentRole, invokerRole);
   // Documents are visible per INVOKER (PBA-L3c-003), never workspace-wide.
   const viewer: DocViewer = { sub: ctx.invokedBySub, internal: isInternalRole(invokerRole) && isInternalRole(ctx.agentRole) };
+  // Output posted into a channel is read by its whole audience: document/calendar reads
+  // there return only what EVERY seated member (and the invoker) can see.
+  const readers: DocViewer[] = ctx.audience ? [viewer, ...ctx.audience] : [viewer];
   /** Execute-time gate for the HITL propose tools (which bypass audited()). */
   const assertPropose = (name: ToolName) => {
     if (!permitted(name)) throw new ToolDenied(`role ${invokerRole} may not propose ${name}`);
@@ -490,7 +493,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         "document name. Use to ground answers in real files — cite what you used.",
       inputSchema: z.object({ query: z.string().min(1).max(400), budget: z.number().int().min(1).max(10).default(6) }),
       execute: audited("documents.read", async (a: { query: string; budget: number }) => {
-        const results = await retrieveChunks(ctx.workspaceId, a.query, viewer, { budget: a.budget });
+        const results = await retrieveChunks(ctx.workspaceId, a.query, readers, { budget: a.budget });
         // documentId is surfaced so the agent can artifact.attach a source it cited.
         return { results: results.map((r) => ({ documentId: r.documentId, document: r.name, snippet: r.snippet })) };
       }),
@@ -501,7 +504,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         "file/image/chart by id so you can attach it to your reply with artifact.attach.",
       inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
       execute: audited("documents.list", async (a: { limit: number }) => {
-        const docs = await listDocuments(ctx.workspaceId, viewer, a.limit);
+        const docs = await listDocuments(ctx.workspaceId, readers, a.limit);
         return { documents: docs.map((d) => ({ id: d.id, name: d.name, mime: d.mime, at: d.createdAt })) };
       }),
     }),
@@ -693,12 +696,19 @@ export function citrateCommsTools(ctx: ToolContext) {
         // PBA-L3c-007: the team calendar is free/busy for events the invoker neither
         // created nor attends (unless an Owner/Admin) — the slot is visible for
         // scheduling, the title/location/attendees are not.
-        const seesAll = isAdminRole(invokerRole);
+        // In a channel reply the details go to the whole audience, so they're shown only for
+        // events whose organizer and attendees are all seated; everything else is busy-only.
+        const seated = ctx.audience ? new Set(ctx.audience.map((r) => r.sub)) : null;
+        const seesAll = !seated && isAdminRole(invokerRole);
+        const detailed = (e: (typeof events)[number]) =>
+          seated
+            ? seated.has(e.createdBySub) && e.attendees.every((at) => seated.has(at.sub))
+            : seesAll || e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub);
         return {
           window: { from, to },
           count: events.length,
           events: events.slice(0, 200).map((e) =>
-            seesAll || e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub)
+            detailed(e)
               ? {
                   id: e.id,
                   title: e.title,
