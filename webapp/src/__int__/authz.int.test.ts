@@ -236,6 +236,9 @@ describe("PBA-L3c-002 Partner/Guest are scoped to their channels (SEC-4 inverted
     expect(res.ok).toBe(true);
     const seats = await db().select().from(channelMembers).where(eq(channelMembers.sub, sub("partner2")));
     expect(seats.map((s) => s.channelId)).toEqual([ch.id]);
+    const { members } = await import("@/lib/db/schema");
+    const [m] = await db().select().from(members).where(and(eq(members.workspaceId, victimWs), eq(members.sub, sub("partner2"))));
+    expect([m?.role, m?.status]).toEqual(["Partner", "active"]);
     const foreign = await createChannel({ workspaceId: attackerWs, kind: "channel", name: "x", createdBySub: sub("mallory") });
     await expect(createInvite({ workspaceId: victimWs, email: `q-${run}@example.com`, role: "Partner", invitedBySub: sub("vowner"), scopeChannelId: foreign.id })).rejects.toThrow(/scope channel/);
   });
