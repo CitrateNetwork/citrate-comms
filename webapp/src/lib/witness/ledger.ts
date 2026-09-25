@@ -106,11 +106,16 @@ export async function listLedger(workspaceId: string, channelId: string): Promis
   return rows.map((r) => decode(workspaceId, r));
 }
 
-/** Mark a commitment resolved (status → done). */
-export async function resolveLedgerEntry(workspaceId: string, id: string, actorSub: string): Promise<void> {
-  await db()
+/** Mark a commitment resolved (status → done). Scoped to the channel the caller was
+ *  authorized for (PBA-L3c-020): an entry in another channel is not found. Returns
+ *  whether an entry was resolved. */
+export async function resolveLedgerEntry(workspaceId: string, channelId: string, id: string, actorSub: string): Promise<boolean> {
+  const rows = await db()
     .update(ledgerEntries)
     .set({ status: "done" })
-    .where(and(eq(ledgerEntries.workspaceId, workspaceId), eq(ledgerEntries.id, id)));
+    .where(and(eq(ledgerEntries.workspaceId, workspaceId), eq(ledgerEntries.channelId, channelId), eq(ledgerEntries.id, id)))
+    .returning({ id: ledgerEntries.id });
+  if (rows.length === 0) return false;
   await appendAudit({ workspaceId, actorSub, event: "witness_resolved_done", target: id });
+  return true;
 }
