@@ -111,7 +111,7 @@ describe("channel-reply reads are bounded by every seated member's view", () => 
     expect(txt).toContain("busy");
   });
 
-  it("a channel reply never gets web.search / web.fetch or any HITL tool", () => {
+  it("a channel reply never gets web.search / web.fetch or any HIC tool", () => {
     const allow = channelReplyAllow(ALL_TOOL_NAMES);
     expect([...CHANNEL_REPLY_DENY].sort()).toEqual(["web.fetch", "web.search"]);
     for (const t of ["web.fetch", "web.search", "crm.write", "terminal.exec"]) expect(allow.has(t as never), t).toBe(false);
@@ -194,7 +194,7 @@ describe("pass-5: agent seats don't block calendar details; registry is read-onl
     expect(txt).toContain("busy");
   });
 
-  it("with an audience set, the registry withholds HITL write tools and web.* even if the caller allows them", () => {
+  it("with an audience set, the registry withholds HIC write tools and web.* even if the caller allows them", () => {
     const allow = new Set(["crm.write", "terminal.exec", "calendar.schedule", "web.fetch", "crm.read"] as never[]);
     const scoped = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("alice"), agentRole: "Agent", invokerRole: "Member", audience: [{ sub: sub("alice"), internal: true }], allow: allow as never, audit: false });
     expect(Object.keys(scoped)).toEqual(["crm.read"]);

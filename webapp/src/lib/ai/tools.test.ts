@@ -34,11 +34,11 @@ describe("comms tool registry — single source of truth", () => {
     }
   });
 
-  // CM2-B-B018: the HITL tools bypass `audited()`, so they carried NO RBAC check at
+  // CM2-B-B018: the HIC tools skip `audited()`, so they carried NO RBAC check at
   // the point of call — a read-only Guest could stage a `runner.terminal` / `crm.delete`
-  // approval. Each HITL tool now gates on PostMessage (which an Agent/Member holds and
+  // approval. Each HIC tool now gates on PostMessage (which an Agent/Member holds and
   // a Guest does not) BEFORE it touches the queue.
-  it("a read-only Guest cannot STAGE a high-risk HITL action (the tool is not even offered)", () => {
+  it("a read-only Guest cannot STAGE a high-risk HIC action (the tool is not even offered)", () => {
     // PBA-L3c-002: the registry is filtered by toolPermitted, so the propose tools are
     // absent for a Guest; the execute-time assertPropose is defense in depth behind it.
     const asGuest = citrateCommsTools({ ...base, agentRole: "Guest" }) as Record<string, unknown>;
@@ -80,10 +80,10 @@ describe("comms tool registry — single source of truth", () => {
     expect([...CHANNEL_SCOPED_TOOLS]).toEqual(["thread.summarize"]);
   });
 
-  it("an Agent (read+post) is NOT blocked by the propose-gate (it may propose HITL actions)", () => {
+  it("an Agent (read+post) is NOT blocked by the propose-gate (it may propose HIC actions)", () => {
     // Regression guard: the propose-gate must be PostMessage, NOT the execute-capability
     // (CreateRecord/DeleteRecord/ManageWorkspace) — those would wrongly block agents,
-    // which is the whole point of the HITL propose→approve split.
+    // which is the whole point of the HIC propose→approve split.
     const asAgent = citrateCommsTools({ ...base, agentRole: "Agent" });
     // The tool is present and callable for an Agent (execution is DB-bound, so we only
     // assert the registry exposes it — the deny path above proves the guard is active).
