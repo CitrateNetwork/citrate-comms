@@ -1,0 +1,75 @@
+# webapp CI (PBA-R2). The webapp's own webapp/.github/workflows/ci.yml was never run —
+# GitHub only reads workflows from the repository root — so the web tier had no test gate
+# at all. This is that gate, made real, plus the integration suite that carries the
+# pre-bounty authz tripwires:
+#   - src/__int__/authz.int.test.ts      the audit PoCs (PBA-L3c-001..027), inverted
+#   - src/__int__/rbac-routes.int.test.ts every /api/workspaces/[id]/** handler x every
+#                                         role must match rbac/matrix.ts (PBA-L3c-002)
+# against a real Postgres (pgvector image) with every migration applied.
+name: webapp-ci
+
+on:
+  pull_request:
+    paths: ["webapp/**", ".github/workflows/webapp-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["webapp/**", ".github/workflows/webapp-ci.yml"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: webapp
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: comms_ci_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webapp/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - name: integration (real Postgres)
+        run: pnpm test:int
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/comms_ci_test
+      - name: schema/migrations in sync
+        run: |
+          pnpm db:generate
+          git diff --exit-code -- src/lib/db/migrations
+      - name: build
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_OIDC_ISSUER: http://localhost:3000
+          NEXT_PUBLIC_OIDC_CLIENT_ID: citrate-comms-web
+
+  semgrep-tenant-rules:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: tenant-isolation rules (blocking)
+        run: semgrep scan --metrics=off --config webapp/.semgrep --error webapp
