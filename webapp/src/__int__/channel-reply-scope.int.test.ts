@@ -13,11 +13,17 @@ import { createChannel, addChannelMembers } from "@/lib/domain/channels";
 import { agentReplyScope, replyScopeStillValid, CHANNEL_REPLY_DENY, channelReplyAllow } from "@/lib/domain/channel-agent";
 import { ALL_TOOL_NAMES } from "@/lib/ai/personas";
 import { listDocuments } from "@/lib/domain/documents";
+import { listMessages, sendMessage } from "@/lib/domain/messages";
+import { postAndPinCalendarSummary, everyReaderParticipates } from "@/lib/domain/calendar";
 import { citrateCommsTools } from "@/lib/ai/tools";
 import { encryptField } from "@/lib/security/crypto";
 import { run, sub, addMember } from "./helpers";
 
 type T = Record<string, { execute: (a: unknown) => Promise<unknown> }>;
+const tools = async (who: string, ch: string) => {
+  const s = await agentReplyScope(ws, ch, "Member");
+  return citrateCommsTools({ workspaceId: ws, invokedBySub: sub(who), agentRole: "Agent", invokerRole: s.effectiveInvokerRole, audience: s.audience, audit: false }) as unknown as T;
+};
 let ws: string, room: string, dm: string, dmDoc: string, wsDoc: string;
 
 beforeAll(async () => {
@@ -63,10 +69,6 @@ describe("the reply's audience is re-checked right before posting", () => {
 });
 
 describe("channel-reply reads are bounded by every seated member's view", () => {
-  const tools = async (who: string, ch: string) => {
-    const s = await agentReplyScope(ws, ch, "Member");
-    return citrateCommsTools({ workspaceId: ws, invokedBySub: sub(who), agentRole: "Agent", invokerRole: s.effectiveInvokerRole, audience: s.audience, audit: false }) as unknown as T;
-  };
 
   it("documents.list / documents.read omit the invoker's DM file when another seated member can't see it", async () => {
     const t = await tools("alice", room);
@@ -114,5 +116,57 @@ describe("channel-reply reads are bounded by every seated member's view", () => 
     expect([...CHANNEL_REPLY_DENY].sort()).toEqual(["web.fetch", "web.search"]);
     for (const t of ["web.fetch", "web.search", "crm.write", "terminal.exec"]) expect(allow.has(t as never), t).toBe(false);
     for (const t of ["crm.read", "documents.read", "thread.summarize"]) expect(allow.has(t as never), t).toBe(true);
+  });
+});
+
+describe("pass-4: invoker visibility AND whole-audience participation", () => {
+  it("calendar.read in a channel reply: a non-attendee invoker never gets another pair's event details", async () => {
+    const big = (await createChannel({ workspaceId: ws, kind: "channel", name: `gen-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob"), sub("mem")] })).id;
+    const start = new Date(Date.now() + 2 * 86400_000);
+    const [ev] = await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, `pair review ${run}`), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning();
+    await db().insert(eventAttendees).values({ workspaceId: ws, eventId: ev!.id, sub: sub("bob") } as never);
+    for (const who of ["mem", "alice"]) {
+      const t = await tools(who, big);
+      expect(JSON.stringify(await t["calendar.read"]!.execute({})), who).not.toContain(`pair review ${run}`);
+    }
+    // an all-hands event (every seated member participates) seen by a participant invoker is detailed
+    const [all] = await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, `all hands ${run}`), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning();
+    for (const a of ["bob", "mem"]) await db().insert(eventAttendees).values({ workspaceId: ws, eventId: all!.id, sub: sub(a) } as never);
+    expect(JSON.stringify(await (await tools("mem", big))["calendar.read"]!.execute({}))).toContain(`all hands ${run}`);
+  });
+
+  it("everyReaderParticipates: every reader must be organizer or attendee; empty audience -> false", () => {
+    const ev = { createdBySub: "a", attendees: [{ sub: "b" }] } as never;
+    expect(everyReaderParticipates(ev, ["a", "b"])).toBe(true);
+    expect(everyReaderParticipates(ev, ["a"])).toBe(true);
+    expect(everyReaderParticipates(ev, ["a", "b", "c"])).toBe(false);
+    expect(everyReaderParticipates(ev, [])).toBe(false);
+  });
+
+  it("calendar.pin_summary never pins an event some seated member doesn't participate in", async () => {
+    const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: `pin-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob"), sub("mem")] })).id;
+    const start = new Date(Date.now() + 86400_000);
+    const [ev] = await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, `pin private ${run}`), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC", channelId: ch } as never).returning();
+    await db().insert(eventAttendees).values({ workspaceId: ws, eventId: ev!.id, sub: sub("bob") } as never);
+    const [ok] = await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, `pin team ${run}`), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning();
+    for (const a of ["bob", "mem"]) await db().insert(eventAttendees).values({ workspaceId: ws, eventId: ok!.id, sub: sub(a) } as never);
+    await postAndPinCalendarSummary(ws, ch, sub("alice"), 7);
+    const body = (await listMessages(ws, ch)).map((m) => m.body).join("\n");
+    expect(body).not.toContain(`pin private ${run}`);
+    expect(body).toContain(`pin team ${run}`);
+  });
+
+  it("thread.summarize in a channel reply: only channels every reader is seated in (current channel ok)", async () => {
+    const lead = (await createChannel({ workspaceId: ws, kind: "channel", name: `lead-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] })).id;
+    await sendMessage({ workspaceId: ws, channelId: lead, authorSub: sub("alice"), body: `LEAD-ONLY ${run}` });
+    const gen = (await createChannel({ workspaceId: ws, kind: "channel", name: `g2-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob"), sub("mem")] })).id;
+    await sendMessage({ workspaceId: ws, channelId: gen, authorSub: sub("mem"), body: `GEN ${run}` });
+    const t = await tools("bob", gen);
+    await expect(t["thread.summarize"]!.execute({ channelId: lead, limit: 20 })).rejects.toThrow(/not every reader/);
+    const cur = (await t["thread.summarize"]!.execute({ channelId: gen, limit: 20 })) as { messages: { body: string }[] };
+    expect(cur.messages.map((m) => m.body)).toContain(`GEN ${run}`);
+    // outside a channel reply (1:1 chat / MCP) bob may still summarize a channel he's in
+    const solo = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("bob"), agentRole: "Agent", invokerRole: "Member", audit: false }) as unknown as T;
+    expect(JSON.stringify(await solo["thread.summarize"]!.execute({ channelId: lead, limit: 20 }))).toContain(`LEAD-ONLY ${run}`);
   });
 });

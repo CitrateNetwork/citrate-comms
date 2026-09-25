@@ -8,7 +8,7 @@
 import { generateText, stepCountIs } from "ai";
 import { getInferenceModel } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
-import { citrateCommsTools } from "@/lib/ai/tools";
+import { citrateCommsTools, CHANNEL_REPLY_DENY } from "@/lib/ai/tools";
 import { HITL_TOOLS, type ToolName } from "@/lib/ai/personas";
 import { resolvePersona, personaIdForAgent } from "@/lib/domain/personas";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
@@ -44,8 +44,7 @@ export async function agentReplyScope(workspaceId: string, channelId: string, in
   return { audience, effectiveInvokerRole: audience.some((a) => !a.internal) ? "Partner" : invokerRole };
 }
 
-/** Tools never offered to an agent replying into a channel. */
-export const CHANNEL_REPLY_DENY: readonly string[] = ["web.fetch", "web.search"];
+export { CHANNEL_REPLY_DENY };
 
 /** The allow-set for a channel reply: the persona's tools minus HITL/mutating tools
  *  (read-only posture) and minus the open-web tools (a URL is an exfil path). */

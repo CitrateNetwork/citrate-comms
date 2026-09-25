@@ -15,7 +15,7 @@ import { z } from "zod";
 import { Capability, can, isInternalRole, isAdminRole, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
 import { dedupeWorkspaceCrm } from "@/lib/domain/crm-dedupe";
-import { listWorkspaceEventsInRange, postAndPinCalendarSummary } from "@/lib/domain/calendar";
+import { listWorkspaceEventsInRange, postAndPinCalendarSummary, everyReaderParticipates } from "@/lib/domain/calendar";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
 import { retrieveChunks, listDocuments, getVisibleDocument, type DocViewer } from "@/lib/domain/documents";
@@ -130,6 +130,9 @@ export const TOOL_CAPABILITY: Record<string, Capability> = {
   "terminal.exec": Capability.PostMessage,
   "code.run": Capability.PostMessage,
 };
+
+/** Tools never offered to a reply that a channel audience reads. */
+export const CHANNEL_REPLY_DENY: readonly string[] = ["web.fetch", "web.search"];
 
 /** Tools that are scoped to a channel the invoker is seated in (membership re-checked in
  *  the tool) and so are usable by external roles. Everything else is internal-only. */
@@ -696,14 +699,14 @@ export function citrateCommsTools(ctx: ToolContext) {
         // PBA-L3c-007: the team calendar is free/busy for events the invoker neither
         // created nor attends (unless an Owner/Admin) — the slot is visible for
         // scheduling, the title/location/attendees are not.
-        // In a channel reply the details go to the whole audience, so they're shown only for
-        // events whose organizer and attendees are all seated; everything else is busy-only.
-        const seated = ctx.audience ? new Set(ctx.audience.map((r) => r.sub)) : null;
-        const seesAll = !seated && isAdminRole(invokerRole);
-        const detailed = (e: (typeof events)[number]) =>
-          seated
-            ? seated.has(e.createdBySub) && e.attendees.every((at) => seated.has(at.sub))
-            : seesAll || e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub);
+        // The invoker must be able to see an event's details (creator/attendee, or an admin
+        // outside channel replies). In a channel reply the output goes to everyone seated,
+        // so details additionally require EVERY seated member to be a participant;
+        // everything else is busy-only.
+        const readers = ctx.audience ? ctx.audience.map((r) => r.sub) : null;
+        const invokerSees = (e: (typeof events)[number]) =>
+          e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub) || (!readers && isAdminRole(invokerRole));
+        const detailed = (e: (typeof events)[number]) => invokerSees(e) && (!readers || everyReaderParticipates(e, readers));
         return {
           window: { from, to },
           count: events.length,
@@ -812,6 +815,13 @@ export function citrateCommsTools(ctx: ToolContext) {
         // channel. Without this a prompt-injected agent (or a Guest via the MCP surface)
         // could read any channel/DM in the workspace by uuid.
         if (!(await isChannelMember(a.channelId, ctx.invokedBySub))) throw new ToolDenied("not a member of this channel");
+        // In a channel reply the summary is read by the whole audience: every reader must
+        // already be seated in the channel being summarized.
+        if (ctx.audience) {
+          for (const r of ctx.audience) {
+            if (!(await isChannelMember(a.channelId, r.sub))) throw new ToolDenied("not every reader of this reply is a member of that channel");
+          }
+        }
         const msgs = await listMessages(ctx.workspaceId, a.channelId, { limit: a.limit });
         // Cap each body so a few very long messages can't blow the tool result.
         const BODY_CAP = 2000;
@@ -1003,7 +1013,11 @@ export function citrateCommsTools(ctx: ToolContext) {
 
   // Filter to the persona allow-list (if provided) AND to what the caller may use — a
   // tool the (agent, invoker) pair is not permitted is never offered (PBA-L3c-002).
-  const entries = Object.entries(all).filter(([key]) => (!ctx.allow || ctx.allow.has(key as ToolName)) && permitted(key as ToolName));
+  // A reply read by a channel audience never gets the open-web tools (a URL is an exfil
+  // path), regardless of the caller's allow-list — enforced here, not only by callers.
+  const entries = Object.entries(all).filter(
+    ([key]) => (!ctx.allow || ctx.allow.has(key as ToolName)) && permitted(key as ToolName) && !(ctx.audience && CHANNEL_REPLY_DENY.includes(key)),
+  );
   return Object.fromEntries(entries) as Partial<typeof all>;
 }
 
