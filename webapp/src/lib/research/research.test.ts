@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseSearxng, parseDuckduckgo, parseDuckduckgoLite, decodeEntities } from "./search";
-import { isPrivateIp, assertPublicUrl, extractReadable, BlockedUrlError, makeGuardedLookup, guardedGet, readCapped } from "./fetch";
+import { isPrivateIp, isBlockedAddress, assertPublicUrl, extractReadable, BlockedUrlError, makeGuardedLookup, guardedGet, readCapped } from "./fetch";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -66,6 +66,17 @@ describe("RES — SSRF guard", () => {
   it("allows public addresses", () => {
     for (const ip of ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]) {
       expect(isPrivateIp(ip), ip).toBe(false);
+    }
+  });
+
+  // `isBlockedAddress` is the canonical name the runner egress client uses; assert the
+  // alias blocks every non-public class and stays false for public addresses.
+  it("isBlockedAddress blocks each non-public class and allows public addresses", () => {
+    for (const ip of ["10.0.0.1", "127.0.0.1", "169.254.169.254", "172.16.0.1", "192.168.1.1", "100.64.1.5", "0.0.0.0", "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "64:ff9b::a9fe:a9fe"]) {
+      expect(isBlockedAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]) {
+      expect(isBlockedAddress(ip), ip).toBe(false);
     }
   });
   it("rejects non-http schemes and internal hostnames", async () => {

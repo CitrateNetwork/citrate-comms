@@ -26,7 +26,8 @@ import { listTables, getSheetSchema, readRows, queryTable } from "@/lib/domain/t
 import { saveMapping, previewImport, ensureMapping } from "@/lib/domain/import-engine";
 import { ingestText, ingestDocument } from "@/lib/domain/ingest";
 import { type MappingSpec } from "@/lib/domain/import-map";
-import { webSearch, webFetch, chartRender, RunnerUnavailableError } from "./runner";
+import { webSearch, chartRender, RunnerUnavailableError } from "./runner";
+import { runnerWebFetch, BlockedUrlError } from "./runner-fetch";
 import { searchWeb } from "@/lib/research/search";
 import { fetchReadable } from "@/lib/research/fetch";
 import type { CrmEntity } from "@/lib/domain/crm-enums";
@@ -932,31 +933,36 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
     }),
     "web.fetch": tool({
-      description: "Fetch and extract the readable text of a web page (SSRF-guarded). Use after web.search to read a source.",
+      description: "Fetch and extract the readable text of a web page (egress-restricted to public destinations). Use after web.search to read a source.",
       inputSchema: z.object({ url: z.string().url() }),
       execute: audited("web.fetch", async (a: { url: string }) => {
-        // RES: SSRF-guarded static fetch + readability on the BFF. Escalate to the runner's
-        // Playwright path only when the static extraction yields no usable text (JS-heavy).
+        // Guarded fetch + readability on the BFF. Egress is restricted to public
+        // destinations at connection time (see runner-fetch / research/fetch).
         const page = await fetchReadable(a.url);
-        // CM2-B-B006: a security refusal is a refusal. NEVER retry a blocked URL
-        // through the runner's unguarded Playwright fetcher (which is co-located with
-        // internal services) — only escalate when static extraction was genuinely thin.
+        // A refusal is a refusal: never fall through to any less-guarded fetch when the
+        // guard blocked the target. Only consider escalation when extraction was thin.
         if (page.blocked) return page;
         if (page.available && page.text.length > 200) return page;
-        // PBA-L3c-010: the runner's Playwright fetcher follows JS redirects and re-resolves
-        // DNS on its own, so the BFF's one-shot SSRF check does not cover it. Escalate only
-        // when the operator attests the runner enforces the private-address guard on EVERY
-        // request it makes (COMMS_RUNNER_FETCH_GUARDED=1); otherwise return the static result.
+        // The runner daemon opens its own socket (own DNS + own redirects), which the BFF
+        // cannot bound, so we do NOT forward a raw URL to it. When escalation is enabled we
+        // re-read through the BFF's pinned, egress-restricted client, which pins the
+        // connection to a validated address and re-validates every redirect hop. Gated so
+        // the flag-off path is unchanged.
         if (process.env.COMMS_RUNNER_FETCH_GUARDED !== "1") {
           return page.available ? page : { url: a.url, title: "", text: "", available: false, note: page.note };
         }
         try {
-          const dyn = await webFetch(a.url);
-          if (dyn && typeof dyn.text === "string" && dyn.text.length > 0) return { ...dyn, available: true };
+          const dyn = await runnerWebFetch(a.url);
+          if (dyn.text.length > 0) return { ...dyn, available: true };
         } catch (e) {
+          // The egress guard refused this destination (or a hop). Return the guarded static
+          // result flagged blocked — never fall through to a less-guarded fetch. Non-leaky.
+          if (e instanceof BlockedUrlError) {
+            return { url: a.url, title: "", text: "", available: false, blocked: true, note: "blocked" };
+          }
           if (!(e instanceof RunnerUnavailableError)) throw e;
         }
-        // No runner (or it failed): return whatever static gave us, honestly flagged.
+        // Escalation yielded nothing usable: return whatever the guarded fetch gave us.
         return page.available ? page : { url: a.url, title: "", text: "", available: false, note: page.note };
       }),
     }),

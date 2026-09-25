@@ -1,17 +1,26 @@
 /**
- * CM2-B-B006: web.fetch must NOT escalate an SSRF-blocked URL to the runner's
- * unguarded Playwright fetcher. A `blocked` page returns immediately; the runner is
- * only reached when static extraction was genuinely thin (available, short text).
+ * web.fetch escalation behavior:
+ *  - a blocked page is returned immediately and never escalated;
+ *  - a thin page is escalated ONLY when COMMS_RUNNER_FETCH_GUARDED=1, and escalation goes
+ *    through the egress-restricted BFF client (runnerWebFetch), never a raw runner call;
+ *  - when the egress client refuses the destination, the tool returns a blocked result
+ *    rather than throwing or falling through to a less-guarded fetch;
+ *  - with the flag unset, behavior is unchanged (no escalation).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { BlockedUrlError } from "@/lib/research/fetch";
 
 const fetchReadable = vi.fn();
-const webFetch = vi.fn();
+const runnerWebFetch = vi.fn();
 
-vi.mock("@/lib/research/fetch", () => ({ fetchReadable: (u: string) => fetchReadable(u) }));
-vi.mock("./runner", async (orig) => {
+// Keep the real BlockedUrlError so the tool's `instanceof` check works; stub fetchReadable.
+vi.mock("@/lib/research/fetch", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, webFetch: (u: string) => webFetch(u) };
+  return { ...actual, fetchReadable: (u: string) => fetchReadable(u) };
+});
+vi.mock("./runner-fetch", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, runnerWebFetch: (u: string) => runnerWebFetch(u) };
 });
 
 import { citrateCommsTools } from "./tools";
@@ -26,15 +35,17 @@ function webFetchTool() {
   return tools["web.fetch"]!;
 }
 
-describe("web.fetch SSRF escalation guard (CM2-B-B006)", () => {
+describe("web.fetch escalation", () => {
   beforeEach(() => {
     fetchReadable.mockReset();
-    webFetch.mockReset();
+    runnerWebFetch.mockReset();
+    delete process.env.COMMS_RUNNER_FETCH_GUARDED;
   });
 
-  it("does NOT call the runner when the static fetch was SSRF-blocked", async () => {
+  it("returns a blocked page immediately and never escalates it", async () => {
+    process.env.COMMS_RUNNER_FETCH_GUARDED = "1"; // even with escalation enabled
     fetchReadable.mockResolvedValue({
-      url: "http://169.254.169.254/latest/meta-data/",
+      url: "http://169.254.169.254/",
       title: "",
       text: "",
       truncated: false,
@@ -42,34 +53,40 @@ describe("web.fetch SSRF escalation guard (CM2-B-B006)", () => {
       blocked: true,
       note: "private address not allowed",
     });
-    const res = (await webFetchTool().execute({ url: "http://169.254.169.254/latest/meta-data/" })) as {
+    const res = (await webFetchTool().execute({ url: "http://169.254.169.254/" })) as {
       blocked?: boolean;
       available: boolean;
     };
-    expect(webFetch).not.toHaveBeenCalled();
+    expect(runnerWebFetch).not.toHaveBeenCalled();
     expect(res.blocked).toBe(true);
     expect(res.available).toBe(false);
   });
 
-  it("does NOT escalate a thin page unless the runner is attested as SSRF-guarded (PBA-L3c-010)", async () => {
-    delete process.env.COMMS_RUNNER_FETCH_GUARDED;
+  it("with the flag unset, does not escalate a thin page (behavior unchanged)", async () => {
     fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
-    webFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
+    runnerWebFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
     const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { text: string };
-    expect(webFetch).not.toHaveBeenCalled();
+    expect(runnerWebFetch).not.toHaveBeenCalled();
     expect(res.text).toBe("short");
   });
 
-  it("DOES escalate a thin page when COMMS_RUNNER_FETCH_GUARDED=1", async () => {
+  it("with the flag set, escalates a thin page through the egress-restricted client", async () => {
     process.env.COMMS_RUNNER_FETCH_GUARDED = "1";
-    try {
-      fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
-      webFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
-      const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { text: string };
-      expect(webFetch).toHaveBeenCalledOnce();
-      expect(res.text).toBe("the full dynamic body");
-    } finally {
-      delete process.env.COMMS_RUNNER_FETCH_GUARDED;
-    }
+    fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
+    runnerWebFetch.mockResolvedValue({ url: "https://ex.com", title: "t", text: "the full dynamic body" });
+    const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { text: string };
+    expect(runnerWebFetch).toHaveBeenCalledOnce();
+    expect(res.text).toBe("the full dynamic body");
+  });
+
+  it("returns a blocked result (not a throw) when the egress client refuses the escalation", async () => {
+    process.env.COMMS_RUNNER_FETCH_GUARDED = "1";
+    fetchReadable.mockResolvedValue({ url: "https://ex.com", title: "", text: "short", truncated: false, available: true });
+    runnerWebFetch.mockRejectedValue(new BlockedUrlError("destination not allowed"));
+    const res = (await webFetchTool().execute({ url: "https://ex.com" })) as { blocked?: boolean; available: boolean; note?: string };
+    expect(runnerWebFetch).toHaveBeenCalledOnce();
+    expect(res.blocked).toBe(true);
+    expect(res.available).toBe(false);
+    expect(res.note).toBe("blocked"); // no internal detail leaked
   });
 });
