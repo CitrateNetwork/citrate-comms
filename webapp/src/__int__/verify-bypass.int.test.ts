@@ -6,11 +6,11 @@ import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
 vi.mock("@/lib/email/send", async (orig) => ({ ...(await orig<Record<string, unknown>>()), sendInviteEmail: async () => ({ sent: false }) }));
 
-import { and, eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { documents, agentPrompts, agentSkills, calendarEvents, eventAttendees, members } from "@/lib/db/schema";
+import { documents, agentPrompts, agentSkills, calendarEvents, eventAttendees } from "@/lib/db/schema";
 import { createWorkspace } from "@/lib/domain/workspaces";
-import { createChannel, addChannelMembers } from "@/lib/domain/channels";
+import { createChannel } from "@/lib/domain/channels";
 import { sendMessage } from "@/lib/domain/messages";
 import { listPersonas, seedDefaultPersonas } from "@/lib/domain/personas";
 import { addResource, listResources } from "@/lib/domain/agent-config";
@@ -36,7 +36,7 @@ import * as importRoute from "@/app/api/workspaces/[id]/personas/import/route";
 import * as notifRoute from "@/app/api/workspaces/[id]/notifications/route";
 import { run, sub, req, P, addMember, mcpCall } from "./helpers";
 
-let ws: string, other: string, dmId: string, dmDocId: string, sharedCh: string, otherCh: string, personaId: string, otherPersona: string;
+let ws: string, other: string, dmId: string, dmDocId: string, sharedCh: string, otherCh: string, personaId: string;
 
 beforeAll(async () => {
   ws = (await createWorkspace({ name: `v ${run}`, ownerSub: sub("own"), ownerWallet: null, ownerEmail: null })).id;
@@ -57,7 +57,6 @@ beforeAll(async () => {
   await seedDefaultPersonas(ws, sub("own"));
   await seedDefaultPersonas(other, sub("mal"));
   personaId = (await listPersonas(ws))[0]!.id;
-  otherPersona = (await listPersonas(other))[0]!.id;
 });
 
 describe("V-002a invite scopeChannelId: Admin not in a DM seats themself into it", () => {
