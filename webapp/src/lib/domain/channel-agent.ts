@@ -17,6 +17,7 @@ import { directory } from "@/lib/domain/members";
 import { listAgents } from "@/lib/domain/agents";
 import { notifyChannelMentions } from "@/lib/domain/notifications";
 import { appendAudit } from "@/lib/audit/chain";
+import type { Role } from "@/lib/rbac/matrix";
 
 export interface ChannelAgentResult {
   ok: boolean;
@@ -35,8 +36,11 @@ export async function respondInChannelAsAgent(args: {
   channelId: string;
   agentMemberSub: string;
   invokedBySub: string;
+  /** The invoking human's role — an external Partner/Guest who @-mentions an agent must
+   *  not borrow the agent's workspace-wide read (PBA-L3c-002). */
+  invokerRole: Role;
 }): Promise<ChannelAgentResult> {
-  const { workspaceId, channelId, agentMemberSub, invokedBySub } = args;
+  const { workspaceId, channelId, agentMemberSub, invokedBySub, invokerRole } = args;
 
   // The agent must be a real, enabled Agent member of this workspace.
   const agents = await listAgents(workspaceId);
@@ -87,6 +91,7 @@ export async function respondInChannelAsAgent(args: {
     personaId,
     threadId: null,
     agentRole: "Agent",
+    invokerRole,
     allow,
     audit: true,
     collectArtifact: (id) => artifactIds.add(id),

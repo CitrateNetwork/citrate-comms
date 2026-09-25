@@ -4,7 +4,7 @@ import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
 import { listAccounts, listDeals, listContacts } from "@/lib/domain/crm";
 import { seedDefaultCrmFields } from "@/lib/domain/crm-fields";
-import { can, Capability } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole } from "@/lib/rbac/matrix";
 import { CrmScreen } from "@/components/crm/CrmScreen";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +18,7 @@ export default async function CrmPage({ params }: { params: Promise<{ slug: stri
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   // Seed the default custom-field defs on first visit (idempotent), so records are rich
   // out of the box. Best-effort — never block the screen.

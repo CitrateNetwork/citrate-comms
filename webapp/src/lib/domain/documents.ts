@@ -3,13 +3,14 @@
  * AGENTS-S4 / CRM-D4; D1 just lists what's attached to a record. Extracted text is
  * encrypted (`text_enc`); only metadata is surfaced here.
  */
-import { and, desc, eq, isNotNull, cosineDistance } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql, cosineDistance, type SQL } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { documents, documentChunks } from "@/lib/db/schema";
+import { documents, documentChunks, channelMembers, messageAttachments, messages } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { embed, embedOne } from "@/lib/ai/embeddings";
 import { recordActivity } from "./crm-activity";
+import { recordExists } from "./crm";
 
 export interface DocumentRow {
   id: string;
@@ -26,7 +27,81 @@ export interface DocScope {
   channelId?: string | null;
 }
 
-/** A single document (workspace-scoped) — for the audited download proxy. */
+/**
+ * Who is looking at documents (PBA-L3c-003). Visibility is decided per viewer, never per
+ * workspace:
+ *  - a document uploaded into a channel/DM (`channelId` set) is visible to that channel's
+ *    members;
+ *  - a document shared into a channel as a message attachment is visible to that
+ *    channel's members;
+ *  - a workspace-level document (`channelId` NULL) is visible to INTERNAL roles only
+ *    (Partner/Guest never see workspace documents — PBA-L3c-002).
+ * Every read path (download proxy, documents.list/read, RAG, artifact.attach, ingest)
+ * applies this, so a private-channel or DM attachment never leaks workspace-wide.
+ */
+export interface DocViewer {
+  sub: string;
+  /** Holds ReadWorkspace (Owner/Admin/Member/Agent). */
+  internal: boolean;
+}
+
+/** SQL predicate over `documents` that is true iff `viewer` may see the row. */
+export function documentVisibleTo(workspaceId: string, viewer: DocViewer): SQL {
+  const inMyChannel = sql`${documents.channelId} IN (SELECT ${channelMembers.channelId} FROM ${channelMembers} WHERE ${channelMembers.workspaceId} = ${workspaceId} AND ${channelMembers.sub} = ${viewer.sub})`;
+  const sharedIntoMyChannel = sql`${documents.id} IN (SELECT ${messageAttachments.documentId} FROM ${messageAttachments} INNER JOIN ${messages} ON ${messages.id} = ${messageAttachments.messageId} INNER JOIN ${channelMembers} ON ${channelMembers.channelId} = ${messages.channelId} WHERE ${messageAttachments.workspaceId} = ${workspaceId} AND ${messages.workspaceId} = ${workspaceId} AND ${channelMembers.sub} = ${viewer.sub})`;
+  const parts: SQL[] = [inMyChannel, sharedIntoMyChannel];
+  if (viewer.internal) parts.unshift(isNull(documents.channelId));
+  return or(...parts)!;
+}
+
+/** A single document the viewer may see, or null (absent OR not visible). */
+export async function getVisibleDocument(workspaceId: string, id: string, viewer: DocViewer): Promise<DocumentRow | null> {
+  const [r] = await db()
+    .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
+    .from(documents)
+    .where(and(eq(documents.workspaceId, workspaceId), eq(documents.id, id), documentVisibleTo(workspaceId, viewer)))
+    .limit(1);
+  return r ? { ...r, createdAt: r.createdAt.toISOString() } : null;
+}
+
+/**
+ * Validate a document's scope ids before insert (PBA-L3c-027): the account/deal must be
+ * records of this workspace and a channel must be this workspace's AND seat the uploader.
+ * Returns an error code, or null when the scope is valid.
+ */
+export async function badDocScope(
+  workspaceId: string,
+  uploaderSub: string,
+  scope: { accountId: string | null; dealId: string | null; channelId: string | null },
+): Promise<"not_found" | "bad_scope" | null> {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const v of [scope.accountId, scope.dealId, scope.channelId]) if (v && !uuid.test(v)) return "bad_scope";
+  if (scope.accountId && !(await recordExists(workspaceId, "account", scope.accountId))) return "not_found";
+  if (scope.dealId && !(await recordExists(workspaceId, "deal", scope.dealId))) return "not_found";
+  if (scope.channelId) {
+    const [seat] = await db()
+      .select({ sub: channelMembers.sub })
+      .from(channelMembers)
+      .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, scope.channelId), eq(channelMembers.sub, uploaderSub)))
+      .limit(1);
+    if (!seat) return "bad_scope";
+  }
+  return null;
+}
+
+/** The subset of `ids` that are documents of `workspaceId` visible to `viewer`. */
+export async function visibleDocumentIds(workspaceId: string, ids: string[], viewer: DocViewer): Promise<Set<string>> {
+  const uuids = ids.filter((i) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(i));
+  if (uuids.length === 0) return new Set();
+  const rows = await db()
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(eq(documents.workspaceId, workspaceId), inArray(documents.id, uuids), documentVisibleTo(workspaceId, viewer)));
+  return new Set(rows.map((r) => r.id));
+}
+
+/** A single document (workspace-scoped, NOT viewer-scoped) — internal use only; every
+ *  caller-facing read goes through getVisibleDocument. */
 export async function getDocument(workspaceId: string, id: string): Promise<DocumentRow | null> {
   const [r] = await db()
     .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
@@ -57,12 +132,14 @@ export async function listDocumentsForRecord(
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
 }
 
-/** All documents in a workspace (newest first, bounded) — for agent artifact discovery. */
-export async function listDocuments(workspaceId: string, limit = 50): Promise<DocumentRow[]> {
+/** Documents in a workspace that `viewer` may see (newest first, bounded) — for agent
+ *  artifact discovery. Viewer-scoped (PBA-L3c-003): private-channel/DM files are absent
+ *  for non-participants. */
+export async function listDocuments(workspaceId: string, viewer: DocViewer, limit = 50): Promise<DocumentRow[]> {
   const rows = await db()
     .select({ id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl, uploadedBySub: documents.uploadedBySub, createdAt: documents.createdAt })
     .from(documents)
-    .where(eq(documents.workspaceId, workspaceId))
+    .where(and(eq(documents.workspaceId, workspaceId), documentVisibleTo(workspaceId, viewer)))
     .orderBy(desc(documents.createdAt))
     .limit(Math.min(Math.max(limit, 1), 200));
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
@@ -110,8 +187,8 @@ export async function extractDocText(name: string, mime: string | null, buf: Buf
 
 /** Fetch a stored document's blob and extract its text (UDI ingest source).
  *  Returns null if the doc is missing, unreachable, or an unsupported type. */
-export async function getDocumentText(workspaceId: string, id: string): Promise<{ name: string; text: string } | null> {
-  const doc = await getDocument(workspaceId, id);
+export async function getDocumentText(workspaceId: string, id: string, viewer: DocViewer): Promise<{ name: string; text: string } | null> {
+  const doc = await getVisibleDocument(workspaceId, id, viewer);
   if (!doc?.blobUrl) return null;
   try {
     const res = await fetch(doc.blobUrl);
@@ -250,17 +327,18 @@ function tokenize(s: string): Set<string> {
 }
 
 /** Retrieve the most relevant document chunks (semantic when embeddings exist; lexical
- *  fallback otherwise), with the source document name for citation. */
+ *  fallback otherwise), with the source document name for citation. Viewer-scoped
+ *  (PBA-L3c-003): only chunks of documents `viewer` may see are candidates. */
 export async function retrieveChunks(
   workspaceId: string,
   query: string,
+  viewer: DocViewer,
   opts: { scope?: DocScope; budget?: number } = {},
 ): Promise<RetrievedChunk[]> {
   const budget = Math.min(Math.max(opts.budget ?? 6, 1), 20);
   const sc = opts.scope ? scopeCol(opts.scope) : undefined;
-  const where = sc
-    ? and(eq(documentChunks.workspaceId, workspaceId), sc)
-    : eq(documentChunks.workspaceId, workspaceId);
+  const base = and(eq(documentChunks.workspaceId, workspaceId), eq(documents.workspaceId, workspaceId), documentVisibleTo(workspaceId, viewer));
+  const where = sc ? and(base, sc) : base;
 
   const qVec = query ? await embedOne(query).catch(() => null) : null;
   if (qVec) {

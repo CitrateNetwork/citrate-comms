@@ -31,6 +31,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       channelId: id,
       agentMemberSub: agentSub,
       invokedBySub: ctx.sub,
+      invokerRole: ctx.role,
     });
     if (!result.ok) return NextResponse.json({ error: result.reason ?? "failed" }, { status: 422 });
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireMember, Capability } from "@/lib/tenant/guard";
+import { Capability, requireInternal } from "@/lib/tenant/guard";
 import { can } from "@/lib/rbac/matrix";
 import { errorResponse } from "@/lib/http";
 import { listWorkspaceThreads } from "@/lib/domain/agent-threads";
@@ -14,7 +14,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const ctx = await requireMember(req, id);
+    const ctx = await requireInternal(req, id);
     const viewAll = can(ctx.role, Capability.ManageWorkspace);
     const url = new URL(req.url);
     const threads = await listWorkspaceThreads(id, ctx.sub, {

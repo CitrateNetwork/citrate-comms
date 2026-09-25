@@ -50,6 +50,10 @@ const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: "settings", label: "Settings", icon: "settings" },
 ];
 
+/** Surfaces an external (Partner/Guest) member can use: attendee-scoped calendar, the
+ *  roster (to start DMs), and their own settings. */
+const EXTERNAL_NAV = new Set(["calendar", "members", "settings"]);
+
 export function AppShell({
   workspaceId,
   workspaceSlug,
@@ -87,7 +91,10 @@ export function AppShell({
       {s.unread ? <span className={styles.unread}>{s.unread}</span> : null}
     </Link>
   );
-  const nav = NAV.filter((n) => n.key !== "approvals" || canApprove);
+  // PBA-L3c-002: external roles (Partner/Guest) get the channel-scoped surfaces only —
+  // the server pages/APIs refuse them regardless; this just hides dead links.
+  const external = role === "Partner" || role === "Guest";
+  const nav = NAV.filter((n) => (n.key !== "approvals" || canApprove) && (!external || EXTERNAL_NAV.has(n.key)));
   const active = nav.find((n) => pathname.startsWith(`${base}/${n.key}`))?.key ?? "comms";
 
   return (

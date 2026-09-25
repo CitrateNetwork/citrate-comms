@@ -6,7 +6,7 @@ import { hashId } from "@/lib/security/crypto";
 import { inviteSchema } from "@/lib/validation/schemas";
 import { canGrant, type Role } from "@/lib/rbac/matrix";
 import { eq } from "drizzle-orm";
-import { createInvite, listPendingInvites } from "@/lib/domain/invites";
+import { createInvite, listPendingInvites, channelInWorkspace } from "@/lib/domain/invites";
 import { sendInviteEmail } from "@/lib/email/send";
 import { memberRow } from "@/lib/domain/members";
 import { db } from "@/lib/db/client";
@@ -37,6 +37,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const parsed = inviteSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
     if (parsed.data.workspaceId !== id) return NextResponse.json({ error: "workspace_mismatch" }, { status: 400 });
+    // PBA-L3c-002: the scope channel must belong to this workspace.
+    if (parsed.data.scopeChannelId && !(await channelInWorkspace(id, parsed.data.scopeChannelId))) {
+      return NextResponse.json({ error: "bad_scope_channel" }, { status: 400 });
+    }
     // Anti-escalation: the inviter must be entitled to grant the chosen role.
     // Without this an Admin could mint Admin-bearing invite links — the exact
     // escalation the batch and role-change routes already block (CM2-B-B011).

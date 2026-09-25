@@ -44,6 +44,10 @@ export async function createInvite(args: {
   invitedBySub: string;
   scopeChannelId?: string | null;
 }): Promise<CreatedInvite> {
+  // PBA-L3c-002: a scope channel must be a channel of THIS workspace.
+  if (args.scopeChannelId && !(await channelInWorkspace(args.workspaceId, args.scopeChannelId))) {
+    throw new Error("scope channel is not in this workspace");
+  }
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
@@ -61,6 +65,16 @@ export async function createInvite(args: {
 
   await appendAudit({ workspaceId: args.workspaceId, actorSub: args.invitedBySub, event: "member_invited", target: email });
   return { token, email, role: args.role, expiresAt: expiresAt.toISOString() };
+}
+
+/** True iff `channelId` is a channel of `workspaceId`. */
+export async function channelInWorkspace(workspaceId: string, channelId: string): Promise<boolean> {
+  const [c] = await db()
+    .select({ id: channels.id })
+    .from(channels)
+    .where(and(eq(channels.workspaceId, workspaceId), eq(channels.id, channelId)))
+    .limit(1);
+  return Boolean(c);
 }
 
 /** Resolve a raw invite token to its (unexpired, unaccepted) details, or null. */

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { crmViewSaveSchema, crmViewDeleteSchema } from "@/lib/validation/schemas";
 import { CRM_ENTITIES, type CrmEntity } from "@/lib/domain/crm-enums";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const ctx = await requireMember(req, id);
+    const ctx = await requireInternal(req, id);
     const url = new URL(req.url);
     const entity = url.searchParams.get("entity");
     if (!entity || !(CRM_ENTITIES as readonly string[]).includes(entity)) return NextResponse.json({ error: "bad_entity" }, { status: 400 });
@@ -39,7 +39,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const ctx = await requireMember(req, id);
+    const ctx = await requireInternal(req, id);
     const parsed = crmViewDeleteSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
     await deleteView(id, parsed.data.viewId, ctx.sub);

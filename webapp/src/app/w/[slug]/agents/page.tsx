@@ -7,7 +7,7 @@ import { channelsForMember } from "@/lib/domain/channels";
 import { directory } from "@/lib/domain/members";
 import { listPersonas, seedDefaultPersonas } from "@/lib/domain/personas";
 import { hasAnyConfigGrant } from "@/lib/domain/agent-config";
-import { can, Capability } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole } from "@/lib/rbac/matrix";
 import { AgentsScreen } from "@/components/agents/AgentsScreen";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +21,7 @@ export default async function AgentsPage({ params }: { params: Promise<{ slug: s
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   const [agents, channels, dir] = await Promise.all([
     listAgents(ws.id),

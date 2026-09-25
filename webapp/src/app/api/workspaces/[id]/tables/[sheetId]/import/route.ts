@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireCapability, Capability, requireMember } from "@/lib/tenant/guard";
+import { requireCapability, Capability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { getMapping, previewImport, approveMapping, createImportJob, runImportSlice } from "@/lib/domain/import-engine";
 
@@ -10,7 +10,7 @@ export const maxDuration = 120;
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; sheetId: string }> }) {
   try {
     const { id, sheetId } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     const mapping = await getMapping(id, sheetId);
     if (!mapping) return NextResponse.json({ error: "no_mapping" }, { status: 400 });
     return NextResponse.json({ preview: await previewImport(id, sheetId, mapping.spec) });

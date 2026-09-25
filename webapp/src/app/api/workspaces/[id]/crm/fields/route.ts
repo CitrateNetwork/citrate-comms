@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { crmFieldDefCreateSchema } from "@/lib/validation/schemas";
 import { listFieldDefs, createFieldDef } from "@/lib/domain/crm-fields";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     const url = new URL(req.url);
     const includeDisabled = url.searchParams.get("all") === "1";
     const entityParam = url.searchParams.get("entity") as CrmEntity | null;
