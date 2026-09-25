@@ -148,6 +148,9 @@ export function isPrivateIp(ip: string): boolean {
     if ((g[0]! & 0xffc0) === 0xfec0) return true;
     if ((g[0]! & 0xff00) === 0xff00) return true;
     // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 → judge by the embedded v4.
+    // RFC 2765 IPv4-translated ::ffff:0:0:0/96 (::ffff:0:a.b.c.d) — refused outright,
+    // like the other translation prefixes (verifier, informational).
+    if (g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0xffff && g[5] === 0) return true;
     const mapped = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && (g[5] === 0xffff || g[5] === 0);
     if (mapped && (g[6] !== 0 || g[7] !== 0)) {
       return isPrivateIpv4(g[6]! >> 8, g[6]! & 0xff) || isPrivateIpv4(g[7]! >> 8, g[7]! & 0xff);

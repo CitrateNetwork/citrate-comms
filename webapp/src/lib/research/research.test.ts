@@ -149,6 +149,9 @@ describe("RES — SSRF guard residuals (PBA-L3c-025)", () => {
       "fec0::1",
       "ff02::1",
       "100::1",
+      "::ffff:0:a9fe:a9fe", // RFC 2765 IPv4-translated → 169.254.169.254
+      "::ffff:0:808:808", // translated even to a public v4 (fail-closed)
+      "0:0:0:0:ffff:0:7f00:1",
     ]) {
       expect(isPrivateIp(ip), ip).toBe(true);
     }
@@ -227,7 +230,7 @@ describe("RES — node:http transport plumbing (PBA-L3c-025)", () => {
 
 describe("RES — SSRF guard boundaries (PBA-L3c-025 mutation hardening)", () => {
   it("addresses NEXT TO the refused prefixes stay public", () => {
-    for (const ip of ["2606:ff9b::1", "64:ff9a::1", "2606:0:1::1", "2606:db8::1", "2001:1::1", "100:0:0:1::1", "100:1::1", "2003::1", "2606::1", "2a00::1"]) {
+    for (const ip of ["2606:ff9b::1", "64:ff9a::1", "2606:0:1::1", "2606:db8::1", "2001:1::1", "100:0:0:1::1", "100:1::1", "2003::1", "2606::1", "2a00::1", "::fffe:0:808:808", "1::ffff:0:808:808"]) {
       expect(isPrivateIp(ip), ip).toBe(false);
     }
   });
