@@ -53,7 +53,7 @@ describe("proxy: cross-site mutation guard (PBA-L3c-026)", () => {
   });
   it("refuses a same-site SIBLING subdomain and a foreign Origin without fetch-metadata", async () => {
     expect((await proxy(mk(api, { method: "PATCH", headers: { cookie: COOKIE, "sec-fetch-site": "same-site" } }))).status).toBe(403);
-    expect((await proxy(mk(api, { method: "DELETE", headers: { cookie: COOKIE, origin: "https://evil.example" } }))).status).toBe(403);
+    expect((await proxy(mk(api, { method: "DELETE", headers: { cookie: COOKIE, origin: "https://other.example" } }))).status).toBe(403);
   });
   it("admits same-origin mutations, safe methods, bearer-token and cookie-less callers", async () => {
     const ok = (r: Response) => r.status !== 403;

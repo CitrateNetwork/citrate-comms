@@ -137,7 +137,7 @@ describe("RES — readable extraction", () => {
   });
 });
 
-describe("RES — SSRF guard residuals (PBA-L3c-025)", () => {
+describe("RES — SSRF guard: v4-translation ranges and connect-time lookup (PBA-L3c-025)", () => {
   it("refuses NAT64 / 6to4 / Teredo / documentation / site-local / multicast IPv6", () => {
     for (const ip of [
       "64:ff9b::a9fe:a9fe", // NAT64 → 169.254.169.254

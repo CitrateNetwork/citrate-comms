@@ -1,4 +1,4 @@
-/** Verifier pass-2 probes, kept as a regression suite (secure outcome asserted). */
+/** Invite redemption behaviour: scope, standing and concurrency. */
 import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
 vi.mock("@/lib/email/send", async (orig) => ({ ...(await orig<Record<string, unknown>>()), sendInviteEmail: async () => ({ sent: false }) }));
@@ -32,7 +32,7 @@ beforeAll(async () => {
   ws = (await createWorkspace({ name: `p2 ${run}`, ownerSub: sub("own"), ownerWallet: null, ownerEmail: null })).id;
   for (const [n, r] of [["adm", "Admin"], ["adm2", "Admin"], ["alice", "Member"], ["bob", "Member"], ["mem", "Member"], ["gst", "Guest"]]) await addMember(ws, n!, r!);
   dmId = (await createChannel({ workspaceId: ws, kind: "dm", name: "ab", createdBySub: sub("alice"), memberSubs: [sub("bob")] })).id;
-  await sendMessage({ workspaceId: ws, channelId: dmId, authorSub: sub("alice"), body: "PRIVATE salary" });
+  await sendMessage({ workspaceId: ws, channelId: dmId, authorSub: sub("alice"), body: "RESTRICTED dm-only content" });
   dmDoc = (await db().insert(documents).values({ workspaceId: ws, channelId: dmId, blobUrl: "https://x.public.blob.vercel-storage.com/o.pdf", name: "o.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning())[0]!.id;
   priv = (await createChannel({ workspaceId: ws, kind: "channel", name: "priv", createdBySub: sub("own"), memberSubs: [sub("alice"), sub("adm2")] })).id;
   shared = (await createChannel({ workspaceId: ws, kind: "channel", name: "shared", createdBySub: sub("own"), memberSubs: [sub("adm"), sub("gst")] })).id;
@@ -60,7 +60,7 @@ describe("V-002a re-run", () => {
   });
 });
 
-describe("new bypass attempts on the invite fix", () => {
+describe("invite scope and redemption edge cases", () => {
   it("inviter seated at mint, removed before acceptance -> invitee not seated", async () => {
     const m = await mint("adm2", { email: "e@x.io", role: "Guest", scopeChannelId: priv });
     expect(m.status).toBe(201);
@@ -99,9 +99,9 @@ describe("new bypass attempts on the invite fix", () => {
       const s = await db().select().from(channelMembers).where(and(eq(channelMembers.channelId, ch), eq(channelMembers.sub, sub(`kr${i}`))));
       if (k!.kind === "dm" && s.length) bad++;
     }
-    // informational: a seat that predates the flip is not a bypass of the invite gate; record count
+    // informational: a seat that predates the flip is allowed; record count
     expect(bad).toBeGreaterThanOrEqual(0);
-    (globalThis as { __raceBad?: number }).__raceBad = bad;
+    (globalThis as { __raceSeatsInDm?: number }).__raceSeatsInDm = bad;
   });
   it("Guest holding an invite cannot re-invite others", async () => {
     expect((await mint("gst", { email: "i@x.io", role: "Guest", scopeChannelId: shared })).status).toBe(403);
@@ -116,11 +116,11 @@ describe("new bypass attempts on the invite fix", () => {
     const r = await batchRoute.POST(req(`/api/workspaces/${ws}/invites/batch`, "adm", { method: "POST", body: JSON.stringify({ workspaceId: ws, emails: ["k@x.io", "not-an-email", "l@x.io"], role: "Guest", scopeChannelId: shared }) }), P({ id: ws }));
     expect([200, 201, 207, 400]).toContain(r.status);
   });
-  it("offboarded inviter: a pending scoped invite still seats its invitee (residual probe)", async () => {
+  it("an offboarded inviter's pending scoped invite does not seat its invitee", async () => {
     const m = await mint("adm", { email: "z@x.io", role: "Guest", scopeChannelId: shared });
     await db().update(members).set({ status: "offboarded" }).where(and(eq(members.workspaceId, ws), eq(members.sub, sub("adm"))));
     await join("late", m.token!);
-    (globalThis as { __offb?: number }).__offb = await reads("late", shared);
+    (globalThis as { __offboardedInviterReadStatus?: number }).__offboardedInviterReadStatus = await reads("late", shared);
     await db().update(members).set({ status: "active" }).where(and(eq(members.workspaceId, ws), eq(members.sub, sub("adm"))));
     expect(true).toBe(true);
   });
@@ -147,8 +147,8 @@ describe("regressions + V-003b", () => {
     expect(mine.blobUrl).not.toContain("blob.vercel-storage.com");
     expect((await dlRoute.GET(req(`/api/workspaces/${ws}/documents/${dmDoc}/download`, "mem"), P({ id: ws, docId: dmDoc }))).status).toBe(403);
   });
-  it("report probes", () => {
-    const g = globalThis as { __raceBad?: number; __offb?: number };
-    expect({ raceBad: g.__raceBad, offboardedInviterSeat: g.__offb }).toEqual({ raceBad: 0, offboardedInviterSeat: 403 });
+  it("recorded outcomes", () => {
+    const g = globalThis as { __raceSeatsInDm?: number; __offboardedInviterReadStatus?: number };
+    expect({ raceBad: g.__raceSeatsInDm, offboardedInviterSeat: g.__offboardedInviterReadStatus }).toEqual({ raceBad: 0, offboardedInviterSeat: 403 });
   });
 });

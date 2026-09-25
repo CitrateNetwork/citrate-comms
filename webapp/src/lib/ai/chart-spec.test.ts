@@ -18,15 +18,15 @@ describe("chart spec parsing (RR-2) — inline data only, no remote fetch", () =
     expect(parseChartSpec('"a string"').ok).toBe(false);
   });
 
-  // PBA-L3c-021 (lane PoC SEC-7, inverted): the url/href channels as encoding OBJECTS
-  // bypassed the string-only check.
+  // PBA-L3c-021: url/href channels given as encoding OBJECTS are rejected too, not only
+  // string-valued url keys.
   it("REJECTS an image mark whose url channel is an encoding object", () => {
-    const spec = { data: { values: [{ u: "https://attacker.example/beacon.png?leak=1" }] }, mark: "image", encoding: { url: { field: "u" }, x: { value: 0 }, y: { value: 0 } } };
+    const spec = { data: { values: [{ u: "https://external.example/image.png?q=1" }] }, mark: "image", encoding: { url: { field: "u" }, x: { value: 0 }, y: { value: 0 } } };
     expect(parseChartSpec(JSON.stringify(spec)).ok).toBe(false);
   });
 
   it("REJECTS an href channel (link-out on click) and href mark properties", () => {
-    expect(parseChartSpec(JSON.stringify({ data: { values: [{ h: "https://attacker.example/phish" }] }, mark: "point", encoding: { href: { field: "h" } } })).ok).toBe(false);
+    expect(parseChartSpec(JSON.stringify({ data: { values: [{ h: "https://external.example/link" }] }, mark: "point", encoding: { href: { field: "h" } } })).ok).toBe(false);
     expect(parseChartSpec(JSON.stringify({ data: { values: [] }, mark: { type: "point", href: "https://x" } })).ok).toBe(false);
   });
 
