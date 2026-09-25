@@ -57,6 +57,12 @@ export interface ToolContext {
   /** AGT-ART: called by artifact.attach with a documentId the agent wants attached to its
    *  message. The caller (channel reply / chat) links the collected documents afterward. */
   collectArtifact?: (documentId: string) => void;
+  /**
+   * Everyone who will read this turn's output (a channel reply's seated members). When
+   * set, artifact.attach only attaches a document EVERY audience member can already see
+   * (verifier pass 2) — the agent can't carry a file past the channel's audience.
+   */
+  audience?: DocViewer[];
 }
 
 const entitySchema = z.enum(["account", "deal", "contact"]);
@@ -509,6 +515,11 @@ export function citrateCommsTools(ctx: ToolContext) {
         // PBA-L3c-003: only a document the invoker can see may be re-posted into a channel.
         const doc = await getVisibleDocument(ctx.workspaceId, a.documentId, viewer);
         if (!doc) return { ok: false, error: "document_not_found" };
+        for (const reader of ctx.audience ?? []) {
+          if (!(await getVisibleDocument(ctx.workspaceId, a.documentId, reader))) {
+            return { ok: false, error: "not_visible_to_channel", message: "Not every member of this channel can see that document, so it can't be attached here." };
+          }
+        }
         ctx.collectArtifact?.(a.documentId);
         const downloadUrl = `/api/workspaces/${ctx.workspaceId}/documents/${doc.id}/download`;
         return { ok: true, documentId: doc.id, title: doc.name, downloadUrl, markdown: `[${doc.name}](${downloadUrl})` };

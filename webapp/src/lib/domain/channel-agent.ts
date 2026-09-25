@@ -17,7 +17,32 @@ import { directory } from "@/lib/domain/members";
 import { listAgents } from "@/lib/domain/agents";
 import { notifyChannelMentions } from "@/lib/domain/notifications";
 import { appendAudit } from "@/lib/audit/chain";
-import type { Role } from "@/lib/rbac/matrix";
+import { isInternalRole, type Role } from "@/lib/rbac/matrix";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+import { channelMembers, members } from "@/lib/db/schema";
+import type { DocViewer } from "./documents";
+
+/**
+ * Everyone who will read an agent reply posted into `channelId`: the seated, ACTIVE
+ * workspace members, with whether each is internal (holds ReadWorkspace). A seat whose
+ * member row is missing/inactive counts as external (fail closed).
+ */
+export async function channelAudience(workspaceId: string, channelId: string): Promise<DocViewer[]> {
+  const rows = await db()
+    .select({ sub: channelMembers.sub, role: members.role, status: members.status })
+    .from(channelMembers)
+    .leftJoin(members, and(eq(members.workspaceId, channelMembers.workspaceId), eq(members.sub, channelMembers.sub)))
+    .where(and(eq(channelMembers.workspaceId, workspaceId), eq(channelMembers.channelId, channelId)));
+  return rows.map((r) => ({ sub: r.sub, internal: r.status === "active" && Boolean(r.role) && isInternalRole(r.role as Role) }));
+}
+
+/** The tool scope for an agent reply into `channelId`: the audience, and the invoker role
+ *  the tools run as (Partner-level if any external member is seated). */
+export async function agentReplyScope(workspaceId: string, channelId: string, invokerRole: Role): Promise<{ audience: DocViewer[]; effectiveInvokerRole: Role }> {
+  const audience = await channelAudience(workspaceId, channelId);
+  return { audience, effectiveInvokerRole: audience.some((a) => !a.internal) ? "Partner" : invokerRole };
+}
 
 export interface ChannelAgentResult {
   ok: boolean;
@@ -71,6 +96,14 @@ export async function respondInChannelAsAgent(args: {
     .map((m) => `${nameOf(m.authorSub)}: ${m.body}`)
     .join("\n");
 
+  // Verifier pass 2 (indirect prompt injection / confused deputy): the reply lands in THIS
+  // channel, so the tool surface is bounded by the channel's AUDIENCE, not just the
+  // invoker. If any Partner/Guest is seated, the agent runs with Partner-level tools
+  // (thread.summarize only) — a Partner's injected text can't steer the agent into
+  // reading CRM/docs/calendar into a channel the Partner reads. artifact.attach (internal
+  // audiences only) additionally requires EVERY seated member to see the document.
+  const { audience, effectiveInvokerRole } = await agentReplyScope(workspaceId, channelId, invokerRole);
+
   // Read-only allow-set (drop HITL/mutating tools) — same posture as incognito.
   const allow = new Set(persona.tools);
   for (const t of persona.tools) if (HITL_TOOLS.has(t)) allow.delete(t);
@@ -91,7 +124,8 @@ export async function respondInChannelAsAgent(args: {
     personaId,
     threadId: null,
     agentRole: "Agent",
-    invokerRole,
+    invokerRole: effectiveInvokerRole,
+    audience,
     allow,
     audit: true,
     collectArtifact: (id) => artifactIds.add(id),
