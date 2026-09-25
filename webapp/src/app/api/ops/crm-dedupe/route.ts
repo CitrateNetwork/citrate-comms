@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { bearerMatches } from "@/lib/security/bearer";
 import { db } from "@/lib/db/client";
 import { workspaces } from "@/lib/db/schema";
 import { dedupeWorkspaceCrm, type DedupeReport } from "@/lib/domain/crm-dedupe";
@@ -17,7 +18,7 @@ export async function POST(req: Request) {
   const secret = process.env.DEDUPE_OPS_SECRET;
   if (!secret) return NextResponse.json({ error: "not_found" }, { status: 404 });
   const auth = req.headers.get("authorization") || "";
-  if (auth !== `Bearer ${secret}`) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!bearerMatches(auth, secret)) return NextResponse.json({ error: "unauthorized" }, { status: 401 }); // PBA-L3c-035
 
   const body = (await req.json().catch(() => ({}))) as { dryRun?: boolean; workspaceId?: string; maxMerges?: number };
   const dryRun = body.dryRun ?? true; // default SAFE: dry-run unless explicitly told to execute

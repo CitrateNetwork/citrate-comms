@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { bearerMatches } from "@/lib/security/bearer";
 import { errorResponse } from "@/lib/http";
 import { listActiveJobs, runImportSlice } from "@/lib/domain/import-engine";
 
@@ -16,7 +17,7 @@ export async function GET(req: Request) {
     const secret = process.env.CRON_SECRET;
     if (!secret) return NextResponse.json({ error: "cron_disabled" }, { status: 503 });
     const auth = req.headers.get("authorization");
-    if (auth !== `Bearer ${secret}`) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    if (!bearerMatches(auth, secret)) return NextResponse.json({ error: "unauthorized" }, { status: 401 }); // PBA-L3c-035
 
     const jobs = await listActiveJobs(25);
     const results: { id: string; status: string; cursor: number; total: number }[] = [];

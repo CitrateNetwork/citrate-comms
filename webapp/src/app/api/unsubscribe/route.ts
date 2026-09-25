@@ -10,7 +10,8 @@ import { suppress } from "@/lib/email/suppression";
  * - POST ?u=<token>      → RFC 8058 one-click (Gmail/Outlook native button) +
  *   the confirmation page's auto-submit. Returns 200.
  * - GET  ?u=<token>      → a client that follows the List-Unsubscribe https link
- *   directly. Suppresses, then 303s to the human confirmation page.
+ *   directly. NO state change (scanners/prefetchers issue GETs) — 303s to the
+ *   confirmation page, which POSTs the token (PBA-L3c-035).
  * The token may also arrive as JSON { token } in a POST body.
  */
 export const runtime = "nodejs";
@@ -41,8 +42,11 @@ export async function POST(req: Request) {
 }
 
 export async function GET(req: Request) {
-  const origin = new URL(req.url).origin;
-  const email = await doUnsubscribe(new URL(req.url).searchParams.get("u"));
-  const dest = email ? `${origin}/unsubscribe?done=1` : `${origin}/unsubscribe?error=1`;
+  // PBA-L3c-035: a GET never changes state. Mail-security link scanners and prefetchers
+  // follow List-Unsubscribe links, so a GET that suppressed would unsubscribe people who
+  // never asked. Hand the token to the confirmation page, which POSTs it.
+  const url = new URL(req.url);
+  const token = url.searchParams.get("u");
+  const dest = token ? `${url.origin}/unsubscribe?u=${encodeURIComponent(token)}` : `${url.origin}/unsubscribe?error=1`;
   return NextResponse.redirect(dest, { status: 303 });
 }
