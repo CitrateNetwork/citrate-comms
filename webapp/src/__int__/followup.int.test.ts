@@ -15,6 +15,7 @@ import { offboard, changeRole } from "@/lib/domain/members";
 import { agentReplyScope, channelAudience } from "@/lib/domain/channel-agent";
 import { citrateCommsTools } from "@/lib/ai/tools";
 import { run, sub, addMember } from "./helpers";
+import postgres from "postgres";
 
 let ws: string, room: string, internalRoom: string, dm: string, dmDoc: string, wsDoc: string;
 
@@ -57,6 +58,29 @@ describe("invites die with their issuer's standing (verifier pass 2)", () => {
     // and the happy path still works
     const i3 = await createInvite({ workspaceId: ws, email: `s-${run}@x.io`, role: "Member", invitedBySub: sub("adm3") });
     expect(await acceptInvite({ token: i3.token, sub: sub("fine") })).toMatchObject({ ok: true, alreadyMember: false });
+  });
+});
+
+describe("the redemption re-check is serialized against concurrent channel changes (FOR SHARE)", () => {
+  it("an accept that races a kind flip to DM waits for it, re-checks, and does not seat", async () => {
+    const ch = (await createChannel({ workspaceId: ws, kind: "channel", name: `lock-${run}`, createdBySub: sub("own") })).id;
+    const inv = await createInvite({ workspaceId: ws, email: `lk-${run}@x.io`, role: "Guest", invitedBySub: sub("own"), scopeChannelId: ch });
+    const other = postgres(process.env.DATABASE_URL!, { max: 1, onnotice: () => {} });
+    let settled = false;
+    let accept!: Promise<{ ok: boolean }>;
+    try {
+      await other.begin(async (tx) => {
+        await tx`SELECT id FROM channels WHERE id = ${ch} FOR UPDATE`; // a writer holds the row
+        accept = acceptInvite({ token: inv.token, sub: sub("racer") }).then((r) => ((settled = true), r));
+        await new Promise((r) => setTimeout(r, 500));
+        expect(settled).toBe(false); // redemption is waiting on the FOR SHARE lock
+        await tx`UPDATE channels SET kind = 'dm' WHERE id = ${ch}`;
+      });
+      await accept;
+    } finally {
+      await other.end();
+    }
+    expect(await db().select().from(channelMembers).where(and(eq(channelMembers.channelId, ch), eq(channelMembers.sub, sub("racer"))))).toHaveLength(0);
   });
 });
 
