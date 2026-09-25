@@ -47,6 +47,8 @@ import * as finalizeRoute from "@/app/api/workspaces/[id]/documents/finalize/rou
 import * as tagsRoute from "@/app/api/workspaces/[id]/crm/[entity]/[recordId]/tags/route";
 import * as bulkTagRoute from "@/app/api/workspaces/[id]/crm/[entity]/bulk-tag/route";
 import * as channelsRoute from "@/app/api/channels/route";
+import * as invitesRoute from "@/app/api/workspaces/[id]/invites/route";
+import * as inviteBatchRoute from "@/app/api/workspaces/[id]/invites/batch/route";
 import { crmRecordTags } from "@/lib/db/schema";
 import { run, sub, req, P, addMember, mcpCall } from "./helpers";
 
@@ -523,5 +525,33 @@ describe("mutation hardening — positive paths and edges of the new guards", ()
     expect((await acceptInvite({ token, sub: sub("forged") })).ok).toBe(true);
     expect(await db().select().from(channelMembers).where(eq(channelMembers.sub, sub("forged")))).toHaveLength(0);
     expect((await acceptInvite({ token, sub: sub("forged2") })).ok).toBe(false);
+  });
+});
+
+describe("PBA-L3c-002 / verifier V-002a: an invite scope can never grant access the inviter lacks", () => {
+  it("routes refuse a DM scope and a channel the inviter isn't seated in (single + batch)", async () => {
+    await addMember(victimWs, "adm2", "Admin");
+    const dm = await createChannel({ workspaceId: victimWs, kind: "dm", name: `vd-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] });
+    const priv = await createChannel({ workspaceId: victimWs, kind: "channel", name: `priv-${run}`, createdBySub: sub("alice") });
+    for (const scope of [dm.id, priv.id]) {
+      const r = await invitesRoute.POST(req(`/api/workspaces/${victimWs}/invites`, "adm2", { method: "POST", body: JSON.stringify({ workspaceId: victimWs, email: `adm2-${run}@example.com`, role: "Member", scopeChannelId: scope }) }), P({ id: victimWs }));
+      expect(r.status).toBe(400);
+      const b = await inviteBatchRoute.POST(req(`/api/workspaces/${victimWs}/invites/batch`, "adm2", { method: "POST", body: JSON.stringify({ workspaceId: victimWs, emails: [`sock-${run}@example.com`], role: "Guest", scopeChannelId: scope }) }), P({ id: victimWs }));
+      expect(b.status).toBe(400);
+    }
+    // even a SEATED inviter can't scope to a DM
+    await expect(createInvite({ workspaceId: victimWs, email: `d-${run}@example.com`, role: "Guest", invitedBySub: sub("alice"), scopeChannelId: dm.id })).rejects.toThrow(/scope channel/);
+  });
+
+  it("redemption never seats an existing member, and re-checks that the inviter is still seated", async () => {
+    const ch = await createChannel({ workspaceId: victimWs, kind: "channel", name: `room-${run}`, createdBySub: sub("alice") });
+    const i1 = await createInvite({ workspaceId: victimWs, email: `e-${run}@example.com`, role: "Member", invitedBySub: sub("alice"), scopeChannelId: ch.id });
+    expect((await acceptInvite({ token: i1.token, sub: sub("eve") })).ok).toBe(true); // eve is already a member
+    expect(await db().select().from(channelMembers).where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.sub, sub("eve"))))).toHaveLength(0);
+
+    const i2 = await createInvite({ workspaceId: victimWs, email: `n-${run}@example.com`, role: "Guest", invitedBySub: sub("alice"), scopeChannelId: ch.id });
+    await db().delete(channelMembers).where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.sub, sub("alice"))));
+    expect((await acceptInvite({ token: i2.token, sub: sub("newguest") })).ok).toBe(true);
+    expect(await db().select().from(channelMembers).where(eq(channelMembers.sub, sub("newguest")))).toHaveLength(0);
   });
 });

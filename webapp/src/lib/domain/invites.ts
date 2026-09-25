@@ -44,9 +44,11 @@ export async function createInvite(args: {
   invitedBySub: string;
   scopeChannelId?: string | null;
 }): Promise<CreatedInvite> {
-  // PBA-L3c-002: a scope channel must be a channel of THIS workspace.
-  if (args.scopeChannelId && !(await channelInWorkspace(args.workspaceId, args.scopeChannelId))) {
-    throw new Error("scope channel is not in this workspace");
+  // PBA-L3c-002 (+ verifier V-002a): the scope must be a non-DM channel of THIS
+  // workspace that the INVITER is seated in — an invite can never grant access the
+  // inviter doesn't already have.
+  if (args.scopeChannelId && !(await scopeChannelAllowed(args.workspaceId, args.scopeChannelId, args.invitedBySub))) {
+    throw new Error("scope channel is not an invitable channel for this inviter");
   }
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
@@ -67,14 +69,23 @@ export async function createInvite(args: {
   return { token, email, role: args.role, expiresAt: expiresAt.toISOString() };
 }
 
-/** True iff `channelId` is a channel of `workspaceId`. */
-export async function channelInWorkspace(workspaceId: string, channelId: string): Promise<boolean> {
-  const [c] = await db()
-    .select({ id: channels.id })
+type Db = Pick<ReturnType<typeof db>, "select">;
+
+/**
+ * May `inviterSub` scope an invite to `channelId`? Only a non-DM channel of this
+ * workspace in which the inviter is currently seated (verifier V-002a: an Admin not in a
+ * DM must not be able to mint an invite that seats anyone — themself or a sock-puppet —
+ * into it).
+ */
+export async function scopeChannelAllowed(workspaceId: string, channelId: string, inviterSub: string, d: Db = db()): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(channelId)) return false;
+  const [c] = await d
+    .select({ kind: channels.kind, seat: channelMembers.sub })
     .from(channels)
+    .innerJoin(channelMembers, and(eq(channelMembers.channelId, channels.id), eq(channelMembers.sub, inviterSub)))
     .where(and(eq(channels.workspaceId, workspaceId), eq(channels.id, channelId)))
     .limit(1);
-  return Boolean(c);
+  return Boolean(c) && c!.kind !== "dm";
 }
 
 /** Resolve a raw invite token to its (unexpired, unaccepted) details, or null. */
@@ -147,7 +158,7 @@ export async function acceptInvite(args: {
       .update(invites)
       .set({ acceptedBySub: args.sub, acceptedAt: new Date() })
       .where(and(eq(invites.tokenHash, tokenHash), isNull(invites.acceptedAt), gt(invites.expiresAt, new Date())))
-      .returning({ workspaceId: invites.workspaceId, email: invites.email, role: invites.role, scopeChannelId: invites.scopeChannelId });
+      .returning({ workspaceId: invites.workspaceId, email: invites.email, role: invites.role, scopeChannelId: invites.scopeChannelId, invitedBySub: invites.invitedBySub });
     if (!invite) return null;
 
     // Contact email for the member row = their real verified email if we have one,
@@ -182,21 +193,16 @@ export async function acceptInvite(args: {
       });
     }
 
-    // PBA-L3c-002: honour the invite's channel scope — seat the new member in the scoped
-    // channel (Partner/Guest see ONLY the channels they are seated in; workspace-level
-    // data is gated by ReadWorkspace, which they do not hold).
-    if (invite.scopeChannelId) {
-      const [ch] = await tx
-        .select({ id: channels.id })
-        .from(channels)
-        .where(and(eq(channels.workspaceId, invite.workspaceId), eq(channels.id, invite.scopeChannelId)))
-        .limit(1);
-      if (ch) {
-        await tx
-          .insert(channelMembers)
-          .values({ workspaceId: invite.workspaceId, channelId: ch.id, sub: args.sub })
-          .onConflictDoNothing();
-      }
+    // PBA-L3c-002: honour the invite's channel scope — seat the NEW member in the scoped
+    // channel (Partner/Guest see ONLY the channels they are seated in). Verifier V-002a:
+    // an identity that was already an active member is never seated through an invite,
+    // and the scope is re-checked at redemption (non-DM, inviter still seated), so an
+    // invite can't be used to walk into a channel the inviter can't see.
+    if (invite.scopeChannelId && !alreadyMember && (await scopeChannelAllowed(invite.workspaceId, invite.scopeChannelId, invite.invitedBySub, tx))) {
+      await tx
+        .insert(channelMembers)
+        .values({ workspaceId: invite.workspaceId, channelId: invite.scopeChannelId, sub: args.sub })
+        .onConflictDoNothing();
     }
     return { workspaceId: invite.workspaceId, alreadyMember, memberEmail };
   });

@@ -6,7 +6,7 @@ import { hashId } from "@/lib/security/crypto";
 import { inviteSchema } from "@/lib/validation/schemas";
 import { canGrant, type Role } from "@/lib/rbac/matrix";
 import { eq } from "drizzle-orm";
-import { createInvite, listPendingInvites, channelInWorkspace } from "@/lib/domain/invites";
+import { createInvite, listPendingInvites, scopeChannelAllowed } from "@/lib/domain/invites";
 import { sendInviteEmail } from "@/lib/email/send";
 import { memberRow } from "@/lib/domain/members";
 import { db } from "@/lib/db/client";
@@ -37,8 +37,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const parsed = inviteSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
     if (parsed.data.workspaceId !== id) return NextResponse.json({ error: "workspace_mismatch" }, { status: 400 });
-    // PBA-L3c-002: the scope channel must belong to this workspace.
-    if (parsed.data.scopeChannelId && !(await channelInWorkspace(id, parsed.data.scopeChannelId))) {
+    // PBA-L3c-002 / V-002a: the scope must be a non-DM channel of this workspace that the
+    // inviter is seated in.
+    if (parsed.data.scopeChannelId && !(await scopeChannelAllowed(id, parsed.data.scopeChannelId, ctx.sub))) {
       return NextResponse.json({ error: "bad_scope_channel" }, { status: 400 });
     }
     // Anti-escalation: the inviter must be entitled to grant the chosen role.
