@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { parseSearxng, parseDuckduckgo, parseDuckduckgoLite, decodeEntities } from "./search";
-import { isPrivateIp, assertPublicUrl, extractReadable, BlockedUrlError } from "./fetch";
+import { isPrivateIp, assertPublicUrl, extractReadable, BlockedUrlError, makeGuardedLookup, guardedGet, readCapped } from "./fetch";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 
 describe("RES — search parsing", () => {
   it("parseSearxng keeps http(s) results, caps at k, maps content→snippet", () => {
@@ -132,5 +134,93 @@ describe("RES — readable extraction", () => {
     expect(text).not.toContain("var x");
     expect(text).not.toContain("home about");
     expect(text).not.toContain("copyright");
+  });
+});
+
+describe("RES — SSRF guard residuals (PBA-L3c-025)", () => {
+  it("refuses NAT64 / 6to4 / Teredo / documentation / site-local / multicast IPv6", () => {
+    for (const ip of [
+      "64:ff9b::a9fe:a9fe", // NAT64 → 169.254.169.254
+      "64:ff9b::808:808", // NAT64 even to a public v4 (fail-closed)
+      "64:ff9b:1::a00:1", // local-use NAT64 → 10.0.0.1
+      "2002:a9fe:a9fe::1", // 6to4 → 169.254.169.254
+      "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+      "2001:db8::1",
+      "fec0::1",
+      "ff02::1",
+      "100::1",
+    ]) {
+      expect(isPrivateIp(ip), ip).toBe(true);
+    }
+    // a genuine global unicast address that merely STARTS with 2001 is still public
+    expect(isPrivateIp("2001:4860:4860::8888")).toBe(false);
+  });
+
+  it("the connect-time lookup refuses a name that re-resolves to a private address (DNS rebinding)", async () => {
+    let calls = 0;
+    // first resolution (validation) public, second (connect) private — the rebinding shape
+    const flaky = (_h: string, _o: { all: true }, cb: (e: NodeJS.ErrnoException | null, a: { address: string; family: number }[]) => void) => {
+      calls++;
+      cb(null, [{ address: calls === 1 ? "93.184.216.34" : "127.0.0.1", family: 4 }]);
+    };
+    const lookup = makeGuardedLookup(flaky);
+    const first = await new Promise<string>((res, rej) => lookup("rebind.test", {}, (e, a) => (e ? rej(e) : res(a as string))));
+    expect(first).toBe("93.184.216.34");
+    await expect(new Promise((res, rej) => lookup("rebind.test", {}, (e, a) => (e ? rej(e) : res(a))))).rejects.toBeInstanceOf(BlockedUrlError);
+    // mixed answer sets are refused too; `all` returns the vetted list
+    const mixed = makeGuardedLookup((_h, _o, cb) => cb(null, [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }]));
+    await expect(new Promise((res, rej) => mixed("x.test", { all: true }, (e, a) => (e ? rej(e) : res(a))))).rejects.toBeInstanceOf(BlockedUrlError);
+    const ok = makeGuardedLookup((_h, _o, cb) => cb(null, [{ address: "93.184.216.34", family: 4 }]));
+    const all = await new Promise((res, rej) => ok("x.test", { all: true }, (e, a) => (e ? rej(e) : res(a))));
+    expect(all).toEqual([{ address: "93.184.216.34", family: 4 }]);
+  });
+
+  it("a real socket using the guarded lookup never connects to a private address", async () => {
+    let hits = 0;
+    const srv = http.createServer((_q, r) => {
+      hits++;
+      r.end("internal secret");
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as AddressInfo).port;
+    const lookup = makeGuardedLookup((_h, _o, cb) => cb(null, [{ address: "127.0.0.1", family: 4 }]));
+    const err = await new Promise<unknown>((resolve) => {
+      const q = http.get({ host: "metadata.rebind.test", port, path: "/", lookup: lookup as never }, () => resolve(null));
+      q.on("error", resolve);
+    });
+    await new Promise<void>((r) => srv.close(() => r()));
+    expect(err).toBeInstanceOf(BlockedUrlError);
+    expect(hits).toBe(0);
+  });
+});
+
+describe("RES — node:http transport plumbing (PBA-L3c-025)", () => {
+  it("guardedGet returns status/location/content-type without following redirects; readCapped bounds the body", async () => {
+    const srv = http.createServer((q, r) => {
+      if (q.url === "/r") {
+        r.writeHead(302, { location: "/final" });
+        return r.end();
+      }
+      r.writeHead(200, { "content-type": "text/html" });
+      r.end("<html><title>T</title><article><p>" + "x".repeat(5000) + "</p></article></html>");
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as AddressInfo).port;
+    // a permissive lookup ONLY for this plumbing test (the real one refuses loopback)
+    const permissive = (_h: string, o: { all?: boolean }, cb: (e: null, a: unknown, f?: number) => void) =>
+      o && o.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4);
+    const ctrl = new AbortController();
+    const red = await guardedGet(new URL(`http://plumb.test:${port}/r`), ctrl.signal, permissive);
+    expect(red.status).toBe(302);
+    expect(red.location).toBe("/final");
+    red.res.resume();
+    const ok = await guardedGet(new URL(`http://plumb.test:${port}/final`), ctrl.signal, permissive);
+    expect(ok.status).toBe(200);
+    expect(ok.contentType).toContain("text/html");
+    const body = await readCapped(ok.res, 100);
+    expect(body.length).toBe(100);
+    const full = await guardedGet(new URL(`http://plumb.test:${port}/final`), ctrl.signal, permissive);
+    expect(extractReadable(await readCapped(full.res, 1_000_000)).title).toBe("T");
+    await new Promise<void>((r) => srv.close(() => r()));
   });
 });
