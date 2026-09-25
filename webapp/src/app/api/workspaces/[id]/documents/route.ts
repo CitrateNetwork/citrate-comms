@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import { Capability, requireCapability } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
-import { ingestDocument } from "@/lib/domain/documents";
+import { ingestDocument, badDocScope } from "@/lib/domain/documents";
+import { isAllowed } from "@/lib/attachments";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -27,9 +28,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const accountId = (form.get("accountId") as string) || null;
     const dealId = (form.get("dealId") as string) || null;
     const channelId = (form.get("channelId") as string) || null;
-    const buffer = Buffer.from(await file.arrayBuffer());
     const name = file.name || "document";
     const mime = file.type || null;
+    // PBA-L3c-027: file type allowlist + every scope id must be THIS workspace's (and the
+    // uploader must be seated in a channel they attach to).
+    if (!isAllowed(name, mime)) return NextResponse.json({ error: "unsupported_type" }, { status: 415 });
+    const bad = await badDocScope(id, ctx.sub, { accountId, dealId, channelId });
+    if (bad) return NextResponse.json({ error: bad }, { status: 400 });
+    const buffer = Buffer.from(await file.arrayBuffer());
 
     // Store the original at Blob when configured; otherwise keep text-only (still RAG-able).
     let blobUrl = "";

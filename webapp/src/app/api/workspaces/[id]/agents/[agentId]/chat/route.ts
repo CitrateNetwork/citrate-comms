@@ -13,7 +13,7 @@
  * at `/api/workspaces/[id]/mcp` — single source of truth, no drift.
  */
 import { streamText, convertToModelMessages, stepCountIs, type UIMessage } from "ai";
-import { Capability, requireMember, assertCan } from "@/lib/tenant/guard";
+import { Capability, requireInternal, assertCan } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
@@ -21,6 +21,7 @@ import { appendAudit } from "@/lib/audit/chain";
 import { getInferenceModel } from "@/lib/ai/provider";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { citrateCommsTools } from "@/lib/ai/tools";
+import type { Role } from "@/lib/rbac/matrix";
 import { HITL_TOOLS } from "@/lib/ai/personas";
 import { resolvePersona } from "@/lib/domain/personas";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
@@ -43,14 +44,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   let workspaceId: string;
   let personaId: string;
   let sub: string;
+  let invokerRole: Role;
   try {
     const p = await params;
     workspaceId = p.id;
     personaId = p.agentId;
-    // Auth + membership; the invoking human must be able to post.
-    const ctx = await requireMember(req, workspaceId);
+    // Auth + membership; the invoking human must be INTERNAL (the persona's tools read
+    // workspace data — PBA-L3c-002) and able to post.
+    const ctx = await requireInternal(req, workspaceId);
     assertCan(ctx, Capability.PostMessage);
     sub = ctx.sub;
+    invokerRole = ctx.role;
   } catch (e) {
     return errorResponse(e);
   }
@@ -128,6 +132,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     personaId,
     threadId,
     agentRole: "Agent",
+    invokerRole,
     allow,
     audit: !incognito,
     fieldDefsByEntity: await loadFieldDefsByEntity(workspaceId),

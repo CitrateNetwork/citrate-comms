@@ -11,7 +11,7 @@
 import { extractEntities, stageExtracted, extractionMapping, type DoExtract } from "./import-extract";
 import { saveMapping, createImportJob, runImportSlice, type JobProgress } from "./import-engine";
 import { enqueueApproval } from "./approvals";
-import { getDocumentText } from "./documents";
+import { getDocumentText, type DocViewer } from "./documents";
 import { getSettings } from "./settings";
 
 export interface IngestSummary {
@@ -103,8 +103,9 @@ export async function ingestText(args: {
 }
 
 /** Ingest a stored document (PDF/text/docx/xlsx) by id. */
-export async function ingestDocument(args: { workspaceId: string; documentId: string; bySub: string; hint?: string; doExtract?: DoExtract }): Promise<IngestSummary> {
-  const doc = await getDocumentText(args.workspaceId, args.documentId);
+export async function ingestDocument(args: { workspaceId: string; documentId: string; bySub: string; viewer: DocViewer; hint?: string; doExtract?: DoExtract }): Promise<IngestSummary> {
+  // PBA-L3c-003: only a document the invoker may see can be ingested into the CRM.
+  const doc = await getDocumentText(args.workspaceId, args.documentId, args.viewer);
   if (!doc) {
     return { source: "model", extracted: 0, autoWrite: 0, held: 0, jobId: null, reviewApprovalId: null, progress: null, note: "Document not found or no extractable text (scanned/image docs need OCR — out of scope in v1)." };
   }

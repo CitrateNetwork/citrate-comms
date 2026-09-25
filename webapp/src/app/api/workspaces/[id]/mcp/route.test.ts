@@ -17,12 +17,22 @@ const CHAN = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 describe("MCP tool surface is role-bound (CM2-B-B002)", () => {
   beforeEach(() => postAndPin.mockClear());
 
-  it("a Guest does NOT receive Agent post capability (calendar.pin_summary is denied)", async () => {
+  it("a Guest does NOT receive Agent post capability (calendar.pin_summary is not offered)", async () => {
     const tools = (await buildTools("ws-1", { sub: "guest-1", role: "Guest" })) as Record<
       string,
       { execute: (a: unknown) => Promise<unknown> }
     >;
-    await expect(tools["calendar.pin_summary"]!.execute({ channelId: CHAN, days: 7 })).rejects.toThrow(/Guest may not/);
+    // PBA-L3c-002: the registry is filtered to the caller's permitted tools, so the
+    // Agent-level post tool is not even listed for a Guest (stronger than denying it).
+    expect(tools["calendar.pin_summary"]).toBeUndefined();
+    expect(Object.keys(tools)).toEqual(["thread.summarize"]);
     expect(postAndPin).not.toHaveBeenCalled();
+  });
+
+  it("a Member gets the internal tool surface (pin_summary still channel-gated)", async () => {
+    const tools = (await buildTools("ws-1", { sub: "member-1", role: "Member" })) as Record<string, unknown>;
+    expect(tools["calendar.pin_summary"]).toBeDefined();
+    expect(tools["crm.read"]).toBeDefined();
+    expect(CHAN).toBeTruthy();
   });
 });

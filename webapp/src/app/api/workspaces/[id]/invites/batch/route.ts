@@ -6,7 +6,7 @@ import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
 import { batchInviteSchema } from "@/lib/validation/schemas";
 import { canGrant, type Role } from "@/lib/rbac/matrix";
-import { createInvite } from "@/lib/domain/invites";
+import { createInvite, scopeChannelAllowed } from "@/lib/domain/invites";
 import { sendInviteEmail } from "@/lib/email/send";
 import { memberRow } from "@/lib/domain/members";
 import { db } from "@/lib/db/client";
@@ -35,6 +35,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const parsed = batchInviteSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
     if (parsed.data.workspaceId !== id) return NextResponse.json({ error: "workspace_mismatch" }, { status: 400 });
+    // PBA-L3c-002 / V-002a: the scope must be a non-DM channel of this workspace that the
+    // inviter is seated in.
+    if (parsed.data.scopeChannelId && !(await scopeChannelAllowed(id, parsed.data.scopeChannelId, ctx.sub))) {
+      return NextResponse.json({ error: "bad_scope_channel" }, { status: 400 });
+    }
     if (!canGrant(ctx.role, parsed.data.role as Role)) {
       return NextResponse.json({ error: "forbidden_role" }, { status: 403 });
     }

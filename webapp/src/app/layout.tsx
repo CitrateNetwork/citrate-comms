@@ -11,6 +11,11 @@ export const metadata: Metadata = {
   description: "Agentic team workspace — Comms · CRM · Projects. Encrypted at rest; server-blind E2E on the native app.",
 };
 
+// PBA-L3c-008: the CSP is nonce-based (src/proxy.ts); a statically prerendered page would
+// ship framework <script> tags without the per-request nonce, so every page renders
+// dynamically.
+export const dynamic = "force-dynamic";
+
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,

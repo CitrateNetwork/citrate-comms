@@ -24,3 +24,24 @@ rules:
       - pattern-not-inside: |
           // nosemgrep: query-missing-workspace-predicate
           ...
+
+  # PBA-L3c-001: an upsert whose conflict target does not include workspace_id can
+  # rewrite ANOTHER tenant's row (the conflicting row keeps its own workspace_id). Such
+  # an upsert must carry `setWhere: eq(<table>.workspaceId, workspaceId)` so a foreign
+  # row is never updated.
+  - id: upsert-without-workspace-guard
+    languages: [typescript]
+    severity: ERROR
+    message: >
+      onConflictDoUpdate without a workspace guard (PBA-L3c-001). Include the table's
+      workspaceId in `target`, or add `setWhere: eq(<table>.workspaceId, workspaceId)`,
+      so a conflicting row owned by another workspace is never rewritten.
+    paths:
+      include:
+        - "src/lib/**"
+        - "src/app/api/**"
+    patterns:
+      - pattern: $Q.onConflictDoUpdate({...})
+      - pattern-not: '$Q.onConflictDoUpdate({..., target: [..., $T.workspaceId, ...], ...})'
+      - pattern-not: '$Q.onConflictDoUpdate({..., target: $T.workspaceId, ...})'
+      - pattern-not: '$Q.onConflictDoUpdate({..., setWhere: $W, ...})'

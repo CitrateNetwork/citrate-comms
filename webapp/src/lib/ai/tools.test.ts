@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { citrateCommsTools, IMPLEMENTED_TOOLS } from "./tools";
+import { citrateCommsTools, IMPLEMENTED_TOOLS, TOOL_CAPABILITY, CHANNEL_SCOPED_TOOLS, toolPermitted } from "./tools";
+import { Capability, can, type Role } from "@/lib/rbac/matrix";
 import type { ToolName } from "./personas";
 
 const base = { workspaceId: "ws-1", invokedBySub: "user-1", agentRole: "Agent" as const };
@@ -37,18 +38,46 @@ describe("comms tool registry — single source of truth", () => {
   // the point of call — a read-only Guest could stage a `runner.terminal` / `crm.delete`
   // approval. Each HITL tool now gates on PostMessage (which an Agent/Member holds and
   // a Guest does not) BEFORE it touches the queue.
-  it("a read-only Guest cannot STAGE a high-risk HITL action (guard fires before the DB)", async () => {
-    const asGuest = citrateCommsTools({ ...base, agentRole: "Guest" }) as Record<
-      string,
-      { execute: (a: unknown) => Promise<unknown> }
-    >;
-    // Assert the GUARD denies (message names the propose-gate), not an incidental
-    // DB error — so the tripwire fails if the guard is removed and execution falls
-    // through to enqueueApproval.
-    await expect(
-      asGuest["crm.delete"]!.execute({ entity: "account", recordId: crypto.randomUUID() }),
-    ).rejects.toThrow(/may not propose crm\.delete/);
-    await expect(asGuest["terminal.exec"]!.execute({ cmd: "echo hi" })).rejects.toThrow(/may not propose terminal\.exec/);
+  it("a read-only Guest cannot STAGE a high-risk HITL action (the tool is not even offered)", () => {
+    // PBA-L3c-002: the registry is filtered by toolPermitted, so the propose tools are
+    // absent for a Guest; the execute-time assertPropose is defense in depth behind it.
+    const asGuest = citrateCommsTools({ ...base, agentRole: "Guest" }) as Record<string, unknown>;
+    expect(asGuest["crm.delete"]).toBeUndefined();
+    expect(asGuest["terminal.exec"]).toBeUndefined();
+    expect(toolPermitted("crm.delete", "Guest")).toBe(false);
+    expect(toolPermitted("terminal.exec", "Guest")).toBe(false);
+  });
+
+  it("an agent invoked by an EXTERNAL human gets only channel-scoped tools (no borrowed read)", () => {
+    for (const invokerRole of ["Partner", "Guest"] as const) {
+      const t = citrateCommsTools({ ...base, agentRole: "Agent", invokerRole });
+      expect(Object.keys(t)).toEqual(["thread.summarize"]);
+    }
+    const internal = citrateCommsTools({ ...base, agentRole: "Agent", invokerRole: "Member" });
+    expect(Object.keys(internal)).toContain("crm.read");
+  });
+
+  it("toolPermitted matches rbac/matrix.ts for every implemented tool x role pair (tripwire)", () => {
+    const roles: Role[] = ["Owner", "Admin", "Member", "Partner", "Guest", "Agent"];
+    for (const name of IMPLEMENTED_TOOLS) {
+      const cap = TOOL_CAPABILITY[name];
+      expect(cap, `${name} has no declared capability`).toBeDefined();
+      for (const agentRole of roles) {
+        for (const invokerRole of roles) {
+          const expected =
+            can(agentRole, cap!) && can(invokerRole, cap!) &&
+            (CHANNEL_SCOPED_TOOLS.has(name) || (can(agentRole, Capability.ReadWorkspace) && can(invokerRole, Capability.ReadWorkspace)));
+          expect(toolPermitted(name, agentRole, invokerRole), `${name} agent=${agentRole} invoker=${invokerRole}`).toBe(expected);
+        }
+      }
+      // External roles never reach a workspace-data tool.
+      if (!CHANNEL_SCOPED_TOOLS.has(name)) {
+        expect(toolPermitted(name, "Partner")).toBe(false);
+        expect(toolPermitted(name, "Guest")).toBe(false);
+      }
+    }
+    expect(toolPermitted("no.such.tool", "Owner")).toBe(false);
+    expect([...CHANNEL_SCOPED_TOOLS]).toEqual(["thread.summarize"]);
   });
 
   it("an Agent (read+post) is NOT blocked by the propose-gate (it may propose HITL actions)", () => {

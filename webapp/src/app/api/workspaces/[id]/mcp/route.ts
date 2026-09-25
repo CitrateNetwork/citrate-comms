@@ -12,13 +12,14 @@ import { z } from "zod";
 import { requireMember, GuardError, type MemberCtx } from "@/lib/tenant/guard";
 import { limit } from "@/lib/security/ratelimit";
 import { hashId } from "@/lib/security/crypto";
-import { citrateCommsTools } from "@/lib/ai/tools";
-import { IMPLEMENTED_TOOLS } from "@/lib/ai/tools";
+import { citrateCommsTools, IMPLEMENTED_TOOLS, ToolDenied } from "@/lib/ai/tools";
 import { loadFieldDefsByEntity } from "@/lib/domain/crm-fields";
 
 export const runtime = "nodejs";
 
 const PROTOCOL_VERSION = "2024-11-05";
+/** PBA-L3c-006: a JSON-RPC batch may carry at most this many messages. */
+export const MAX_BATCH = 10;
 const SERVER_INFO = { name: "citrate-comms-agents", version: "0.1.0" };
 
 interface McpTool {
@@ -69,7 +70,9 @@ function rpcErr(id: RpcReq["id"], code: number, message: string, data?: unknown)
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message, ...(data !== undefined ? { data } : {}) } };
 }
 
-async function handleOne(msg: RpcReq, tools: Record<string, McpTool>): Promise<object | null> {
+type Charge = () => Promise<boolean>;
+
+async function handleOne(msg: RpcReq, tools: Record<string, McpTool>, charge: Charge): Promise<object | null> {
   if (msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
     return rpcErr(msg.id ?? null, -32600, "Invalid Request");
   }
@@ -94,11 +97,17 @@ async function handleOne(msg: RpcReq, tools: Record<string, McpTool>): Promise<o
       if (!parsed.success) {
         return rpcErr(id, -32602, "Invalid params", parsed.error.issues.map((e) => ({ path: e.path.join("."), message: e.message })));
       }
+      // PBA-L3c-006: every tool call is charged against the caller's rate limit — a
+      // batch is not a way to buy N calls for one token.
+      if (!(await charge())) return rpcErr(id, -32000, "Rate limit exceeded");
       try {
         const result = await t.execute(parsed.data);
         return rpcOk(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as Json, isError: false });
       } catch (err) {
-        const message = (err as Error)?.message ?? "tool execution failed";
+        // PBA-L3c-024: only deliberate refusals carry their message; anything else (DB,
+        // driver, upstream) is logged server-side and returned generically.
+        const message = err instanceof ToolDenied ? err.message : "tool execution failed";
+        if (!(err instanceof ToolDenied)) console.error("[mcp] tool error", name, err);
         return rpcOk(id, { content: [{ type: "text", text: `Error: ${message}` }], isError: true });
       }
     }
@@ -154,14 +163,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return Response.json(rpcErr(null, -32700, "Parse error"), { status: 400 });
   }
 
+  const charge: Charge = async () => (await limit(`mcp-call:${hashId(ctx.sub)}`)).success;
+
   if (Array.isArray(bodyJson)) {
     if (bodyJson.length === 0) return Response.json(rpcErr(null, -32600, "Empty batch"), { status: 400 });
-    const out = (await Promise.all(bodyJson.map((m) => handleOne(m as RpcReq, tools)))).filter(Boolean);
+    if (bodyJson.length > MAX_BATCH) return Response.json(rpcErr(null, -32600, `Batch too large (max ${MAX_BATCH})`), { status: 400 });
+    // Sequential, not Promise.all: a batch never fans out into parallel tool calls.
+    const out: object[] = [];
+    for (const m of bodyJson) {
+      const r = await handleOne(m as RpcReq, tools, charge);
+      if (r) out.push(r);
+    }
     if (out.length === 0) return new Response(null, { status: 204 });
     return Response.json(out);
   }
 
-  const res = await handleOne(bodyJson as RpcReq, tools);
+  const res = await handleOne(bodyJson as RpcReq, tools, charge);
   if (res === null) return new Response(null, { status: 204 });
   return Response.json(res);
 }

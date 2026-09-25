@@ -2,7 +2,7 @@ import { redirect, notFound } from "next/navigation";
 import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
-import { can, Capability } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole } from "@/lib/rbac/matrix";
 import { getContactFile } from "@/lib/domain/crm-file";
 import { RecordFile } from "@/components/crm/RecordFile";
 
@@ -16,6 +16,7 @@ export default async function ContactFilePage({ params }: { params: Promise<{ sl
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   const file = await getContactFile(ws.id, id);
   if (!file) notFound();

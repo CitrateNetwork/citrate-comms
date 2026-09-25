@@ -4,15 +4,15 @@
  * persisted), plus the target email, role, and expiry. Accepting an invite binds a
  * verified identity to the workspace at the granted role.
  *
- * Security model: the emailed link is a bearer credential (possession proves the
- * person received that email). When the accepting session ALSO has a verified email
- * (FWA-C6-01), it must match the invite — defense in depth without blocking
- * wallet-only / passkey teammates who have no email claim.
+ * Security model: the emailed link is a single-use bearer credential (possession proves
+ * the person received that email). The signed-in identity that redeems it is NOT required
+ * to match the invite email (see acceptInvite). Redemption is atomic: exactly one
+ * identity can consume a token (PBA-L3c-023).
  */
 import { randomBytes } from "node:crypto";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { invites, members, workspaces } from "@/lib/db/schema";
+import { invites, members, workspaces, channels, channelMembers } from "@/lib/db/schema";
 import { hashToken } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import type { Role } from "@/lib/rbac/matrix";
@@ -44,6 +44,12 @@ export async function createInvite(args: {
   invitedBySub: string;
   scopeChannelId?: string | null;
 }): Promise<CreatedInvite> {
+  // PBA-L3c-002 (+ verifier V-002a): the scope must be a non-DM channel of THIS
+  // workspace that the INVITER is seated in — an invite can never grant access the
+  // inviter doesn't already have.
+  if (args.scopeChannelId && !(await scopeChannelAllowed(args.workspaceId, args.scopeChannelId, args.invitedBySub))) {
+    throw new Error("scope channel is not an invitable channel for this inviter");
+  }
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
@@ -61,6 +67,25 @@ export async function createInvite(args: {
 
   await appendAudit({ workspaceId: args.workspaceId, actorSub: args.invitedBySub, event: "member_invited", target: email });
   return { token, email, role: args.role, expiresAt: expiresAt.toISOString() };
+}
+
+type Db = Pick<ReturnType<typeof db>, "select">;
+
+/**
+ * May `inviterSub` scope an invite to `channelId`? Only a non-DM channel of this
+ * workspace in which the inviter is currently seated (verifier V-002a: an Admin not in a
+ * DM must not be able to mint an invite that seats anyone — themself or a sock-puppet —
+ * into it).
+ */
+export async function scopeChannelAllowed(workspaceId: string, channelId: string, inviterSub: string, d: Db = db()): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(channelId)) return false;
+  const [c] = await d
+    .select({ kind: channels.kind, seat: channelMembers.sub })
+    .from(channels)
+    .innerJoin(channelMembers, and(eq(channelMembers.channelId, channels.id), eq(channelMembers.sub, inviterSub)))
+    .where(and(eq(channels.workspaceId, workspaceId), eq(channels.id, channelId)))
+    .limit(1);
+  return Boolean(c) && c!.kind !== "dm";
 }
 
 /** Resolve a raw invite token to its (unexpired, unaccepted) details, or null. */
@@ -112,7 +137,8 @@ export type AcceptResult =
  *  - Already an ACTIVE member → success (route them in); we never downgrade an
  *    existing role (e.g. an Owner accepting a Member invite stays Owner).
  *  - Previously offboarded/invited row → reactivated at the granted role.
- * Only an invalid/expired/used token fails.
+ * Only an invalid/expired/used token fails, and a token is consumed exactly once even
+ * under concurrent redemption (PBA-L3c-023).
  */
 export async function acceptInvite(args: {
   token: string;
@@ -122,53 +148,70 @@ export async function acceptInvite(args: {
   displayName?: string | null;
   kycStatus?: string | null;
 }): Promise<AcceptResult> {
-  const invite = await lookupInvite(args.token);
-  if (!invite) return { ok: false, reason: "invalid" };
+  // PBA-L3c-023: claim the single-use invite ATOMICALLY first. The conditional UPDATE
+  // (unaccepted AND unexpired) is the only gate: of N concurrent accepts of one token,
+  // exactly one gets the row back; the rest see "invalid". Membership + channel seating
+  // run in the same transaction, so a failure un-claims the invite.
+  const tokenHash = hashToken(args.token);
+  const result = await db().transaction(async (tx) => {
+    const [invite] = await tx
+      .update(invites)
+      .set({ acceptedBySub: args.sub, acceptedAt: new Date() })
+      .where(and(eq(invites.tokenHash, tokenHash), isNull(invites.acceptedAt), gt(invites.expiresAt, new Date())))
+      .returning({ workspaceId: invites.workspaceId, email: invites.email, role: invites.role, scopeChannelId: invites.scopeChannelId, invitedBySub: invites.invitedBySub });
+    if (!invite) return null;
 
-  // Contact email for the member row = their real verified email if we have one,
-  // else the address the invite was sent to (best-effort for display/contact).
-  const memberEmail = args.sessionEmail?.toLowerCase() ?? invite.email;
+    // Contact email for the member row = their real verified email if we have one,
+    // else the address the invite was sent to (best-effort for display/contact).
+    const memberEmail = args.sessionEmail?.toLowerCase() ?? invite.email;
+    const [existing] = await tx
+      .select({ status: members.status })
+      .from(members)
+      .where(and(eq(members.workspaceId, invite.workspaceId), eq(members.sub, args.sub)))
+      .limit(1);
 
-  const d = db();
-  const [existing] = await d
-    .select({ status: members.status })
-    .from(members)
-    .where(and(eq(members.workspaceId, invite.workspaceId), eq(members.sub, args.sub)))
-    .limit(1);
+    let alreadyMember = false;
+    if (existing && existing.status === "active") {
+      // Idempotent: already in. Don't touch their role/status (no accidental downgrade).
+      alreadyMember = true;
+    } else if (existing) {
+      // Reactivate a previously offboarded/invited row at the granted role.
+      await tx
+        .update(members)
+        .set({ role: invite.role, status: "active", email: memberEmail, walletAddress: args.walletAddress ?? null })
+        .where(and(eq(members.workspaceId, invite.workspaceId), eq(members.sub, args.sub)));
+    } else {
+      await tx.insert(members).values({
+        workspaceId: invite.workspaceId,
+        sub: args.sub,
+        walletAddress: args.walletAddress ?? null,
+        email: memberEmail,
+        displayName: args.displayName ?? null,
+        role: invite.role,
+        status: "active",
+        kycStatus: args.kycStatus ?? null,
+      });
+    }
 
-  let alreadyMember = false;
-  if (existing && existing.status === "active") {
-    // Idempotent: already in. Don't touch their role/status (no accidental downgrade).
-    alreadyMember = true;
-  } else if (existing) {
-    // Reactivate a previously offboarded/invited row at the granted role.
-    await d
-      .update(members)
-      .set({ role: invite.role, status: "active", email: memberEmail, walletAddress: args.walletAddress ?? null })
-      .where(and(eq(members.workspaceId, invite.workspaceId), eq(members.sub, args.sub)));
-  } else {
-    await d.insert(members).values({
-      workspaceId: invite.workspaceId,
-      sub: args.sub,
-      walletAddress: args.walletAddress ?? null,
-      email: memberEmail,
-      displayName: args.displayName ?? null,
-      role: invite.role,
-      status: "active",
-      kycStatus: args.kycStatus ?? null,
-    });
+    // PBA-L3c-002: honour the invite's channel scope — seat the NEW member in the scoped
+    // channel (Partner/Guest see ONLY the channels they are seated in). Verifier V-002a:
+    // an identity that was already an active member is never seated through an invite,
+    // and the scope is re-checked at redemption (non-DM, inviter still seated), so an
+    // invite can't be used to walk into a channel the inviter can't see.
+    if (invite.scopeChannelId && !alreadyMember && (await scopeChannelAllowed(invite.workspaceId, invite.scopeChannelId, invite.invitedBySub, tx))) {
+      await tx
+        .insert(channelMembers)
+        .values({ workspaceId: invite.workspaceId, channelId: invite.scopeChannelId, sub: args.sub })
+        .onConflictDoNothing();
+    }
+    return { workspaceId: invite.workspaceId, alreadyMember, memberEmail };
+  });
+
+  if (!result) return { ok: false, reason: "invalid" };
+  if (!result.alreadyMember) {
+    await appendAudit({ workspaceId: result.workspaceId, actorSub: args.sub, event: "member_joined", target: result.memberEmail });
   }
-
-  // Consume the single-use invite (idempotent if already consumed by this sub).
-  await d
-    .update(invites)
-    .set({ acceptedBySub: args.sub, acceptedAt: new Date() })
-    .where(eq(invites.tokenHash, invite.tokenHash));
-
-  if (!alreadyMember) {
-    await appendAudit({ workspaceId: invite.workspaceId, actorSub: args.sub, event: "member_joined", target: memberEmail });
-  }
-  return { ok: true, workspaceId: invite.workspaceId, alreadyMember };
+  return { ok: true, workspaceId: result.workspaceId, alreadyMember: result.alreadyMember };
 }
 
 /** Pending (unaccepted, unexpired) invites for the members screen. */

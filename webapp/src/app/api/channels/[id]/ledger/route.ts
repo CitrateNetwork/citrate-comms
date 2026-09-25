@@ -58,7 +58,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const ctx = await requireChannel(req, id, Capability.PostMessage, channelWorkspace, isChannelMember);
     const parsed = resolveSchema.safeParse(await readJson(req));
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
-    await resolveLedgerEntry(ctx.workspaceId, parsed.data.entryId, ctx.sub);
+    if (!(await resolveLedgerEntry(ctx.workspaceId, id, parsed.data.entryId, ctx.sub))) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
     return NextResponse.json({ ok: true });
   } catch (e) {
     return errorResponse(e);

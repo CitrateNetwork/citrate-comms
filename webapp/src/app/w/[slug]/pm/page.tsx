@@ -4,7 +4,7 @@ import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
 import { listProjects, listTasks } from "@/lib/domain/pm";
 import { directory } from "@/lib/domain/members";
-import { can, Capability } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole } from "@/lib/rbac/matrix";
 import { PmScreen } from "@/components/pm/PmScreen";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +18,7 @@ export default async function PmPage({ params }: { params: Promise<{ slug: strin
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   const [projects, tasks, dir] = await Promise.all([listProjects(ws.id), listTasks(ws.id), directory(ws.id)]);
 

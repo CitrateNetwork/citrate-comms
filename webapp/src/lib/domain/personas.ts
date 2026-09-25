@@ -13,6 +13,7 @@ import { decryptField, encryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { GUARDRAILS } from "@/lib/ai/system-prompt";
 import { resolvePersonaResources, type PersonaResourceForPrompt } from "@/lib/domain/agent-config";
+import { assertPersonaInWorkspace } from "./persona-scope";
 import {
   DEFAULT_PERSONA_LIST,
   DEFAULT_PERSONAS,
@@ -323,6 +324,7 @@ export async function updatePersona(workspaceId: string, personaId: string, patc
 /** Set (or clear, when content is blank) one editable prompt layer (1–4). */
 export async function setPromptLayer(workspaceId: string, personaId: string, layer: number, content: string, by: string): Promise<void> {
   if (layer < 1 || layer > 4) throw new Error("layer must be 1–4 (guardrails are not editable)");
+  await assertPersonaInWorkspace(workspaceId, personaId); // PBA-L3c-001
   const trimmed = content.trim();
   if (trimmed === "") {
     await db().delete(agentPrompts).where(and(eq(agentPrompts.workspaceId, workspaceId), eq(agentPrompts.personaId, personaId), eq(agentPrompts.layer, layer)));
@@ -333,16 +335,24 @@ export async function setPromptLayer(workspaceId: string, personaId: string, lay
       .onConflictDoUpdate({
         target: [agentPrompts.personaId, agentPrompts.layer],
         set: { contentEnc: encryptField(workspaceId, trimmed), updatedBySub: by, updatedAt: new Date() },
+        // Never rewrite a conflicting row owned by another tenant (PBA-L3c-001).
+        setWhere: eq(agentPrompts.workspaceId, workspaceId),
       });
   }
   await appendAudit({ workspaceId, actorSub: by, event: "persona_prompt_set", target: `${personaId}:${layer}` });
 }
 
 export async function setSkillEnabled(workspaceId: string, personaId: string, skillKey: string, enabled: boolean): Promise<void> {
+  await assertPersonaInWorkspace(workspaceId, personaId); // PBA-L3c-001
   await db()
     .insert(agentSkills)
     .values({ workspaceId, personaId, skillKey, enabled })
-    .onConflictDoUpdate({ target: [agentSkills.personaId, agentSkills.skillKey], set: { enabled } });
+    .onConflictDoUpdate({
+      target: [agentSkills.personaId, agentSkills.skillKey],
+      set: { enabled },
+      // Never rewrite a conflicting row owned by another tenant (PBA-L3c-001).
+      setWhere: eq(agentSkills.workspaceId, workspaceId),
+    });
 }
 
 async function uniqueKey(workspaceId: string, base: string): Promise<string> {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { listPersonas, seedDefaultPersonas } from "@/lib/domain/personas";
 
@@ -13,7 +13,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const ctx = await requireMember(req, id);
+    const ctx = await requireInternal(req, id);
     let personas = await listPersonas(id);
     if (personas.length === 0) {
       await seedDefaultPersonas(id, ctx.sub);

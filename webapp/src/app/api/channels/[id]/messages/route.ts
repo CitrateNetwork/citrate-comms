@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { visibleDocumentIds } from "@/lib/domain/documents";
+import { isInternalRole } from "@/lib/rbac/matrix";
 import { Capability, requireChannel } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { limit } from "@/lib/security/ratelimit";
@@ -39,6 +41,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!parsed.success) return NextResponse.json({ error: "invalid", detail: parsed.error.flatten() }, { status: 400 });
     const attachmentIds = parsed.data.attachmentIds ?? [];
     if (!parsed.data.body && attachmentIds.length === 0) return NextResponse.json({ error: "empty" }, { status: 400 });
+    // PBA-L3c-005: every attachment must be a document of THIS workspace that the sender
+    // can already see — never another tenant's file, never a DM/private file re-shared.
+    if (attachmentIds.length) {
+      const ok = await visibleDocumentIds(ctx.workspaceId, attachmentIds, { sub: ctx.sub, internal: isInternalRole(ctx.role) });
+      if (attachmentIds.some((a) => !ok.has(a))) return NextResponse.json({ error: "bad_attachment" }, { status: 400 });
+    }
 
     const message = await sendMessage({
       workspaceId: ctx.workspaceId,

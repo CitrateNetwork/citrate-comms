@@ -2,6 +2,7 @@ import { redirect, notFound } from "next/navigation";
 import { serverOwner } from "@/lib/auth/server";
 import { workspaceBySlug } from "@/lib/domain/workspaces";
 import { membershipOf } from "@/lib/tenant/guard";
+import { isInternalRole } from "@/lib/rbac/matrix";
 import { listAudit, verifyChainFromDb } from "@/lib/audit/chain";
 import { directory } from "@/lib/domain/members";
 import { AuditScreen } from "@/components/admin-audit/AuditScreen";
@@ -17,6 +18,7 @@ export default async function AuditPage({ params }: { params: Promise<{ slug: st
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   const [records, integrity, dir] = await Promise.all([
     listAudit(ws.id),

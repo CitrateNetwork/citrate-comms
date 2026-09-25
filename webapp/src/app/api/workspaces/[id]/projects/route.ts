@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { createProjectSchema } from "@/lib/validation/schemas";
 import { listProjects, createProject } from "@/lib/domain/pm";
@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     return NextResponse.json({ projects: await listProjects(id) });
   } catch (e) {
     return errorResponse(e);

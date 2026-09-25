@@ -97,6 +97,9 @@ function MermaidBlock({ code }: { code: string }) {
   return <LoaderBox />;
 }
 
+const blocked = () => Promise.reject(new Error("remote resources are disabled in chat charts"));
+const BLOCKING_LOADER = { load: blocked, sanitize: blocked, http: blocked, file: blocked };
+
 /** Render a ```chart block (Vega-Lite, inline data only) via lazy-loaded vega-embed.
  *  Container stays mounted so it recovers as the spec completes during streaming; on any
  *  parse/render failure it shows the code instead. */
@@ -118,7 +121,11 @@ function ChartBlock({ src }: { src: string }) {
       try {
         const embed = (await import("vega-embed")).default;
         if (cancelled || !ref.current) return;
-        const res = await embed(ref.current, parsed.spec as never, { actions: false, renderer: "svg" });
+        // Defense in depth behind parseChartSpec (PBA-L3c-021): a loader that refuses every
+        // fetch/sanitize, so no chart can load a remote resource or link out. `ast: true`
+        // runs expressions through vega's interpreter — no eval, so the CSP needs no
+        // 'unsafe-eval' (PBA-L3c-008).
+        const res = await embed(ref.current, parsed.spec as never, { actions: false, renderer: "svg", loader: BLOCKING_LOADER as never, ast: true });
         view = res.view;
         if (!cancelled) setState("ok");
       } catch {

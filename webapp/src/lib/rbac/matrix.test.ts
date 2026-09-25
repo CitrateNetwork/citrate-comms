@@ -5,7 +5,7 @@
  * lockstep so the web tier and the relay agree on policy (the bridge depends on it).
  */
 import { describe, expect, it } from "vitest";
-import { Capability, ROLES, can, canGrant, type Role } from "./matrix";
+import { Capability, ROLES, can, canGrant, isAdminRole, isInternalRole, type Role } from "./matrix";
 
 describe("capability_matrix (parity with rbac.rs)", () => {
   it("matches the Rust matrix exactly", () => {
@@ -76,5 +76,21 @@ describe("anti_escalation_on_grant (parity with rbac.rs)", () => {
       const grantsAnything = ROLES.some((t) => canGrant(r, t));
       expect(grantsAnything).toBe(granters.includes(r));
     }
+  });
+});
+
+describe("PBA-L3c-002/007 web-tier role predicates", () => {
+  it("ReadWorkspace / isInternalRole: internal roles only", () => {
+    expect(ROLES.filter((r) => isInternalRole(r))).toEqual(["Owner", "Admin", "Member", "Agent"]);
+    expect(ROLES.filter((r) => can(r, Capability.ReadWorkspace))).toEqual(["Owner", "Admin", "Member", "Agent"]);
+  });
+  it("isAdminRole: Owner and Admin only", () => {
+    expect(ROLES.filter((r) => isAdminRole(r))).toEqual(["Owner", "Admin"]);
+  });
+  it("Agent holds exactly read, workspace-read and post", () => {
+    expect(Object.values(Capability).filter((c) => can("Agent", c as Capability)).sort()).toEqual(["PostMessage", "ReadChannel", "ReadWorkspace"]);
+  });
+  it("an unknown role holds nothing (fail closed)", () => {
+    expect(can("Nobody" as Role, Capability.ReadChannel)).toBe(false);
   });
 });

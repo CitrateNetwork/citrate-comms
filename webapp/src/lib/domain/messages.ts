@@ -14,7 +14,12 @@ export interface MessageAttachment {
   id: string;
   name: string;
   mime: string | null;
-  url: string; // raw Blob URL (display); downloads go through the audited proxy
+  url: string; // access-controlled inline proxy URL ("" when there is no stored original)
+}
+
+/** Access-controlled inline-view URL for a document (the download proxy, inline mode). */
+export function documentViewUrl(workspaceId: string, documentId: string): string {
+  return `/api/workspaces/${workspaceId}/documents/${documentId}/download?inline=1`;
 }
 
 export interface MessageRow {
@@ -59,21 +64,31 @@ async function attachmentsForMessages(workspaceId: string, messageIds: string[])
     .select({ messageId: messageAttachments.messageId, id: documents.id, name: documents.name, mime: documents.mime, blobUrl: documents.blobUrl })
     .from(messageAttachments)
     .innerJoin(documents, eq(messageAttachments.documentId, documents.id))
-    .where(and(eq(messageAttachments.workspaceId, workspaceId), inArray(messageAttachments.messageId, messageIds)));
+    // PBA-L3c-005: both sides of the join are pinned to the workspace.
+    .where(and(eq(messageAttachments.workspaceId, workspaceId), eq(documents.workspaceId, workspaceId), inArray(messageAttachments.messageId, messageIds)));
   for (const r of rows) {
     const list = out.get(r.messageId) ?? [];
-    list.push({ id: r.id, name: r.name, mime: r.mime, url: r.blobUrl });
+    // PBA-L3c-009: never hand the raw (public, unguessable-but-permanent) Blob URL to
+    // clients — inline display goes through the access-controlled proxy too, so a
+    // removed member or a non-participant can't keep or share a working link.
+    list.push({ id: r.id, name: r.name, mime: r.mime, url: r.blobUrl ? documentViewUrl(workspaceId, r.id) : "" });
     out.set(r.messageId, list);
   }
   return out;
 }
 
-/** Link uploaded documents to a message (idempotent on the PK). */
+/** Link uploaded documents to a message (idempotent on the PK). Only documents of THIS
+ *  workspace are linked (PBA-L3c-005 defense in depth; callers validate visibility). */
 export async function linkMessageAttachments(workspaceId: string, messageId: string, documentIds: string[]): Promise<void> {
   if (documentIds.length === 0) return;
+  const own = await db()
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(eq(documents.workspaceId, workspaceId), inArray(documents.id, documentIds)));
+  if (own.length === 0) return;
   await db()
     .insert(messageAttachments)
-    .values(documentIds.map((documentId) => ({ workspaceId, messageId, documentId })))
+    .values(own.map((d) => ({ workspaceId, messageId, documentId: d.id })))
     .onConflictDoNothing();
 }
 

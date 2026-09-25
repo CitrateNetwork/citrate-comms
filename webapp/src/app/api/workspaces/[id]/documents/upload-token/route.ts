@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
-import { Capability, requireCapability } from "@/lib/tenant/guard";
+import { Capability, requireCapability, GuardError } from "@/lib/tenant/guard";
 import { ALLOWED_CONTENT_TYPES, MAX_BYTES } from "@/lib/attachments";
 
 export const runtime = "nodejs";
@@ -15,6 +15,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   try {
     const body = (await req.json()) as HandleUploadBody;
+    // Authorize a token request BEFORE handing it to the SDK (fail-closed, and the
+    // route x role matrix test can see the role gate). Vercel's upload-completed
+    // callback carries no user session; handleUpload verifies its signature instead.
+    if (body?.type !== "blob.upload-completed") await requireCapability(req, id, Capability.CreateRecord);
     const json = await handleUpload({
       body,
       request: req,
@@ -32,6 +36,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     });
     return NextResponse.json(json);
   } catch (e) {
-    return NextResponse.json({ error: (e as Error)?.message ?? "upload_denied" }, { status: 400 });
+    // PBA-L3c-024: never echo raw error text (driver/SQL/upstream) to the client.
+    if (e instanceof GuardError) return NextResponse.json({ error: e.message }, { status: e.status });
+    console.error("[upload-token] denied", e);
+    return NextResponse.json({ error: "upload_denied" }, { status: 400 });
   }
 }

@@ -6,6 +6,7 @@
  * saved views. Rows link into the record file. Data comes from /crm/[entity]/records
  * (custom values decrypted server-side; queryable forms drive sort).
  */
+import { csvCell } from "@/lib/csv"; // PBA-L3c-022: formula-injection-safe export
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Btn, Icon } from "@/components/primitives";
@@ -84,8 +85,8 @@ export function CrmTable({ workspaceId, slug, entity, canEdit }: { workspaceId: 
   }
 
   function exportCsv() {
-    const header = visibleColumns.map((c) => csv(c.label)).join(",");
-    const lines = filtered.map((r) => visibleColumns.map((c) => csv(r.cells[c.key]?.display ?? "")).join(","));
+    const header = visibleColumns.map((c) => csvCell(c.label)).join(",");
+    const lines = filtered.map((r) => visibleColumns.map((c) => csvCell(r.cells[c.key]?.display ?? "")).join(","));
     download(`${entity}s.csv`, [header, ...lines].join("\n"));
   }
 
@@ -234,9 +235,6 @@ export function CrmTable({ workspaceId, slug, entity, canEdit }: { workspaceId: 
   );
 }
 
-function csv(s: string): string {
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
 function download(name: string, content: string) {
   const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);

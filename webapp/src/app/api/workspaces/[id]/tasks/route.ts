@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { createTaskSchema, moveTaskSchema } from "@/lib/validation/schemas";
 import { listTasks, createTask, moveTask, setTaskRaci } from "@/lib/domain/pm";
@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     const projectId = new URL(req.url).searchParams.get("projectId") ?? undefined;
     return NextResponse.json({ tasks: await listTasks(id, projectId) });
   } catch (e) {

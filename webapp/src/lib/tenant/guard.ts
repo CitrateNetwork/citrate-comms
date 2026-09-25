@@ -90,6 +90,17 @@ export async function requireCapability(
 }
 
 /**
+ * Workspace-level data gate (PBA-L3c-002): membership AND `ReadWorkspace`, which only
+ * the internal roles hold. Every non-channel workspace read (CRM, calendar, documents,
+ * tables, PM, personas, agents, MCP data tools) runs this — Partner/Guest are external
+ * and see only the channels they are seated in. Deny by default: a new workspace route
+ * that forgets this is caught by the route x role matrix test (rbac-routes.int.test.ts).
+ */
+export async function requireInternal(req: Request, workspaceId: string): Promise<MemberCtx> {
+  return requireCapability(req, workspaceId, Capability.ReadWorkspace);
+}
+
+/**
  * Channel-scoped guard for `/api/channels/[id]/*` routes. Resolves the channel's
  * workspace, runs the workspace membership + capability check, then confirms the
  * caller is a member of THIS channel (scoping for Partner/Guest, and the natural

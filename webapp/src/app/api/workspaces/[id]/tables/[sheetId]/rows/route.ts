@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireMember } from "@/lib/tenant/guard";
+import { requireInternal } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { readRows } from "@/lib/domain/tables-repo";
 
@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; sheetId: string }> }) {
   try {
     const { id, sheetId } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     const url = new URL(req.url);
     const offset = Number(url.searchParams.get("offset") ?? 0);
     const limit = Number(url.searchParams.get("limit") ?? 20);

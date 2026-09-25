@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireMember, requireCapability, Capability } from "@/lib/tenant/guard";
+import { requireCapability, Capability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { getMapping, saveMapping } from "@/lib/domain/import-engine";
 import { suggestMapping, type MappingSpec } from "@/lib/domain/import-map";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; sheetId: string }> }) {
   try {
     const { id, sheetId } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     const existing = await getMapping(id, sheetId);
     if (existing) return NextResponse.json({ spec: existing.spec, approved: existing.approved, source: "saved" });
     const schema = await getSheetSchema(id, sheetId);

@@ -5,7 +5,7 @@ import { membershipOf } from "@/lib/tenant/guard";
 import { listPersonas } from "@/lib/domain/personas";
 import { directory } from "@/lib/domain/members";
 import { listWorkspaceThreads } from "@/lib/domain/agent-threads";
-import { can, Capability } from "@/lib/rbac/matrix";
+import { can, Capability, isInternalRole } from "@/lib/rbac/matrix";
 import { AgentHistoryScreen } from "@/components/agents/AgentHistoryScreen";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +21,7 @@ export default async function AgentHistoryPage({ params }: { params: Promise<{ s
   if (!ws) notFound();
   const ctx = await membershipOf(ws.id, sub);
   if (!ctx) notFound();
+  if (!isInternalRole(ctx.role)) notFound(); // PBA-L3c-002: external roles never see workspace data
 
   const viewAll = can(ctx.role, Capability.ManageWorkspace);
   const [threads, personas, dir] = await Promise.all([

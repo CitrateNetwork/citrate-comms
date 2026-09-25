@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireMember, assertCan, Capability } from "@/lib/tenant/guard";
+import { assertCan, Capability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { ownsAgentThread, threadInWorkspace, listThreadMessages } from "@/lib/domain/agent-threads";
 import { appendAudit } from "@/lib/audit/chain";
@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; threadId: string }> }) {
   try {
     const { id, threadId } = await params;
-    const ctx = await requireMember(req, id);
+    const ctx = await requireInternal(req, id);
     const isOwner = await ownsAgentThread(id, ctx.sub, threadId);
     if (!isOwner) {
       // Admin override: must hold ManageWorkspace AND the thread must exist in this workspace.

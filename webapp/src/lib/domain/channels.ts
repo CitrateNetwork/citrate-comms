@@ -5,7 +5,7 @@
  */
 import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { channels, channelMembers, messages } from "@/lib/db/schema";
+import { channels, channelMembers, messages, members } from "@/lib/db/schema";
 import { appendAudit } from "@/lib/audit/chain";
 
 export interface ChannelRow {
@@ -93,7 +93,17 @@ export async function createChannel(input: CreateChannelInput): Promise<ChannelR
     .returning();
   const channel = ch!;
 
-  const subs = Array.from(new Set([input.createdBySub, ...(input.memberSubs ?? [])]));
+  // PBA-L3c-027: only ACTIVE members of this workspace can be seated — never an arbitrary
+  // or foreign sub.
+  const requested = Array.from(new Set(input.memberSubs ?? [])).filter((x) => x !== input.createdBySub);
+  const active = requested.length
+    ? (await d
+        .select({ sub: members.sub })
+        .from(members)
+        .where(and(eq(members.workspaceId, input.workspaceId), eq(members.status, "active"), inArray(members.sub, requested))))
+        .map((r) => r.sub)
+    : [];
+  const subs = [input.createdBySub, ...active];
   await d.insert(channelMembers).values(
     subs.map((sub) => ({ workspaceId: input.workspaceId, channelId: channel.id, sub })),
   );

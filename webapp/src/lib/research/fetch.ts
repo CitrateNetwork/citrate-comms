@@ -6,10 +6,16 @@
  * the runner's Playwright fetch (escalation), wired in the tool layer.
  *
  * SSRF posture (fail-closed): only http/https, and the resolved IP must be public — private,
- * loopback, link-local and unique-local ranges are refused so an agent can't be steered into
- * the internal network or cloud metadata (169.254.169.254).
+ * loopback, link-local, unique-local and v4-translation (NAT64/6to4/Teredo) ranges are
+ * refused so an agent can't be steered into the internal network or cloud metadata
+ * (169.254.169.254). The check is re-run at CONNECT time by a pinned lookup, closing the
+ * DNS-rebinding window between validation and connection (PBA-L3c-025).
  */
 import { lookup } from "node:dns/promises";
+import { lookup as dnsLookupCb, type LookupAddress } from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import type { IncomingMessage } from "node:http";
 
 export interface ReadablePage {
   url: string;
@@ -129,7 +135,22 @@ export function isPrivateIp(ip: string): boolean {
     if ((g[0]! & 0xffc0) === 0xfe80) return true;
     // Unique-local fc00::/7
     if ((g[0]! & 0xfe00) === 0xfc00) return true;
+    // PBA-L3c-025: translation/tunnel prefixes that embed (or route to) an IPv4 target —
+    // NAT64 64:ff9b::/96 and local-use 64:ff9b:1::/48 (RFC 6052/8215), 6to4 2002::/16,
+    // Teredo 2001::/32 — plus discard-only 100::/64, documentation 2001:db8::/32,
+    // deprecated site-local fec0::/10 and multicast ff00::/8. Refused outright (fail-closed):
+    // a public-looking v6 address must not be a door into a private v4 network.
+    if (g[0] === 0x64 && g[1] === 0xff9b) return true;
+    if (g[0] === 0x2002) return true;
+    if (g[0] === 0x2001 && g[1] === 0) return true;
+    if (g[0] === 0x2001 && g[1] === 0x0db8) return true;
+    if (g[0] === 0x0100 && g[1] === 0 && g[2] === 0 && g[3] === 0) return true;
+    if ((g[0]! & 0xffc0) === 0xfec0) return true;
+    if ((g[0]! & 0xff00) === 0xff00) return true;
     // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 → judge by the embedded v4.
+    // RFC 2765 IPv4-translated ::ffff:0:0:0/96 (::ffff:0:a.b.c.d) — refused outright,
+    // like the other translation prefixes (verifier, informational).
+    if (g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0xffff && g[5] === 0) return true;
     const mapped = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && (g[5] === 0xffff || g[5] === 0);
     if (mapped && (g[6] !== 0 || g[7] !== 0)) {
       return isPrivateIpv4(g[6]! >> 8, g[6]! & 0xff) || isPrivateIpv4(g[7]! >> 8, g[7]! & 0xff);
@@ -169,6 +190,80 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   if (addrs.length === 0) throw new BlockedUrlError("host did not resolve");
   for (const a of addrs) if (isPrivateIp(a.address)) throw new BlockedUrlError("resolves to a private address");
   return u;
+}
+
+type LookupCb = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+type Resolver = (hostname: string, options: { all: true }, cb: (err: NodeJS.ErrnoException | null, addresses: LookupAddress[]) => void) => void;
+
+/**
+ * A `lookup` for node:http(s) that re-validates EVERY address at CONNECT time
+ * (PBA-L3c-025). assertPublicUrl resolves once up front; without this the socket's own
+ * resolution could return a different (private) address — DNS rebinding. With it, the
+ * socket can only ever connect to an address that passed isPrivateIp.
+ */
+export function makeGuardedLookup(resolve: Resolver = dnsLookupCb as unknown as Resolver) {
+  return (hostname: string, options: { all?: boolean } | number | undefined, cb: LookupCb): void => {
+    resolve(hostname, { all: true }, (err, addrs) => {
+      if (err) return cb(err, "", 4);
+      if (!addrs || addrs.length === 0) return cb(new BlockedUrlError("host did not resolve") as NodeJS.ErrnoException, "", 4);
+      if (addrs.some((a) => isPrivateIp(a.address))) return cb(new BlockedUrlError("resolves to a private address") as NodeJS.ErrnoException, "", 4);
+      if (typeof options === "object" && options?.all) return cb(null, addrs);
+      cb(null, addrs[0]!.address, addrs[0]!.family);
+    });
+  };
+}
+
+const guardedLookup = makeGuardedLookup();
+
+interface RawResponse {
+  status: number;
+  location: string | null;
+  contentType: string;
+  res: IncomingMessage;
+}
+
+/** One GET over node:http(s) with the connect-time SSRF guard; no automatic redirects. */
+export function guardedGet(u: URL, signal: AbortSignal, lookup: unknown = guardedLookup): Promise<RawResponse> {
+  const mod = u.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = mod.request(
+      u,
+      {
+        method: "GET",
+        lookup: lookup as never,
+        signal,
+        headers: { "user-agent": "Mozilla/5.0 (compatible; CitrateComms/1.0)", accept: "text/html,*/*" },
+      },
+      (res) =>
+        resolve({
+          status: res.statusCode ?? 0,
+          location: typeof res.headers.location === "string" ? res.headers.location : null,
+          contentType: String(res.headers["content-type"] ?? ""),
+          res,
+        }),
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** Read at most `max` bytes of a response body as UTF-8, then stop the transfer. */
+export function readCapped(res: IncomingMessage, max: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let n = 0;
+    res.on("data", (c: Buffer) => {
+      if (n >= max) return;
+      chunks.push(c);
+      n += c.length;
+      if (n >= max) {
+        res.destroy();
+        resolve(Buffer.concat(chunks).subarray(0, max).toString("utf8"));
+      }
+    });
+    res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    res.on("error", (e) => (n >= max ? undefined : reject(e)));
+  });
 }
 
 function decodeEntities(s: string): string {
@@ -233,19 +328,16 @@ export async function fetchReadable(raw: string): Promise<ReadablePage> {
     // Follow redirects manually so EVERY hop is re-validated by the SSRF guard —
     // `redirect: "follow"` would let an allowed host 302 into the internal network
     // (CM2-B-B007). Bounded to MAX_REDIRECTS.
-    let res: Response;
+    let res: RawResponse;
     let hops = 0;
     for (;;) {
-      res = await fetch(u.toString(), {
-        signal: ctrl.signal,
-        redirect: "manual",
-        headers: { "user-agent": "Mozilla/5.0 (compatible; CitrateComms/1.0)", accept: "text/html,*/*" },
-      });
-      if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+      res = await guardedGet(u, ctrl.signal);
+      if (res.status >= 300 && res.status < 400 && res.location) {
+        res.res.resume(); // discard the redirect body
         if (++hops > MAX_REDIRECTS) {
           return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: "too many redirects" };
         }
-        const loc = new URL(res.headers.get("location")!, u).toString();
+        const loc = new URL(res.location, u).toString();
         try {
           u = await assertPublicUrl(loc); // re-validate the redirect target
         } catch (e) {
@@ -255,16 +347,22 @@ export async function fetchReadable(raw: string): Promise<ReadablePage> {
       }
       break;
     }
-    if (!res.ok) return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: `fetch failed (${res.status})` };
-    const ctype = res.headers.get("content-type") ?? "";
+    if (res.status < 200 || res.status >= 300) {
+      res.res.resume();
+      return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: `fetch failed (${res.status})` };
+    }
+    const ctype = res.contentType;
     if (!/text\/html|text\/plain|application\/xhtml/i.test(ctype)) {
+      res.res.resume();
       return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: `unsupported content-type (${ctype || "unknown"})` };
     }
-    const raw_html = (await res.text()).slice(0, MAX_BYTES);
+    const raw_html = await readCapped(res.res, MAX_BYTES);
     const { title, text } = extractReadable(raw_html);
     const truncated = text.length > MAX_TEXT;
     return { url: u.toString(), title, text: truncated ? text.slice(0, MAX_TEXT) : text, truncated, available: true };
   } catch (e) {
+    // A connect-time SSRF refusal (the pinned lookup) is a refusal, never "thin".
+    if (e instanceof BlockedUrlError) return { url: u.toString(), title: "", text: "", truncated: false, available: false, blocked: true, note: e.message };
     const aborted = (e as Error)?.name === "AbortError";
     return { url: u.toString(), title: "", text: "", truncated: false, available: false, note: aborted ? "fetch timed out" : "fetch error" };
   } finally {

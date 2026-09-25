@@ -9,7 +9,7 @@
  * (requireCapability), same validation seam, same audit vocabulary as accounts/deals.
  */
 import { NextResponse } from "next/server";
-import { Capability, requireCapability, requireMember } from "@/lib/tenant/guard";
+import { Capability, requireCapability, requireInternal } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { createContactSchema } from "@/lib/validation/schemas";
 import { listContacts, createContact } from "@/lib/domain/crm";
@@ -20,7 +20,7 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireMember(req, id);
+    await requireInternal(req, id);
     return NextResponse.json({ contacts: await listContacts(id) });
   } catch (e) {
     return errorResponse(e);

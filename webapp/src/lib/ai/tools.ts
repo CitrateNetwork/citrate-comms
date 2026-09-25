@@ -12,13 +12,13 @@
  */
 import { tool } from "ai";
 import { z } from "zod";
-import { Capability, can, type Role } from "@/lib/rbac/matrix";
+import { Capability, can, isInternalRole, isAdminRole, type Role } from "@/lib/rbac/matrix";
 import { listAccounts, listDeals, listContacts, recordExists } from "@/lib/domain/crm";
 import { dedupeWorkspaceCrm } from "@/lib/domain/crm-dedupe";
 import { listWorkspaceEventsInRange, postAndPinCalendarSummary } from "@/lib/domain/calendar";
 import { getAccountFile, getDealFile, getContactFile, type RecordFile } from "@/lib/domain/crm-file";
 import { enqueueApproval } from "@/lib/domain/approvals";
-import { retrieveChunks, listDocuments, getDocument } from "@/lib/domain/documents";
+import { retrieveChunks, listDocuments, getVisibleDocument, type DocViewer } from "@/lib/domain/documents";
 import { listMessages } from "@/lib/domain/messages";
 import { isChannelMember } from "@/lib/domain/channels";
 import { listTasks, listProjects } from "@/lib/domain/pm";
@@ -41,6 +41,13 @@ export interface ToolContext {
   threadId?: string | null;
   /** The agent member's role — bounds what the registry permits (role=Agent). */
   agentRole: Role;
+  /**
+   * The role of the HUMAN (or MCP caller) on whose behalf the tools run. The effective
+   * permission is the intersection of agentRole and invokerRole (PBA-L3c-002): an
+   * external Partner/Guest who @-mentions an agent must not borrow the agent's
+   * workspace-wide read. Omitted ⇒ the caller IS the agent (agentRole).
+   */
+  invokerRole?: Role;
   /** The persona's tool allow-list. Omitted ⇒ all IMPLEMENTED tools (e.g. MCP). */
   allow?: Set<ToolName>;
   /** Custom field keys per entity — injected so crm.write advertises valid keys (dynamic schema). */
@@ -70,11 +77,70 @@ function compactFile(file: RecordFile) {
   };
 }
 
-class ToolDenied extends Error {}
+/** A deliberate authorization refusal — its message is safe to show the caller. */
+export class ToolDenied extends Error {}
 
 const trustTierSchema = z
   .enum(["derived-deterministic", "human-confirmed", "agent-asserted", "inferred-advisory"])
   .describe("minimum trust tier to include (strongest→weakest)");
+
+/**
+ * The capability each IMPLEMENTED tool needs (PBA-L3c-002). One table drives both the
+ * registry filter (a tool the caller can't use is never listed) and the execute-time
+ * check (defense in depth). Workspace-data tools need ReadWorkspace; HITL propose tools
+ * need PostMessage; the import/ingest tools need CreateRecord.
+ */
+export const TOOL_CAPABILITY: Record<string, Capability> = {
+  "crm.read": Capability.ReadWorkspace,
+  "crm.note": Capability.PostMessage,
+  "crm.create": Capability.PostMessage,
+  "crm.delete": Capability.PostMessage,
+  "crm.dedupe": Capability.PostMessage,
+  "crm.write": Capability.PostMessage,
+  "memory.assert": Capability.PostMessage,
+  "memory.recall": Capability.ReadWorkspace,
+  "documents.read": Capability.ReadWorkspace,
+  "documents.list": Capability.ReadWorkspace,
+  "artifact.attach": Capability.ReadWorkspace,
+  "pm.read": Capability.ReadWorkspace,
+  "tables.list": Capability.ReadWorkspace,
+  "tables.schema": Capability.ReadWorkspace,
+  "tables.read": Capability.ReadWorkspace,
+  "tables.query": Capability.ReadWorkspace,
+  "tables.map": Capability.CreateRecord,
+  "crm.import": Capability.PostMessage,
+  "crm.ingest": Capability.CreateRecord,
+  "calendar.read": Capability.ReadWorkspace,
+  "calendar.schedule": Capability.PostMessage,
+  "calendar.cancel": Capability.PostMessage,
+  "calendar.pin_summary": Capability.PostMessage,
+  "thread.summarize": Capability.ReadChannel,
+  "documents.write": Capability.PostMessage,
+  "ledger.write": Capability.PostMessage,
+  "pm.write": Capability.PostMessage,
+  "web.search": Capability.ReadWorkspace,
+  "web.fetch": Capability.ReadWorkspace,
+  "chart.render": Capability.ReadWorkspace,
+  "terminal.exec": Capability.PostMessage,
+  "code.run": Capability.PostMessage,
+};
+
+/** Tools that are scoped to a channel the invoker is seated in (membership re-checked in
+ *  the tool) and so are usable by external roles. Everything else is internal-only. */
+export const CHANNEL_SCOPED_TOOLS: ReadonlySet<string> = new Set(["thread.summarize"]);
+
+/**
+ * May a caller with (agentRole, invokerRole) use `name`? Deny by default: unknown tools
+ * are refused; both roles must hold the tool's capability; and unless the tool is
+ * channel-scoped, both roles must be INTERNAL (hold ReadWorkspace).
+ */
+export function toolPermitted(name: string, agentRole: Role, invokerRole: Role = agentRole): boolean {
+  const cap = TOOL_CAPABILITY[name];
+  if (!cap) return false;
+  if (!can(agentRole, cap) || !can(invokerRole, cap)) return false;
+  if (CHANNEL_SCOPED_TOOLS.has(name)) return true;
+  return isInternalRole(agentRole) && isInternalRole(invokerRole);
+}
 
 /**
  * Build the tool map for a turn. `audited` logs + chains every call; RBAC is checked
@@ -90,11 +156,20 @@ export function citrateCommsTools(ctx: ToolContext) {
   };
 
   const audit = ctx.audit !== false;
+  const invokerRole: Role = ctx.invokerRole ?? ctx.agentRole;
+  const permitted = (name: ToolName) => toolPermitted(name, ctx.agentRole, invokerRole);
+  // Documents are visible per INVOKER (PBA-L3c-003), never workspace-wide.
+  const viewer: DocViewer = { sub: ctx.invokedBySub, internal: isInternalRole(invokerRole) && isInternalRole(ctx.agentRole) };
+  /** Execute-time gate for the HITL propose tools (which bypass audited()). */
+  const assertPropose = (name: ToolName) => {
+    if (!permitted(name)) throw new ToolDenied(`role ${invokerRole} may not propose ${name}`);
+  };
   const audited =
-    <A>(name: ToolName, cap: Capability, run: (args: A) => Promise<unknown>) =>
+    <A>(name: ToolName, run: (args: A) => Promise<unknown>) =>
     async (args: A) => {
-      // Fail-closed RBAC: the agent's role must hold the capability.
-      if (!can(ctx.agentRole, cap)) throw new ToolDenied(`role ${ctx.agentRole} may not ${name}`);
+      // Fail-closed RBAC (PBA-L3c-002): the tool's capability, for BOTH the agent's role
+      // and the invoker's, and internal-only unless channel-scoped.
+      if (!permitted(name)) throw new ToolDenied(`role ${invokerRole} may not ${name}`);
       if (!audit) return run(args); // incognito: no transparency-log row
       const id = await logToolCall(auditCtx, name, args, "auto");
       try {
@@ -119,16 +194,14 @@ export function citrateCommsTools(ctx: ToolContext) {
         query: z.string().max(200).optional().describe("case-insensitive substring match on name (list mode)"),
         limit: z.number().int().min(1).max(50).default(20),
       }),
-      execute: audited(
-        "crm.read",
-        Capability.ReadChannel,
+      execute: audited("crm.read",
         async (a: { entity: CrmEntity; id?: string; query?: string; limit: number }) => {
           if (a.id) {
             const file =
               a.entity === "account"
-                ? await getAccountFile(ctx.workspaceId, a.id)
+                ? await getAccountFile(ctx.workspaceId, a.id, viewer)
                 : a.entity === "deal"
-                  ? await getDealFile(ctx.workspaceId, a.id)
+                  ? await getDealFile(ctx.workspaceId, a.id, viewer)
                   : await getContactFile(ctx.workspaceId, a.id);
             return file ? { record: compactFile(file) } : { error: "record not found" };
           }
@@ -157,7 +230,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { entity: CrmEntity; recordId: string; type: "note" | "journal" | "call" | "meeting" | "email"; title?: string; body: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.note`);
+        assertPropose("crm.note");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "crm.note",
@@ -188,7 +261,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { entity: CrmEntity; name: string; domain?: string; title?: string; value?: number; accountId?: string; fields?: { key: string; value: string }[] }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.create`);
+        assertPropose("crm.create");
         if (a.entity === "deal" && !a.accountId) {
           return { status: "error", message: "A deal needs `accountId` (its parent account). Create/find the account first, then create the deal with that id." };
         }
@@ -221,7 +294,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { entity: CrmEntity; recordId: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.delete`);
+        assertPropose("crm.delete");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "crm.delete",
@@ -242,7 +315,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({}),
       execute: async () => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.dedupe`);
+        assertPropose("crm.dedupe");
         const preview = await dedupeWorkspaceCrm(ctx.workspaceId, { dryRun: true });
         const total = preview.accounts.merged + preview.deals.merged + preview.contacts.merged;
         if (total === 0) return { status: "noop", message: "No duplicate accounts, deals, or contacts found — nothing to merge." };
@@ -289,7 +362,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { entity: CrmEntity; recordId: string; standard?: { name?: string; domain?: string; title?: string; value?: number }; fields?: { key: string; value: string }[] }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.write`);
+        assertPropose("crm.write");
         // crm.write only UPDATES existing records. If the id isn't a real record (e.g. the agent
         // passed a NAME), tell it to use crm.create instead — recoverable in the same turn.
         // Check UUID shape first so a name can't reach the uuid-typed column (Postgres would throw).
@@ -351,7 +424,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { kind: string; content: string; anchors?: { entity: string; id: string }[]; confidence?: number }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose memory.assert`);
+        assertPropose("memory.assert");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "memory.assert",
@@ -378,9 +451,7 @@ export function citrateCommsTools(ctx: ToolContext) {
           .optional()
           .describe("optional entity anchors to focus the recall"),
       }),
-      execute: audited(
-        "memory.recall",
-        Capability.ReadChannel,
+      execute: audited("memory.recall",
         async (a: { query: string; trustFloor?: TrustTier; budget: number; anchors?: { entity: string; id: string }[] }) => {
           const repo = crmRepo(ctx.workspaceId);
           const q = { query: a.query, trustFloor: a.trustFloor, budget: a.budget, anchors: a.anchors };
@@ -412,8 +483,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         "Retrieve from the team's uploaded documents (RAG). Returns cited snippets with their source " +
         "document name. Use to ground answers in real files — cite what you used.",
       inputSchema: z.object({ query: z.string().min(1).max(400), budget: z.number().int().min(1).max(10).default(6) }),
-      execute: audited("documents.read", Capability.ReadChannel, async (a: { query: string; budget: number }) => {
-        const results = await retrieveChunks(ctx.workspaceId, a.query, { budget: a.budget });
+      execute: audited("documents.read", async (a: { query: string; budget: number }) => {
+        const results = await retrieveChunks(ctx.workspaceId, a.query, viewer, { budget: a.budget });
         // documentId is surfaced so the agent can artifact.attach a source it cited.
         return { results: results.map((r) => ({ documentId: r.documentId, document: r.name, snippet: r.snippet })) };
       }),
@@ -423,8 +494,8 @@ export function citrateCommsTools(ctx: ToolContext) {
         "List the workspace's documents/artifacts (id, name, type, when). Use to find an existing " +
         "file/image/chart by id so you can attach it to your reply with artifact.attach.",
       inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
-      execute: audited("documents.list", Capability.ReadChannel, async (a: { limit: number }) => {
-        const docs = await listDocuments(ctx.workspaceId, a.limit);
+      execute: audited("documents.list", async (a: { limit: number }) => {
+        const docs = await listDocuments(ctx.workspaceId, viewer, a.limit);
         return { documents: docs.map((d) => ({ id: d.id, name: d.name, mime: d.mime, at: d.createdAt })) };
       }),
     }),
@@ -434,8 +505,9 @@ export function citrateCommsTools(ctx: ToolContext) {
         "open and download it. Find ids with documents.read (sources you cited) or documents.list. Returns " +
         "a markdown link you can also embed inline. Attachments are recorded and downloads are audited.",
       inputSchema: z.object({ documentId: z.string().uuid(), note: z.string().max(200).optional() }),
-      execute: audited("artifact.attach", Capability.ReadChannel, async (a: { documentId: string; note?: string }) => {
-        const doc = await getDocument(ctx.workspaceId, a.documentId);
+      execute: audited("artifact.attach", async (a: { documentId: string; note?: string }) => {
+        // PBA-L3c-003: only a document the invoker can see may be re-posted into a channel.
+        const doc = await getVisibleDocument(ctx.workspaceId, a.documentId, viewer);
         if (!doc) return { ok: false, error: "document_not_found" };
         ctx.collectArtifact?.(a.documentId);
         const downloadUrl = `/api/workspaces/${ctx.workspaceId}/documents/${doc.id}/download`;
@@ -445,7 +517,7 @@ export function citrateCommsTools(ctx: ToolContext) {
     "pm.read": tool({
       description: "Read projects and tasks (the board). Optionally scope to a project. Returns real records.",
       inputSchema: z.object({ projectId: z.string().uuid().optional() }),
-      execute: audited("pm.read", Capability.ReadChannel, async (a: { projectId?: string }) => {
+      execute: audited("pm.read", async (a: { projectId?: string }) => {
         const [projects, tasks] = await Promise.all([listProjects(ctx.workspaceId), listTasks(ctx.workspaceId, a.projectId)]);
         // Bound the result so a large board can't flood the model's context.
         const TASK_CAP = 100;
@@ -463,7 +535,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         "counts, plus recent import jobs and their progress. Start here when a member drops an xlsx/csv " +
         "and asks to import it. Returns ids you pass to tables.schema / tables.read / tables.query / crm.import.",
       inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) }),
-      execute: audited("tables.list", Capability.ReadChannel, async (a: { limit: number }) => {
+      execute: audited("tables.list", async (a: { limit: number }) => {
         return listTables(ctx.workspaceId, a.limit);
       }),
     }),
@@ -473,7 +545,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         "sensitive (email/phone/address — masked), the empty-fraction, and a few sample values. Use this to " +
         "understand a big table (e.g. 1,000 rows × 100 cols) before reading or importing — it never dumps rows.",
       inputSchema: z.object({ sheetId: z.string().uuid() }),
-      execute: audited("tables.schema", Capability.ReadChannel, async (a: { sheetId: string }) => {
+      execute: audited("tables.schema", async (a: { sheetId: string }) => {
         const s = await getSheetSchema(ctx.workspaceId, a.sheetId);
         return s ?? { error: "sheet not found" };
       }),
@@ -491,7 +563,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         columns: z.array(z.string().max(120)).max(30).optional(),
         filter: z.object({ column: z.string().max(120), op: z.enum(["eq", "contains"]), value: z.string().max(200) }).optional(),
       }),
-      execute: audited("tables.read", Capability.ReadChannel, async (a: { sheetId: string; offset: number; limit: number; columns?: string[]; filter?: { column: string; op: "eq" | "contains"; value: string } }) => {
+      execute: audited("tables.read", async (a: { sheetId: string; offset: number; limit: number; columns?: string[]; filter?: { column: string; op: "eq" | "contains"; value: string } }) => {
         return readRows(ctx.workspaceId, a.sheetId, { offset: a.offset, limit: a.limit, columns: a.columns, filter: a.filter });
       }),
     }),
@@ -506,7 +578,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         column: z.string().max(120).optional(),
         where: z.object({ column: z.string().max(120), op: z.enum(["eq", "contains"]), value: z.string().max(200) }).optional(),
       }),
-      execute: audited("tables.query", Capability.ReadChannel, async (a: { sheetId: string; op: "count" | "distinct" | "groupby"; column?: string; where?: { column: string; op: "eq" | "contains"; value: string } }) => {
+      execute: audited("tables.query", async (a: { sheetId: string; op: "count" | "distinct" | "groupby"; column?: string; where?: { column: string; op: "eq" | "contains"; value: string } }) => {
         return queryTable(ctx.workspaceId, a.sheetId, { op: a.op, column: a.column, where: a.where });
       }),
     }),
@@ -520,7 +592,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         sheetId: z.string().uuid(),
         spec: z.record(z.string(), z.unknown()).optional().describe("an edited MappingSpec to save as the sheet's draft"),
       }),
-      execute: audited("tables.map", Capability.CreateRecord, async (a: { sheetId: string; spec?: Record<string, unknown> }) => {
+      execute: audited("tables.map", async (a: { sheetId: string; spec?: Record<string, unknown> }) => {
         if (a.spec) {
           await saveMapping({ workspaceId: ctx.workspaceId, sheetId: a.sheetId, spec: a.spec as unknown as MappingSpec, bySub: ctx.invokedBySub });
           return { saved: true, spec: a.spec };
@@ -543,7 +615,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { sheetId: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose crm.import`);
+        assertPropose("crm.import");
         // Self-healing: if no mapping was saved yet (or a prior tables.map save failed),
         // fall back to a suggested draft instead of hard-blocking the whole import. Only
         // a genuinely missing sheet stops us here.
@@ -584,10 +656,10 @@ export function citrateCommsTools(ctx: ToolContext) {
         text: z.string().min(1).max(50_000).optional().describe("a raw text block to ingest (if no documentId)"),
         hint: z.string().max(300).optional().describe("optional context, e.g. 'this is a sales call summary'"),
       }),
-      execute: audited("crm.ingest", Capability.CreateRecord, async (a: { documentId?: string; text?: string; hint?: string }) => {
+      execute: audited("crm.ingest", async (a: { documentId?: string; text?: string; hint?: string }) => {
         if (!a.documentId && !a.text) return { status: "error", message: "Provide a documentId or a text block to ingest." };
         const summary = a.documentId
-          ? await ingestDocument({ workspaceId: ctx.workspaceId, documentId: a.documentId, bySub: ctx.invokedBySub, hint: a.hint })
+          ? await ingestDocument({ workspaceId: ctx.workspaceId, documentId: a.documentId, bySub: ctx.invokedBySub, viewer, hint: a.hint })
           : await ingestText({ workspaceId: ctx.workspaceId, text: a.text!, bySub: ctx.invokedBySub, hint: a.hint });
         return { status: summary.held > 0 ? "partial_pending_review" : "done", ...summary };
       }),
@@ -602,25 +674,33 @@ export function citrateCommsTools(ctx: ToolContext) {
         fromISO: z.string().datetime({ offset: true }).optional().describe("window start (ISO); default: now"),
         toISO: z.string().datetime({ offset: true }).optional().describe("window end (ISO); default: 30 days out"),
       }),
-      execute: audited("calendar.read", Capability.ReadChannel, async (a: { fromISO?: string; toISO?: string }) => {
+      execute: audited("calendar.read", async (a: { fromISO?: string; toISO?: string }) => {
         const now = new Date();
         const from = a.fromISO ?? now.toISOString();
         const to = a.toISO ?? new Date(now.getTime() + 30 * 86400_000).toISOString();
         const events = await listWorkspaceEventsInRange(ctx.workspaceId, from, to);
+        // PBA-L3c-007: the team calendar is free/busy for events the invoker neither
+        // created nor attends (unless an Owner/Admin) — the slot is visible for
+        // scheduling, the title/location/attendees are not.
+        const seesAll = isAdminRole(invokerRole);
         return {
           window: { from, to },
           count: events.length,
-          events: events.slice(0, 200).map((e) => ({
-            id: e.id,
-            title: e.title,
-            kind: e.kind,
-            startsAt: e.startsAt,
-            endsAt: e.endsAt,
-            allDay: e.allDay,
-            timezone: e.timezone,
-            location: e.location,
-            attendees: e.attendees.map((at) => ({ sub: at.sub, raci: at.raciRole, rsvp: at.response })),
-          })),
+          events: events.slice(0, 200).map((e) =>
+            seesAll || e.createdBySub === ctx.invokedBySub || e.attendees.some((at) => at.sub === ctx.invokedBySub)
+              ? {
+                  id: e.id,
+                  title: e.title,
+                  kind: e.kind,
+                  startsAt: e.startsAt,
+                  endsAt: e.endsAt,
+                  allDay: e.allDay,
+                  timezone: e.timezone,
+                  location: e.location,
+                  attendees: e.attendees.map((at) => ({ sub: at.sub, raci: at.raciRole, rsvp: at.response })),
+                }
+              : { busy: true, startsAt: e.startsAt, endsAt: e.endsAt, allDay: e.allDay, timezone: e.timezone },
+          ),
         };
       }),
     }),
@@ -643,7 +723,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { title: string; kind: "meeting" | "deadline" | "focus"; startsAt: string; endsAt: string; timezone?: string; location?: string; description?: string; attendees?: { sub: string; raciRole?: "R" | "A" | "C" | "I" | null }[]; channelId?: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose calendar.schedule`);
+        assertPropose("calendar.schedule");
         if (new Date(a.endsAt) < new Date(a.startsAt)) return { status: "error", message: "endsAt is before startsAt." };
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
@@ -672,7 +752,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({ eventId: z.string().uuid() }),
       execute: async (a: { eventId: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose calendar.cancel`);
+        assertPropose("calendar.cancel");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "calendar.cancel",
@@ -693,7 +773,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         channelId: z.string().uuid(),
         days: z.number().int().min(1).max(60).default(7),
       }),
-      execute: audited("calendar.pin_summary", Capability.PostMessage, async (a: { channelId: string; days: number }) => {
+      execute: audited("calendar.pin_summary", async (a: { channelId: string; days: number }) => {
         // CM2-B-B003: authorize on the channel, not just the capability — the invoker
         // must be seated in the target channel (prevents posting into arbitrary channels).
         if (!(await isChannelMember(a.channelId, ctx.invokedBySub))) throw new ToolDenied("not a member of this channel");
@@ -706,7 +786,7 @@ export function citrateCommsTools(ctx: ToolContext) {
         "Read a channel's recent messages so you can summarize them and extract action items. Returns the " +
         "messages (oldest→newest). Use before filing notes/decisions/tasks.",
       inputSchema: z.object({ channelId: z.string().uuid(), limit: z.number().int().min(1).max(200).default(50) }),
-      execute: audited("thread.summarize", Capability.ReadChannel, async (a: { channelId: string; limit: number }) => {
+      execute: audited("thread.summarize", async (a: { channelId: string; limit: number }) => {
         // CM2-B-B003: ReadChannel is not enough — the invoker must be a member of THIS
         // channel. Without this a prompt-injected agent (or a Guest via the MCP surface)
         // could read any channel/DM in the workspace by uuid.
@@ -736,7 +816,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { name: string; content: string; accountId?: string; dealId?: string; channelId?: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose documents.write`);
+        assertPropose("documents.write");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "documents.write",
@@ -761,7 +841,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { channelId: string; kind: "decision" | "commitment" | "resolved"; text: string; owner?: string; due?: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose ledger.write`);
+        assertPropose("ledger.write");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "ledger.write",
@@ -788,7 +868,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { title: string; projectId?: string; priority?: "low" | "medium" | "high"; assigneeSub?: string; due?: string; raci?: { sub: string; role: "R" | "A" | "C" | "I" }[] }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose pm.write`);
+        assertPropose("pm.write");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "pm.write",
@@ -806,7 +886,7 @@ export function citrateCommsTools(ctx: ToolContext) {
     "web.search": tool({
       description: "Search the live web (keyless SearXNG, with a DuckDuckGo fallback). Returns cited results (title, url, snippet). Use for company/market research; cite every external claim. If it reports unavailable, say so — don't invent results.",
       inputSchema: z.object({ query: z.string().min(1).max(400), k: z.number().int().min(1).max(10).default(5) }),
-      execute: audited("web.search", Capability.ReadChannel, async (a: { query: string; k: number }) => {
+      execute: audited("web.search", async (a: { query: string; k: number }) => {
         // RES: keyless BFF search first (SearXNG → DuckDuckGo). Fall back to the runner only
         // if the BFF has nothing configured/reachable AND a runner is present.
         const bff = await searchWeb(a.query, a.k);
@@ -822,7 +902,7 @@ export function citrateCommsTools(ctx: ToolContext) {
     "web.fetch": tool({
       description: "Fetch and extract the readable text of a web page (SSRF-guarded). Use after web.search to read a source.",
       inputSchema: z.object({ url: z.string().url() }),
-      execute: audited("web.fetch", Capability.ReadChannel, async (a: { url: string }) => {
+      execute: audited("web.fetch", async (a: { url: string }) => {
         // RES: SSRF-guarded static fetch + readability on the BFF. Escalate to the runner's
         // Playwright path only when the static extraction yields no usable text (JS-heavy).
         const page = await fetchReadable(a.url);
@@ -831,6 +911,13 @@ export function citrateCommsTools(ctx: ToolContext) {
         // internal services) — only escalate when static extraction was genuinely thin.
         if (page.blocked) return page;
         if (page.available && page.text.length > 200) return page;
+        // PBA-L3c-010: the runner's Playwright fetcher follows JS redirects and re-resolves
+        // DNS on its own, so the BFF's one-shot SSRF check does not cover it. Escalate only
+        // when the operator attests the runner enforces the private-address guard on EVERY
+        // request it makes (COMMS_RUNNER_FETCH_GUARDED=1); otherwise return the static result.
+        if (process.env.COMMS_RUNNER_FETCH_GUARDED !== "1") {
+          return page.available ? page : { url: a.url, title: "", text: "", available: false, note: page.note };
+        }
         try {
           const dyn = await webFetch(a.url);
           if (dyn && typeof dyn.text === "string" && dyn.text.length > 0) return { ...dyn, available: true };
@@ -844,7 +931,7 @@ export function citrateCommsTools(ctx: ToolContext) {
     "chart.render": tool({
       description: "Render a chart artifact from a spec via the runner; returns a URL to embed in a report.",
       inputSchema: z.object({ spec: z.record(z.string(), z.unknown()).describe("a chart spec (e.g. vega-lite-ish)") }),
-      execute: audited("chart.render", Capability.ReadChannel, async (a: { spec: Record<string, unknown> }) => {
+      execute: audited("chart.render", async (a: { spec: Record<string, unknown> }) => {
         try {
           return await chartRender(a.spec);
         } catch (e) {
@@ -858,7 +945,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       inputSchema: z.object({ cmd: z.string().min(1).max(2000), cwd: z.string().max(400).optional() }),
       execute: async (a: { cmd: string; cwd?: string }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose terminal.exec`);
+        assertPropose("terminal.exec");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "terminal.exec",
@@ -879,7 +966,7 @@ export function citrateCommsTools(ctx: ToolContext) {
       }),
       execute: async (a: { lang: "python" | "node" | "bash"; source: string; files?: { name: string; content: string }[] }) => {
         // CM2-B-B018: RBAC gate at PROPOSE time (HITL tools bypass audited()).
-        if (!can(ctx.agentRole, Capability.PostMessage)) throw new ToolDenied(`role  may not propose code.run`);
+        assertPropose("code.run");
         const { approvalId, risk } = await enqueueApproval({
           workspaceId: ctx.workspaceId,
           tool: "code.run",
@@ -893,8 +980,9 @@ export function citrateCommsTools(ctx: ToolContext) {
     }),
   };
 
-  // Filter to the persona allow-list (if provided) — implemented tools only.
-  const entries = Object.entries(all).filter(([key]) => !ctx.allow || ctx.allow.has(key as ToolName));
+  // Filter to the persona allow-list (if provided) AND to what the caller may use — a
+  // tool the (agent, invoker) pair is not permitted is never offered (PBA-L3c-002).
+  const entries = Object.entries(all).filter(([key]) => (!ctx.allow || ctx.allow.has(key as ToolName)) && permitted(key as ToolName));
   return Object.fromEntries(entries) as Partial<typeof all>;
 }
 
