@@ -531,6 +531,7 @@ describe("mutation hardening — positive paths and edges of the new guards", ()
 describe("PBA-L3c-002 / verifier V-002a: an invite scope can never grant access the inviter lacks", () => {
   it("routes refuse a DM scope and a channel the inviter isn't seated in (single + batch)", async () => {
     await addMember(victimWs, "adm2", "Admin");
+    for (const n of ["alice", "bob"]) await addMember(victimWs, n, "Member").catch(() => undefined); // tolerate -t isolation
     const dm = await createChannel({ workspaceId: victimWs, kind: "dm", name: `vd-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] });
     const priv = await createChannel({ workspaceId: victimWs, kind: "channel", name: `priv-${run}`, createdBySub: sub("alice") });
     for (const scope of [dm.id, priv.id]) {
@@ -545,9 +546,10 @@ describe("PBA-L3c-002 / verifier V-002a: an invite scope can never grant access 
 
   it("redemption never seats an existing member, and re-checks that the inviter is still seated", async () => {
     const ch = await createChannel({ workspaceId: victimWs, kind: "channel", name: `room-${run}`, createdBySub: sub("alice") });
+    await addMember(victimWs, "existing2", "Member"); // self-contained: an already-active member
     const i1 = await createInvite({ workspaceId: victimWs, email: `e-${run}@example.com`, role: "Member", invitedBySub: sub("alice"), scopeChannelId: ch.id });
-    expect((await acceptInvite({ token: i1.token, sub: sub("eve") })).ok).toBe(true); // eve is already a member
-    expect(await db().select().from(channelMembers).where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.sub, sub("eve"))))).toHaveLength(0);
+    expect(await acceptInvite({ token: i1.token, sub: sub("existing2") })).toMatchObject({ ok: true, alreadyMember: true });
+    expect(await db().select().from(channelMembers).where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.sub, sub("existing2"))))).toHaveLength(0);
 
     const i2 = await createInvite({ workspaceId: victimWs, email: `n-${run}@example.com`, role: "Guest", invitedBySub: sub("alice"), scopeChannelId: ch.id });
     await db().delete(channelMembers).where(and(eq(channelMembers.channelId, ch.id), eq(channelMembers.sub, sub("alice"))));
