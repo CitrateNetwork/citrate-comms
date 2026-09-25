@@ -8,6 +8,10 @@
  * A new route, or a new method on an existing route, fails the "every handler is
  * declared" test until someone decides who may call it — deny-by-default review.
  *
+ * The second suite covers EVERY OTHER route family under /api (verifier follow-up):
+ * channel-scoped routes (capability AND seat in the channel), channel creation, join,
+ * the workspace list, bearer-only machine routes and the public unsubscribe surface.
+ *
  * Policies are capabilities from the matrix. "member" means any active member (the
  * handler scopes the data itself: own notifications/profile, attendee-scoped calendar,
  * channel-scoped documents, the roster, the role-filtered MCP surface). A function is
@@ -19,6 +23,7 @@ vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true
 
 import { Capability, can, ROLES, type Role } from "@/lib/rbac/matrix";
 import { createWorkspace } from "@/lib/domain/workspaces";
+import { createChannel } from "@/lib/domain/channels";
 import { listPersonas, seedDefaultPersonas } from "@/lib/domain/personas";
 import { run, sub, req, addMember } from "./helpers";
 
@@ -221,4 +226,141 @@ describe("route x role matrix matches rbac/matrix.ts (PBA-L3c-002 tripwire)", ()
     }
     for (const r of ["Owner", "Admin", "Member", "Agent"] as Role[]) expect(can(r, C.ReadWorkspace)).toBe(true);
   });
+});
+
+// ── Every other /api route family ──────────────────────────────────────────────
+type OtherPolicy =
+  | { kind: "channel"; cap: Capability } // requireChannel: capability AND seated in the channel
+  | { kind: "create-channel" } // CreateChannel (channel/forum) / CreateDirectMessage (dm)
+  | { kind: "authenticated" } // any signed-in identity (member or not); anonymous 401
+  | { kind: "bearer"; env: string } // machine route: shared secret only, never a session
+  | { kind: "public-token" }; // unauthenticated by design; the signed token is the gate
+
+const OTHER_POLICY: Record<string, OtherPolicy> = {
+  "channels/[id]/agent-reply POST": { kind: "channel", cap: C.PostMessage },
+  "channels/[id]/ledger GET": { kind: "channel", cap: C.ReadChannel },
+  "channels/[id]/ledger POST": { kind: "channel", cap: C.PostMessage },
+  "channels/[id]/ledger PATCH": { kind: "channel", cap: C.PostMessage },
+  "channels/[id]/members POST": { kind: "channel", cap: C.AddMember },
+  "channels/[id]/messages GET": { kind: "channel", cap: C.ReadChannel },
+  "channels/[id]/messages POST": { kind: "channel", cap: C.PostMessage },
+  "channels/[id]/pin GET": { kind: "channel", cap: C.ReadChannel },
+  "channels/[id]/pin POST": { kind: "channel", cap: C.PostMessage },
+  "channels/[id]/read POST": { kind: "channel", cap: C.ReadChannel },
+  "channels POST": { kind: "create-channel" },
+  "join POST": { kind: "authenticated" },
+  "workspaces GET": { kind: "authenticated" },
+  "workspaces POST": { kind: "authenticated" },
+  "cron/import-tick GET": { kind: "bearer", env: "CRON_SECRET" },
+  "cron/reminders GET": { kind: "bearer", env: "CRON_SECRET" },
+  "ops/crm-dedupe POST": { kind: "bearer", env: "DEDUPE_OPS_SECRET" },
+  "unsubscribe GET": { kind: "public-token" },
+  "unsubscribe POST": { kind: "public-token" },
+};
+
+const otherModules = import.meta.glob("../app/api/**/route.ts");
+const API = "../app/api/";
+
+async function discoverOther(): Promise<{ key: string; method: string; handler: (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response> }[]> {
+  const out: { key: string; method: string; handler: (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response> }[] = [];
+  for (const [file, load] of Object.entries(otherModules)) {
+    if (file.startsWith(ROOT)) continue; // covered by the workspace matrix above
+    const key = file.slice(API.length).replace(/\/?route\.ts$/, "");
+    const mod = (await load()) as Record<string, unknown>;
+    for (const m of METHODS) if (typeof mod[m] === "function") out.push({ key, method: m, handler: mod[m] as never });
+  }
+  return out;
+}
+
+describe("route x role matrix — every other /api route family (verifier follow-up)", () => {
+  let seated: string, unseated: string, foreign: string, otherWs: string;
+  beforeAll(async () => {
+    await addMember(ws, "rrcreator", "Member");
+    seated = (await createChannel({ workspaceId: ws, kind: "channel", name: `all-${run}`, createdBySub: sub(whoFor("Owner")), memberSubs: ROLES.map((r) => sub(whoFor(r))) })).id;
+    unseated = (await createChannel({ workspaceId: ws, kind: "channel", name: `none-${run}`, createdBySub: sub("rrcreator") })).id;
+    otherWs = (await createWorkspace({ name: `rr-other ${run}`, ownerSub: sub("rrstranger"), ownerWallet: null, ownerEmail: null })).id;
+    foreign = (await createChannel({ workspaceId: otherWs, kind: "channel", name: "f", createdBySub: sub("rrstranger") })).id;
+  });
+
+  it("every handler outside /api/workspaces/[id] has a declared policy (and no stale ones)", async () => {
+    const found = (await discoverOther()).map((h) => `${h.key} ${h.method}`);
+    const declared = Object.keys(OTHER_POLICY);
+    expect(found.filter((f) => !declared.includes(f)), "undeclared handlers — add an OTHER_POLICY entry").toEqual([]);
+    expect(declared.filter((d) => !found.includes(d)), "stale OTHER_POLICY entries").toEqual([]);
+  }, 180_000);
+
+  it("each handler admits exactly the callers its policy admits", async () => {
+    const failures: string[] = [];
+    const call = async (h: { handler: (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response> }, method: string, url: string, who: string | null, params: Record<string, string>, body?: unknown, headers: Record<string, string> = {}) => {
+      const init: RequestInit = { method, headers };
+      if (method !== "GET") init.body = JSON.stringify(body ?? {});
+      const res = await h.handler(req(url, who, init), { params: Promise.resolve(params) });
+      await res.body?.cancel().catch(() => undefined);
+      return res.status;
+    };
+    const refused = (st: number) => st === 401 || st === 403;
+    for (const h of await discoverOther()) {
+      const p = OTHER_POLICY[`${h.key} ${h.method}`]!;
+      const tag = `${h.method} ${h.key}`;
+      if (p.kind === "channel") {
+        for (const role of ROLES) {
+          const ok = can(role, p.cap);
+          const st = await call(h, h.method, `/api/channels/${seated}`, whoFor(role), { id: seated });
+          if (ok && refused(st)) failures.push(`${tag} seated ${role}: expected admitted, got ${st}`);
+          if (!ok && st !== 403) failures.push(`${tag} seated ${role}: expected 403, got ${st}`);
+          for (const [label, ch] of [["unseated", unseated], ["foreign-workspace", foreign]] as const) {
+            const s2 = await call(h, h.method, `/api/channels/${ch}`, whoFor(role), { id: ch });
+            if (s2 !== 403) failures.push(`${tag} ${label} ${role}: expected 403, got ${s2}`);
+          }
+        }
+        const anon = await call(h, h.method, `/api/channels/${seated}`, null, { id: seated });
+        if (!refused(anon)) failures.push(`${tag} anonymous: expected 401/403, got ${anon}`);
+      } else if (p.kind === "create-channel") {
+        for (const role of ROLES) {
+          for (const [kind, cap] of [["channel", C.CreateChannel], ["forum", C.CreateChannel], ["dm", C.CreateDirectMessage]] as const) {
+            const st = await call(h, "POST", "/api/channels", whoFor(role), {}, { workspaceId: ws, kind, name: `c-${kind}-${role}`.toLowerCase() });
+            const ok = can(role, cap);
+            if (ok && refused(st)) failures.push(`${tag} ${kind} ${role}: expected admitted, got ${st}`);
+            if (!ok && st !== 403) failures.push(`${tag} ${kind} ${role}: expected 403, got ${st}`);
+          }
+          const f = await call(h, "POST", "/api/channels", whoFor(role), {}, { workspaceId: otherWs, kind: "dm", name: "x" });
+          if (f !== 403) failures.push(`${tag} foreign workspace ${role}: expected 403, got ${f}`);
+        }
+        const anon = await call(h, "POST", "/api/channels", null, {}, { workspaceId: ws, kind: "dm", name: "x" });
+        if (!refused(anon)) failures.push(`${tag} anonymous: expected 401/403, got ${anon}`);
+      } else if (p.kind === "authenticated") {
+        for (const who of [...ROLES.map(whoFor), "rrnonmember"]) {
+          const st = await call(h, h.method, `/api/${h.key}`, who, {}, h.key === "join" ? { token: "x".repeat(40) } : { name: `rr ${who}` });
+          if (refused(st)) failures.push(`${tag} ${who}: expected admitted, got ${st}`);
+        }
+        const anon = await call(h, h.method, `/api/${h.key}`, null, {});
+        if (anon !== 401) failures.push(`${tag} anonymous: expected 401, got ${anon}`);
+      } else if (p.kind === "bearer") {
+        const prev = process.env[p.env];
+        process.env[p.env] = "rr-machine-secret";
+        try {
+          for (const who of [...ROLES.map(whoFor), null]) {
+            const st = await call(h, h.method, `/api/${h.key}`, who, {});
+            if (st !== 401) failures.push(`${tag} session ${who ?? "anonymous"}: expected 401 (bearer only), got ${st}`);
+          }
+          const wrong = await call(h, h.method, `/api/${h.key}`, null, {}, { dryRun: true }, { authorization: "Bearer nope" });
+          if (wrong !== 401) failures.push(`${tag} wrong bearer: expected 401, got ${wrong}`);
+          const right = await call(h, h.method, `/api/${h.key}`, null, {}, { dryRun: true, workspaceId: ws }, { authorization: "Bearer rr-machine-secret" });
+          if (refused(right)) failures.push(`${tag} correct bearer: expected admitted, got ${right}`);
+        } finally {
+          if (prev === undefined) delete process.env[p.env];
+          else process.env[p.env] = prev;
+        }
+      } else {
+        // public-token: identity is irrelevant; a bad token never succeeds and never 5xx's
+        const statuses = new Set<number>();
+        for (const who of [...ROLES.map(whoFor), null]) statuses.add(await call(h, h.method, `/api/${h.key}?u=forged`, who, {}));
+        if (statuses.size !== 1) failures.push(`${tag}: outcome depends on identity (${[...statuses].join(",")})`);
+        const st = [...statuses][0]!;
+        if (h.method === "POST" && st !== 400) failures.push(`${tag}: forged token expected 400, got ${st}`);
+        if (h.method === "GET" && st !== 303) failures.push(`${tag}: expected 303 to the confirmation page, got ${st}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  }, 300_000);
 });
