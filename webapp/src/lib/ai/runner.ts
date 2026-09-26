@@ -65,9 +65,12 @@ export interface WebResult {
 export async function webSearch(query: string, k = 5): Promise<{ results: WebResult[] }> {
   return runnerCall("/tools/web-search", { query, k });
 }
-export async function webFetch(url: string): Promise<{ text: string; url: string }> {
-  return runnerCall("/tools/web-fetch", { url });
-}
+// NOTE: web-fetch is intentionally NOT delegated to the runner daemon. The daemon opens
+// its own socket (own DNS + own redirect following), which the BFF cannot bound, so a
+// raw agent-supplied URL is never forwarded. The BFF performs web-fetch itself through the
+// pinned, egress-restricted client — see `runnerWebFetch` in ./runner-fetch and its use in
+// the "web.fetch" tool. Re-introducing a `/tools/web-fetch` delegation would require the
+// daemon to enforce the same connect-time address validation on every hop it makes.
 export interface TerminalResult {
   stdout: string;
   stderr: string;

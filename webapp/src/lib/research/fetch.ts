@@ -163,8 +163,24 @@ export function isPrivateIp(ip: string): boolean {
   return true;
 }
 
-/** Validate scheme + host, then DNS-resolve and reject private targets (SSRF guard). */
-export async function assertPublicUrl(raw: string): Promise<URL> {
+/**
+ * Canonical name for the shared address-range decision: is this literal IP one the fetch
+ * layer must refuse (i.e. not a public/global-unicast destination)? Backed by the same
+ * logic as `isPrivateIp`, kept as an alias so one tested implementation covers both the
+ * static fetcher and the egress-restricted runner fetch. Fail-closed: anything unparseable
+ * is treated as blocked.
+ */
+export const isBlockedAddress = isPrivateIp;
+
+/**
+ * Optional resolver used by {@link assertPublicUrl} to look up a hostname's addresses.
+ * Defaults to the platform resolver; injectable so the fetch path can be exercised
+ * deterministically in tests without real DNS.
+ */
+export type AddressResolver = (host: string, opts: { all: true }) => Promise<LookupAddress[]>;
+
+/** Validate scheme + host, then resolve and reject non-public targets. */
+export async function assertPublicUrl(raw: string, resolve: AddressResolver = lookup as unknown as AddressResolver): Promise<URL> {
   let u: URL;
   try {
     u = new URL(raw);
@@ -178,17 +194,17 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   }
   // If the host is an IP literal, check it directly; else resolve all addresses.
   if (/^[\d.]+$/.test(host) || host.includes(":")) {
-    if (isPrivateIp(host)) throw new BlockedUrlError("private address not allowed");
+    if (isBlockedAddress(host)) throw new BlockedUrlError("private address not allowed");
     return u;
   }
   let addrs;
   try {
-    addrs = await lookup(host, { all: true });
+    addrs = await resolve(host, { all: true });
   } catch {
     throw new BlockedUrlError("host did not resolve");
   }
   if (addrs.length === 0) throw new BlockedUrlError("host did not resolve");
-  for (const a of addrs) if (isPrivateIp(a.address)) throw new BlockedUrlError("resolves to a private address");
+  for (const a of addrs) if (isBlockedAddress(a.address)) throw new BlockedUrlError("resolves to a private address");
   return u;
 }
 
@@ -311,27 +327,42 @@ export function extractReadable(html: string): { title: string; text: string } {
 
 const MAX_REDIRECTS = 5;
 
-/** Fetch a public URL and return its readable text (static path; SSRF-guarded). */
-export async function fetchReadable(raw: string): Promise<ReadablePage> {
+/**
+ * Options for {@link fetchReadable}. Both hooks default to the guarded platform behavior;
+ * they exist so the connecting path (address validation + per-hop re-validation + the
+ * connect-time pinned lookup) can be driven deterministically in tests. Production callers
+ * pass nothing and get the pinned, egress-restricted client.
+ */
+export interface FetchReadableOptions {
+  /** Connect-time lookup handed to node:http(s); defaults to the pinned guarded lookup. */
+  lookup?: unknown;
+  /** Resolver used by the pre-connect / per-hop address validation. */
+  resolve?: AddressResolver;
+}
+
+/** Fetch a public URL and return its readable text through the guarded, pinned client. */
+export async function fetchReadable(raw: string, opts: FetchReadableOptions = {}): Promise<ReadablePage> {
+  const connectLookup = opts.lookup ?? guardedLookup;
+  const resolve = opts.resolve;
   let u: URL;
   try {
-    u = await assertPublicUrl(raw);
+    u = await assertPublicUrl(raw, resolve);
   } catch (e) {
-    // A security refusal is flagged `blocked` so callers never escalate it to a
-    // less-guarded fetcher (CM2-B-B006).
+    // A refusal is flagged `blocked` so callers never fall through to a less-guarded fetch.
     return { url: raw, title: "", text: "", truncated: false, available: false, blocked: true, note: (e as Error).message };
   }
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    // Follow redirects manually so EVERY hop is re-validated by the SSRF guard —
-    // `redirect: "follow"` would let an allowed host 302 into the internal network
-    // (CM2-B-B007). Bounded to MAX_REDIRECTS.
+    // Follow redirects manually so EVERY hop is re-validated before we connect —
+    // `redirect: "follow"` would let an allowed host 30x into a non-public destination.
+    // Bounded to MAX_REDIRECTS. The connect itself uses the pinned lookup, so the socket
+    // can only ever reach an address that passed validation.
     let res: RawResponse;
     let hops = 0;
     for (;;) {
-      res = await guardedGet(u, ctrl.signal);
+      res = await guardedGet(u, ctrl.signal, connectLookup);
       if (res.status >= 300 && res.status < 400 && res.location) {
         res.res.resume(); // discard the redirect body
         if (++hops > MAX_REDIRECTS) {
@@ -339,7 +370,7 @@ export async function fetchReadable(raw: string): Promise<ReadablePage> {
         }
         const loc = new URL(res.location, u).toString();
         try {
-          u = await assertPublicUrl(loc); // re-validate the redirect target
+          u = await assertPublicUrl(loc, resolve); // re-validate the redirect target
         } catch (e) {
           return { url: loc, title: "", text: "", truncated: false, available: false, blocked: true, note: (e as Error).message };
         }
