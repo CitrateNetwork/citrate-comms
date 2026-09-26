@@ -68,9 +68,10 @@ async function attachmentsForMessages(workspaceId: string, messageIds: string[])
     .where(and(eq(messageAttachments.workspaceId, workspaceId), eq(documents.workspaceId, workspaceId), inArray(messageAttachments.messageId, messageIds)));
   for (const r of rows) {
     const list = out.get(r.messageId) ?? [];
-    // PBA-L3c-009: never hand the raw (public, unguessable-but-permanent) Blob URL to
-    // clients — inline display goes through the access-controlled proxy too, so a
-    // removed member or a non-participant can't keep or share a working link.
+    // PBA-L3c-009 / ATT-HARDEN: never hand the raw store URL to clients — inline display
+    // goes through the access-controlled proxy, which authorizes the viewer and then issues
+    // a short-lived signed URL, so a removed member or non-participant can't keep or share a
+    // working link.
     list.push({ id: r.id, name: r.name, mime: r.mime, url: r.blobUrl ? documentViewUrl(workspaceId, r.id) : "" });
     out.set(r.messageId, list);
   }

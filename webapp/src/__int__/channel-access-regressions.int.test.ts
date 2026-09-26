@@ -4,6 +4,12 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 vi.mock("@/lib/security/ratelimit", () => ({ limit: async () => ({ success: true, remaining: 99 }), rateLimitConfigured: () => true }));
 vi.mock("@/lib/email/send", async (orig) => ({ ...(await orig<Record<string, unknown>>()), sendInviteEmail: async () => ({ sent: false }) }));
+// Stub only the network-signing primitive; the download proxy still runs the real per-document
+// authorization before it mints a URL (ATT-HARDEN).
+vi.mock("@/lib/security/blob-signing", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  signedReadUrl: async (_url: string, opts?: { download?: boolean }) => ({ url: `https://signed.example/read${opts?.download ? "?download=1" : ""}`, expiresAt: Date.now() + 120_000 }),
+}));
 
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
@@ -49,7 +55,7 @@ beforeAll(async () => {
   const dm = await createChannel({ workspaceId: ws, kind: "dm", name: "alice-bob", createdBySub: sub("alice"), memberSubs: [sub("bob")] });
   dmId = dm.id;
   await sendMessage({ workspaceId: ws, channelId: dmId, authorSub: sub("alice"), body: "RESTRICTED: dm-only content" });
-  const [d] = await db().insert(documents).values({ workspaceId: ws, channelId: dmId, blobUrl: "https://x.public.blob.vercel-storage.com/offer.pdf", name: "offer.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+  const [d] = await db().insert(documents).values({ workspaceId: ws, channelId: dmId, blobUrl: `https://privstore.private.blob.vercel-storage.com/comms/${ws}/offer.pdf`, name: "offer.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
   dmDocId = d!.id;
   sharedCh = (await createChannel({ workspaceId: ws, kind: "channel", name: "shared", createdBySub: sub("own"), memberSubs: [sub("mem"), sub("par"), sub("gst")] })).id;
   otherCh = (await createChannel({ workspaceId: other, kind: "channel", name: "o", createdBySub: sub("otherown") })).id;

@@ -6,6 +6,24 @@
  */
 export type AttachKind = "image" | "video" | "doc";
 
+/**
+ * Attachments are stored in a PRIVATE Blob store (ATT-HARDEN): an object is not retrievable
+ * by holding its URL. Reads go through the download proxy, which authorizes the viewer and
+ * then issues a short-lived signed URL. Single source of truth for the `access` passed to
+ * both `put(...)` (server route) and `upload(...)` (client-direct route).
+ */
+export const ATTACHMENT_ACCESS = "private" as const;
+
+/**
+ * Blob pathname prefix that binds an object to its workspace (ATT-HARDEN). Every attachment
+ * (server `put` and client `upload`) is written under `comms/<workspaceId>/`, and both the
+ * upload-token issuer and `finalize` enforce it — so a caller cannot register or read another
+ * workspace's object. A workspace id is a UUID (no slashes), so the prefix is unambiguous.
+ */
+export function workspaceBlobPrefix(workspaceId: string): string {
+  return `comms/${workspaceId}/`;
+}
+
 const DOC_EXT = ["pdf", "txt", "md", "markdown", "csv", "tsv", "json", "log", "xlsx", "xls", "docx"];
 const IMAGE_EXT = ["png", "jpg", "jpeg", "webp", "svg", "gif"];
 const VIDEO_EXT = ["mp4", "webm", "mov", "m4v"];

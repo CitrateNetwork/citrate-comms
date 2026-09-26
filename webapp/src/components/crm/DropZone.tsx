@@ -8,7 +8,7 @@
 import { useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
 import { Icon } from "@/components/primitives";
-import { ACCEPT_ATTR, isAllowed, maxBytesFor, kindOf } from "@/lib/attachments";
+import { ACCEPT_ATTR, isAllowed, maxBytesFor, kindOf, ATTACHMENT_ACCESS, workspaceBlobPrefix } from "@/lib/attachments";
 import styles from "./DropZone.module.css";
 
 interface Scope {
@@ -51,8 +51,8 @@ export function DropZone({ workspaceId, scope, onDone }: { workspaceId: string; 
       }
       let blobUrl: string;
       try {
-        const blob = await upload(file.name, file, {
-          access: "public",
+        const blob = await upload(`${workspaceBlobPrefix(workspaceId)}${file.name}`, file, {
+          access: ATTACHMENT_ACCESS,
           handleUploadUrl: `/api/workspaces/${workspaceId}/documents/upload-token`,
           clientPayload: JSON.stringify(scope),
         });

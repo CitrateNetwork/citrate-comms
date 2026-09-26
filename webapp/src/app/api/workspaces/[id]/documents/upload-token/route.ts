@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { Capability, requireCapability, GuardError } from "@/lib/tenant/guard";
-import { ALLOWED_CONTENT_TYPES, MAX_BYTES } from "@/lib/attachments";
+import { ALLOWED_CONTENT_TYPES, MAX_BYTES, workspaceBlobPrefix } from "@/lib/attachments";
 
 export const runtime = "nodejs";
 
@@ -22,8 +22,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const json = await handleUpload({
       body,
       request: req,
-      onBeforeGenerateToken: async (_pathname, clientPayload) => {
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
         await requireCapability(req, id, Capability.CreateRecord); // fail-closed: no auth ⇒ throws
+        // ATT-HARDEN: the token may only mint objects under THIS workspace's prefix, so a
+        // client can't plant into (or overwrite within) another workspace's namespace. This
+        // is an input validation (400 via the catch), not an RBAC denial.
+        if (!pathname.startsWith(workspaceBlobPrefix(id))) throw new Error("bad_prefix");
         return {
           allowedContentTypes: ALLOWED_CONTENT_TYPES,
           addRandomSuffix: true,

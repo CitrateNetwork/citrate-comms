@@ -3,7 +3,7 @@ import { put } from "@vercel/blob";
 import { Capability, requireCapability } from "@/lib/tenant/guard";
 import { errorResponse } from "@/lib/http";
 import { ingestDocument, badDocScope } from "@/lib/domain/documents";
-import { isAllowed } from "@/lib/attachments";
+import { isAllowed, ATTACHMENT_ACCESS, workspaceBlobPrefix } from "@/lib/attachments";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -11,8 +11,9 @@ export const maxDuration = 120;
 const MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 
 /**
- * Upload a document to a record (account/deal) or channel. Stores the original at Vercel
- * Blob (unguessable URL) when a Blob token is configured; ALWAYS extracts + encrypts the
+ * Upload a document to a record (account/deal) or channel. Stores the original in the
+ * PRIVATE Blob store (served only via the access-checked download proxy's short-lived
+ * signed URLs — ATT-HARDEN) when a Blob token is configured; ALWAYS extracts + encrypts the
  * text and embeds chunks for RAG. Member+ (CreateRecord).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -37,11 +38,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (bad) return NextResponse.json({ error: bad }, { status: 400 });
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // Store the original at Blob when configured; otherwise keep text-only (still RAG-able).
+    // Store the original in the private Blob store when configured; otherwise keep
+    // text-only (still RAG-able).
     let blobUrl = "";
     if (process.env.BLOB_READ_WRITE_TOKEN) {
       try {
-        const blob = await put(`comms/${id}/${name}`, file, { access: "public", addRandomSuffix: true });
+        const blob = await put(`${workspaceBlobPrefix(id)}${name}`, file, { access: ATTACHMENT_ACCESS, addRandomSuffix: true });
         blobUrl = blob.url;
       } catch {
         blobUrl = "";
