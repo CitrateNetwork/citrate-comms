@@ -3,12 +3,13 @@
  * AGENTS-S4 / CRM-D4; D1 just lists what's attached to a record. Extracted text is
  * encrypted (`text_enc`); only metadata is surfaced here.
  */
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql, cosineDistance, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql, cosineDistance, type SQL } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { documents, documentChunks, channelMembers, messageAttachments, messages } from "@/lib/db/schema";
 import { encryptField, decryptField } from "@/lib/security/crypto";
 import { appendAudit } from "@/lib/audit/chain";
 import { embed, embedOne } from "@/lib/ai/embeddings";
+import { readBlobBytes } from "@/lib/security/blob-signing";
 import { recordActivity } from "./crm-activity";
 import { recordExists } from "./crm";
 
@@ -97,6 +98,22 @@ export async function badDocScope(
     if (!seat) return "bad_scope";
   }
   return null;
+}
+
+/**
+ * True iff `blobUrl` is already referenced by a `documents` row in a workspace OTHER than
+ * `workspaceId` (ATT-HARDEN). `finalize` uses this to refuse re-registering another
+ * workspace's object — including legacy, unprefixed pathnames the workspace-prefix check
+ * can't classify. Empty `blobUrl` (text-only docs) is never "bound".
+ */
+export async function blobUrlBoundToOtherWorkspace(workspaceId: string, blobUrl: string): Promise<boolean> {
+  if (!blobUrl) return false;
+  const [row] = await db()
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(eq(documents.blobUrl, blobUrl), ne(documents.workspaceId, workspaceId)))
+    .limit(1);
+  return Boolean(row);
 }
 
 /** The subset of `ids` that are documents of `workspaceId` visible to `viewer`. */
@@ -212,9 +229,9 @@ export async function getDocumentText(workspaceId: string, id: string, viewer: D
   const doc = await getVisibleDocument(workspaceId, id, viewer);
   if (!doc?.blobUrl) return null;
   try {
-    const res = await fetch(doc.blobUrl);
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
+    // readBlobBytes authenticates to the private store (a plain fetch of a private object 401s).
+    const buf = await readBlobBytes(doc.blobUrl);
+    if (!buf) return null;
     const text = await extractDocText(doc.name, doc.mime, buf);
     return text && text.trim() ? { name: doc.name, text } : null;
   } catch {

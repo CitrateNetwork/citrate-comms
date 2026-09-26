@@ -16,6 +16,13 @@ vi.mock("@/lib/security/ratelimit", () => ({
   },
   rateLimitConfigured: () => true,
 }));
+// Stub only the network-signing primitive; the download proxy still runs the real
+// per-document authorization before it mints a URL, and the URL encodes the download
+// disposition so tests can assert it (ATT-HARDEN).
+vi.mock("@/lib/security/blob-signing", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  signedReadUrl: async (_url: string, opts?: { download?: boolean }) => ({ url: `https://signed.example/read${opts?.download ? "?download=1" : ""}`, expiresAt: Date.now() + 120_000 }),
+}));
 
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
@@ -131,7 +138,7 @@ describe("PBA-L3c-003 private-channel / DM attachments stay private", () => {
     await addMember(wsA, "eve", "Member");
     await addMember(wsA, "guest", "Guest");
     const dm = await createChannel({ workspaceId: wsA, kind: "dm", name: "alice-bob", createdBySub: sub("alice"), memberSubs: [sub("bob")] });
-    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: dm.id, blobUrl: "https://x.public.blob.vercel-storage.com/offer-letter-bob.pdf", name: "offer-letter-bob.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: dm.id, blobUrl: `https://privstore.private.blob.vercel-storage.com/comms/${wsA}/offer-letter-bob.pdf`, name: "offer-letter-bob.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
     dmDocId = d!.id;
     await db().insert(documentChunks).values({ workspaceId: wsA, documentId: dmDocId, ord: 0, textEnc: encryptField(wsA, "compensation offer bob notes") });
     const [w] = await db().insert(documents).values({ workspaceId: wsA, blobUrl: "https://x.public.blob.vercel-storage.com/handbook.pdf", name: "handbook.pdf", mime: "application/pdf", uploadedBySub: sub("vowner") }).returning();
@@ -177,7 +184,7 @@ describe("PBA-L3c-003 private-channel / DM attachments stay private", () => {
 
   it("a Guest can download a file shared into a channel they are seated in, nothing else", async () => {
     const ch = await createChannel({ workspaceId: wsA, kind: "channel", name: `shared-${run}`, createdBySub: sub("alice"), memberSubs: [sub("guest")] });
-    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: ch.id, blobUrl: "https://x.public.blob.vercel-storage.com/shared.pdf", name: "shared.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: ch.id, blobUrl: `https://privstore.private.blob.vercel-storage.com/comms/${wsA}/shared.pdf`, name: "shared.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
     expect((await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${d!.id}/download`, "guest"), P({ id: wsA, docId: d!.id }))).status).toBe(302);
     expect((await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${wsDocId}/download`, "guest"), P({ id: wsA, docId: wsDocId }))).status).toBe(403);
     expect((await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${dmDocId}/download`, "guest"), P({ id: wsA, docId: dmDocId }))).status).toBe(403);
@@ -266,7 +273,7 @@ describe("PBA-L3c-005 message attachments must be the workspace's (and visible) 
 describe("PBA-L3c-009 clients never receive raw Blob URLs; finalize is pinned to this store", () => {
   it("a message attachment is served as the access-controlled inline proxy URL", async () => {
     const ch = await createChannel({ workspaceId: wsA, kind: "channel", name: `att-${run}`, createdBySub: sub("alice") });
-    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: ch.id, blobUrl: "https://store1.public.blob.vercel-storage.com/diagram.png", name: "diagram.png", mime: "image/png", uploadedBySub: sub("alice") }).returning();
+    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: ch.id, blobUrl: `https://privstore.private.blob.vercel-storage.com/comms/${wsA}/diagram.png`, name: "diagram.png", mime: "image/png", uploadedBySub: sub("alice") }).returning();
     const r = await msgRoute.POST(req(`/api/channels/${ch.id}/messages`, "alice", { method: "POST", body: JSON.stringify({ body: "see", attachmentIds: [d!.id] }) }), P({ id: ch.id }));
     expect(r.status).toBe(201);
     const j = (await r.json()) as { message: { attachments: { url: string }[] } };
@@ -279,14 +286,37 @@ describe("PBA-L3c-009 clients never receive raw Blob URLs; finalize is pinned to
     expect(ok.headers.get("location")).not.toContain("download=1");
   });
 
-  it("finalize refuses a Blob URL from any store other than this deployment's", async () => {
+  it("finalize binds the object to this workspace's private store (rejects foreign store, public, cross-workspace)", async () => {
     const prev = process.env.BLOB_READ_WRITE_TOKEN;
-    process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_Store1_testfixture";
+    process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_Store1_testfixture"; // private host: store1.private.…
+    const fin = (blobUrl: string, workspaceId = wsA) =>
+      finalizeRoute.POST(req(`/api/workspaces/${workspaceId}/documents/finalize`, workspaceId === wsA ? "alice" : "otherowner", { method: "POST", body: JSON.stringify({ blobUrl, name: "x.png", mime: "image/png" }) }), P({ id: workspaceId }));
     try {
-      const bad = await finalizeRoute.POST(req(`/api/workspaces/${wsA}/documents/finalize`, "alice", { method: "POST", body: JSON.stringify({ blobUrl: "https://otherstore9.public.blob.vercel-storage.com/x.png", name: "x.png", mime: "image/png" }) }), P({ id: wsA }));
-      expect(bad.status).toBe(400);
-      expect(await bad.json()).toMatchObject({ error: "bad_host" });
-      const good = await finalizeRoute.POST(req(`/api/workspaces/${wsA}/documents/finalize`, "alice", { method: "POST", body: JSON.stringify({ blobUrl: "https://store1.public.blob.vercel-storage.com/x.png", name: "x.png", mime: "image/png" }) }), P({ id: wsA }));
+      // another store entirely → bad_host
+      const foreign = await fin("https://otherstore9.private.blob.vercel-storage.com/comms/" + wsA + "/x.png");
+      expect(foreign.status).toBe(400);
+      expect(await foreign.json()).toMatchObject({ error: "bad_host" });
+
+      // this deployment but the PUBLIC (legacy) host → rejected: new uploads must be private
+      const pub = await fin(`https://store1.public.blob.vercel-storage.com/comms/${wsA}/x.png`);
+      expect(pub.status).toBe(400);
+      expect(await pub.json()).toMatchObject({ error: "bad_host" });
+
+      // private, but under ANOTHER workspace's prefix → bad_scope (can't claim wsB's namespace)
+      const foreignPrefix = await fin(`https://store1.private.blob.vercel-storage.com/comms/${wsB}/x.png`);
+      expect(foreignPrefix.status).toBe(400);
+      expect(await foreignPrefix.json()).toMatchObject({ error: "bad_scope" });
+
+      // an object already bound to another workspace's document → bad_scope (covers legacy,
+      // unprefixed pathnames a caller might replay). Seed a wsB row, then try to re-register it.
+      const shared = `https://store1.private.blob.vercel-storage.com/comms/${wsA}/collision.png`;
+      await db().insert(documents).values({ workspaceId: wsB, blobUrl: shared, name: "v.png", mime: "image/png", uploadedBySub: sub("otherowner") });
+      const stolen = await fin(shared);
+      expect(stolen.status).toBe(400);
+      expect(await stolen.json()).toMatchObject({ error: "bad_scope" });
+
+      // the happy path: this deployment's private store, under this workspace's prefix
+      const good = await fin(`https://store1.private.blob.vercel-storage.com/comms/${wsA}/x.png`);
       expect(good.status).toBe(201);
     } finally {
       if (prev === undefined) delete process.env.BLOB_READ_WRITE_TOKEN;
@@ -403,7 +433,7 @@ describe("PBA-L3c-027 foreign ids are validated before they are persisted", () =
     try {
       const foreign = await createChannel({ workspaceId: wsB, kind: "channel", name: "f", createdBySub: sub("otherowner") });
       const notMine = await createChannel({ workspaceId: wsA, kind: "channel", name: `nm-${run}`, createdBySub: sub("bob") });
-      const call = (body: Record<string, unknown>) => finalizeRoute.POST(req(`/api/workspaces/${wsA}/documents/finalize`, "alice", { method: "POST", body: JSON.stringify({ blobUrl: "https://store1.public.blob.vercel-storage.com/y.png", name: "y.png", mime: "image/png", ...body }) }), P({ id: wsA }));
+      const call = (body: Record<string, unknown>) => finalizeRoute.POST(req(`/api/workspaces/${wsA}/documents/finalize`, "alice", { method: "POST", body: JSON.stringify({ blobUrl: `https://store1.private.blob.vercel-storage.com/comms/${wsA}/y.png`, name: "y.png", mime: "image/png", ...body }) }), P({ id: wsA }));
       expect((await call({ channelId: foreign.id })).status).toBe(400);
       expect((await call({ channelId: notMine.id })).status).toBe(400);
       expect((await call({ accountId: crypto.randomUUID() })).status).toBe(404);
@@ -456,14 +486,17 @@ describe("mutation hardening — positive paths and edges of the new guards", ()
 
   it("download proxy: forbidden body, text-only doc 404, download disposition + no-store", async () => {
     const dm = await createChannel({ workspaceId: wsA, kind: "dm", name: `m-${run}`, createdBySub: sub("alice"), memberSubs: [sub("bob")] });
-    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: dm.id, blobUrl: "https://store1.public.blob.vercel-storage.com/m.pdf", name: "m.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
+    const [d] = await db().insert(documents).values({ workspaceId: wsA, channelId: dm.id, blobUrl: `https://privstore.private.blob.vercel-storage.com/comms/${wsA}/m.pdf`, name: "m.pdf", mime: "application/pdf", uploadedBySub: sub("alice") }).returning();
     const f = await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${d!.id}/download`, "eve"), P({ id: wsA, docId: d!.id }));
     expect(await f.json()).toEqual({ error: "forbidden" });
     const nf = await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${crypto.randomUUID()}/download`, "eve"), P({ id: wsA, docId: crypto.randomUUID() }));
     expect(nf.status).toBe(404);
     expect(await nf.json()).toEqual({ error: "not_found" });
     const ok = await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${d!.id}/download`, "bob"), P({ id: wsA, docId: d!.id }));
-    expect(ok.headers.get("location")).toBe("https://store1.public.blob.vercel-storage.com/m.pdf?download=1");
+    // Redirects to a signed URL with the download disposition — never the raw store URL.
+    expect(ok.status).toBe(302);
+    expect(ok.headers.get("location")).toContain("download=1");
+    expect(ok.headers.get("location")).not.toContain("blob.vercel-storage.com");
     expect(ok.headers.get("cache-control")).toBe("private, no-store");
     const [t] = await db().insert(documents).values({ workspaceId: wsA, channelId: dm.id, blobUrl: "", name: "gen.md", mime: "text/markdown", uploadedBySub: sub("alice") }).returning();
     expect((await dlRoute.GET(req(`/api/workspaces/${wsA}/documents/${t!.id}/download`, "bob"), P({ id: wsA, docId: t!.id }))).status).toBe(404);

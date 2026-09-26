@@ -6,7 +6,7 @@
  * the agent-chat composer. Returns the finalized document or an error.
  */
 import { upload } from "@vercel/blob/client";
-import { isAllowed, maxBytesFor } from "@/lib/attachments";
+import { isAllowed, maxBytesFor, ATTACHMENT_ACCESS, workspaceBlobPrefix } from "@/lib/attachments";
 
 export interface UploadedDoc {
   id: string;
@@ -28,8 +28,8 @@ export async function uploadAttachment(
   if (file.size > maxBytesFor(file.name, file.type)) return { ok: false, error: "Too large" };
   let blobUrl: string;
   try {
-    const blob = await upload(file.name, file, {
-      access: "public",
+    const blob = await upload(`${workspaceBlobPrefix(workspaceId)}${file.name}`, file, {
+      access: ATTACHMENT_ACCESS,
       handleUploadUrl: `/api/workspaces/${workspaceId}/documents/upload-token`,
       clientPayload: JSON.stringify(scope),
     });

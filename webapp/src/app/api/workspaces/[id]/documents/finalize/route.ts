@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { Capability, requireCapability } from "@/lib/tenant/guard";
 import { errorResponse, readJson } from "@/lib/http";
 import { documentFinalizeSchema } from "@/lib/validation/schemas";
-import { ingestDocument, badDocScope } from "@/lib/domain/documents";
+import { ingestDocument, badDocScope, blobUrlBoundToOtherWorkspace } from "@/lib/domain/documents";
 import { ingestTable } from "@/lib/domain/import-store";
 import { isTabularFile, summarizeParsed, parseWorkbook } from "@/lib/domain/import-parse";
-import { isAllowed, isParseable, MAX_PARSE_BYTES } from "@/lib/attachments";
-import { isOwnBlobUrl } from "@/lib/security/blob-host";
+import { isAllowed, isParseable, MAX_PARSE_BYTES, workspaceBlobPrefix } from "@/lib/attachments";
+import { isOwnPrivateBlobUrl } from "@/lib/security/blob-host";
+import { readBlobBytes, blobPathname } from "@/lib/security/blob-signing";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -16,7 +17,10 @@ export const maxDuration = 120;
  * within the parse cap) fetch it back, extract + encrypt text, and embed chunks for RAG.
  * Images/video are recorded as metadata only. Member+ (CreateRecord).
  *
- * SSRF guard: only this deployment's Blob store is fetched server-side (PBA-L3c-009).
+ * Object binding (PBA-L3c-009 / ATT-HARDEN): the blob must be on this deployment's PRIVATE
+ * store, under this workspace's `comms/<id>/` prefix, and not already referenced by another
+ * workspace's document — so a caller cannot register (and then read/sign) another workspace's
+ * object. Legacy public URLs are rejected here (new uploads are always private).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -26,9 +30,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!parsed.success) return NextResponse.json({ error: "invalid" }, { status: 400 });
     const { blobUrl, name, mime, accountId, dealId, channelId } = parsed.data;
 
-    // PBA-L3c-009: only ever fetch/record objects of THIS deployment's Blob store — not
-    // any *.blob.vercel-storage.com host (an attacker's own store would be proxied).
-    if (!isOwnBlobUrl(blobUrl)) return NextResponse.json({ error: "bad_host" }, { status: 400 });
+    // PBA-L3c-009: only ever record objects on THIS deployment's PRIVATE store — not any
+    // other *.blob.vercel-storage.com host, and not a legacy public object (new uploads are
+    // private). An attacker's own store, or another workspace's object, is refused.
+    if (!isOwnPrivateBlobUrl(blobUrl)) return NextResponse.json({ error: "bad_host" }, { status: 400 });
+
+    // ATT-HARDEN: the object must live under this workspace's prefix (client uploads and the
+    // server put both write `comms/<id>/…`), and must not already be bound to another
+    // workspace — which also covers legacy, unprefixed pathnames.
+    const pathname = blobPathname(blobUrl);
+    if (!pathname || !pathname.startsWith(workspaceBlobPrefix(id))) return NextResponse.json({ error: "bad_scope" }, { status: 400 });
+    if (await blobUrlBoundToOtherWorkspace(id, blobUrl)) return NextResponse.json({ error: "bad_scope" }, { status: 400 });
 
     // PBA-L3c-027: file type allowlist + every scope id must be THIS workspace's (and the
     // uploader must be seated in a channel they attach to).
@@ -36,18 +48,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const bad = await badDocScope(id, ctx.sub, { accountId: accountId ?? null, dealId: dealId ?? null, channelId: channelId ?? null });
     if (bad) return NextResponse.json({ error: bad }, { status: bad === "bad_scope" ? 400 : 404 });
 
-    // Parseable docs (within the cap) → fetch + parse for RAG. Media → metadata only.
+    // Parseable docs (within the cap) → read + parse for RAG. Media → metadata only.
+    // readBlobBytes authenticates to the private store (a plain fetch of a private object
+    // 401s) and enforces the parse-size cap; text extraction stays best-effort.
     let buffer: Buffer | undefined;
     if (isParseable(name, mime ?? null)) {
-      try {
-        const r = await fetch(blobUrl, { cache: "no-store" });
-        if (r.ok) {
-          const len = Number(r.headers.get("content-length") ?? 0);
-          if (len <= MAX_PARSE_BYTES) buffer = Buffer.from(await r.arrayBuffer());
-        }
-      } catch {
-        /* parse is best-effort — store the doc regardless */
-      }
+      buffer = (await readBlobBytes(blobUrl, MAX_PARSE_BYTES)) ?? undefined;
     }
 
     // Tabular files (xlsx/csv/…) land as STRUCTURED ROWS (row store) so agents can
