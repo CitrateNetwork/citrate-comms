@@ -34,11 +34,30 @@ struct AdminState {
 /// The health snapshot returned by `GET /health`.
 #[derive(Serialize)]
 pub struct Health {
+    /// Deployed git commit — so a deploy can be *probed* not attested (rescore #10).
+    pub sha: String,
     pub domain: String,
     pub paused: bool,
     pub connected: usize,
     pub groups: usize,
     pub audit_records: usize,
+}
+
+/// The deployed git commit, for the `/health` snapshot.
+///
+/// Runtime env override first (`GIT_SHA`, then `SOURCE_COMMIT` — the systemd
+/// `EnvironmentFile` or an operator can set either), else the value baked in at
+/// build time by `build.rs`. Never a secret; falls back to `"unknown"`.
+fn git_sha() -> String {
+    for key in ["GIT_SHA", "SOURCE_COMMIT"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    env!("GIT_SHA").to_string()
 }
 
 /// Bind the admin surface (loopback-only) and start serving. `bind` must resolve to a
@@ -73,6 +92,7 @@ pub async fn serve_admin(
 async fn health(State(st): State<AdminState>) -> Json<Health> {
     let (groups, audit_records) = st.server.snapshot().await;
     Json(Health {
+        sha: git_sha(),
         domain: st.server.domain().await,
         paused: st.server.is_paused(),
         connected: st.server.connected().await,

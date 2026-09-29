@@ -55,6 +55,10 @@ export PATH="$CARGO_HOME/bin:$PATH"
 
 log "Building comms-relay (release, locked)"
 cd "$SRC"
+# Deployed git commit for GET /health (audit rescore #10). push.sh passes it in
+# (this tree was rsync'd WITHOUT .git/, so build.rs can't query git here). build.rs
+# reads GIT_SHA from the env and bakes it into the binary; empty → sha:"unknown".
+export GIT_SHA="${GIT_SHA:-}"
 # `-p comms-relay` is LOad-BEARING, not stylistic. comms-relay depends on comms-core
 # with `default-features = false, features = ["store"]` so the MLS engine is not
 # compiled in — that is how server-blindness is enforced (PLANSET/02 §1).
