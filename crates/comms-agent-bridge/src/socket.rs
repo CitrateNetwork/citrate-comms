@@ -33,9 +33,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::{AgentInbound, AgentOutbound};
 
 /// Map a socket path to an [`interprocess`] endpoint name. Unix: the path is used verbatim as a
-/// filesystem name. Windows: a namespaced name derived from the path's basename, with every char
-/// outside `[A-Za-z0-9._-]` replaced by `-`. Both ends of the IPC MUST apply this identical rule so
-/// the runtime client and the bridge agree byte-for-byte.
+/// filesystem name. Windows: a per-user, per-install **namespaced** name that MUST match the
+/// citrate-core client's `ipc_name::windows_pipe_name` byte-for-byte (PBA-L7b-004), or the runtime
+/// client connects to a pipe this bridge never bound. See [`windows_pipe_name`] / [`pipe_nonce`].
 pub(crate) fn endpoint_name(p: &str) -> io::Result<Name<'static>> {
     #[cfg(unix)]
     {
@@ -44,21 +44,73 @@ pub(crate) fn endpoint_name(p: &str) -> io::Result<Name<'static>> {
     }
     #[cfg(windows)]
     {
-        let base = std::path::Path::new(p)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("citrate.sock");
-        let slug: String = base
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        slug.to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+        let nonce = pipe_nonce(p)?;
+        windows_pipe_name(p, &nonce).to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+    }
+}
+
+/// PBA-L7b-004: the Windows pipe name for endpoint path `p` and per-install `nonce`. MUST stay
+/// byte-identical to citrate-core `src-tauri/src/ipc_name.rs::windows_pipe_name`.
+#[cfg(windows)]
+fn windows_pipe_name(p: &str, nonce: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let base = std::path::Path::new(p)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("citrate.sock");
+    let slug: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut h = Sha256::new();
+    h.update(b"citrate/ipc-pipe/v1");
+    h.update(p.as_bytes());
+    h.update([0u8]);
+    h.update(nonce);
+    let tag = hex::encode(&h.finalize()[..16]);
+    format!("citrate-{tag}-{slug}")
+}
+
+/// Read the per-install 32-byte nonce for `p` from `<p>.pipe-nonce`, creating it atomically
+/// (`create_new`) if absent. On a create race the loser reads the winner's bytes. MUST match
+/// citrate-core `ipc_name::pipe_nonce`.
+#[cfg(windows)]
+fn pipe_nonce(p: &str) -> io::Result<[u8; 32]> {
+    use std::io::{Read, Write};
+    let path = format!("{p}.pipe-nonce");
+    let read_exact = |path: &str| -> io::Result<[u8; 32]> {
+        let mut buf = Vec::new();
+        std::fs::File::open(path)?.read_to_end(&mut buf)?;
+        if buf.len() != 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pipe nonce file has the wrong length",
+            ));
+        }
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&buf);
+        Ok(nonce)
+    };
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let mut nonce = [0u8; 32];
+            getrandom::getrandom(&mut nonce)
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "nonce rng failed"))?;
+            f.write_all(&nonce)?;
+            Ok(nonce)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => read_exact(&path),
+        Err(e) => Err(e),
     }
 }
 
