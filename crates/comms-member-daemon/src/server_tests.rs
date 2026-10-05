@@ -10,6 +10,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[test]
+fn pipe_name_matches_citrate_core_golden_vector() {
+    assert_eq!(
+        super::windows_pipe_name("/tmp/citrate/comms/member.sock", &[0x11u8; 32]),
+        "citrate-5fcf8fcf99579dd1e993f1710d0595c3-member.sock"
+    );
+}
+
 /// Connect the client end using the same [`super::endpoint_name`] rule the server binds with, then
 /// wrap it in a [`BufReader`] whose `get_mut()` is the write side (the transport is half-duplex).
 fn connect_client(path: &PathBuf) -> BufReader<Stream> {

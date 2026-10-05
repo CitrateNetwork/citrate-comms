@@ -36,7 +36,7 @@ pub(crate) fn endpoint_name(p: &str) -> io::Result<Name<'static>> {
 
 /// PBA-L7b-004: the Windows pipe name for endpoint path `p` and per-install `nonce`. MUST stay
 /// byte-identical to citrate-core `src-tauri/src/ipc_name.rs::windows_pipe_name`.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_pipe_name(p: &str, nonce: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let base = std::path::Path::new(p)
