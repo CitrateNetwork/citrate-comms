@@ -51,7 +51,7 @@ pub(crate) fn endpoint_name(p: &str) -> io::Result<Name<'static>> {
 
 /// PBA-L7b-004: the Windows pipe name for endpoint path `p` and per-install `nonce`. MUST stay
 /// byte-identical to citrate-core `src-tauri/src/ipc_name.rs::windows_pipe_name`.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_pipe_name(p: &str, nonce: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let base = std::path::Path::new(p)
@@ -369,6 +369,14 @@ async fn read_capped_line(reader: &mut BufReader<RecvHalf>) -> Result<Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipe_name_matches_citrate_core_golden_vector() {
+        assert_eq!(
+            windows_pipe_name("/tmp/citrate/comms/member.sock", &[0x11u8; 32]),
+            "citrate-5fcf8fcf99579dd1e993f1710d0595c3-member.sock"
+        );
+    }
 
     fn socket_path(name: &str) -> PathBuf {
         // tempfile gives a unique dir without Date/rand in the script context.
