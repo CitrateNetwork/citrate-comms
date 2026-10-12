@@ -366,7 +366,7 @@ fn a_core_minted_invite_link_redeems_through_the_ipc() {
     let url = spawn_ws_relay(owner_w.address());
     let mut owner = ws_member(&url, owner_w);
     let gid = owner.create_group("ops").expect("create");
-    let token = "Zm9vYmFyLWNvcmUtbWludGVkLXRva2VuLTAxMjM0NTY3"; // base64url, like random_state()
+    let token = "Zm9vYmFyLWNvcmUtbWludGVkLXRva2VuLTAxMjM0NTY3"; // base64url, like random_state() gitleaks:allow (test fixture)
     owner
         .publish_invite(gid, *blake3::hash(token.as_bytes()).as_bytes(), wall_ms() + 600_000)
         .expect("mint");

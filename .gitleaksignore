@@ -1,0 +1,5 @@
+# Reviewed false positives (gitleaks fingerprint = commit:file:rule:line).
+# 5461d927 added a fixed test fixture invite token in ws_tests.rs (base64url of
+# "foobar-core-minted-token-01234567"); it is not a credential. The line now
+# carries an inline gitleaks:allow, this entry covers the original commit.
+5461d927a8befc7fce102f5b1cb3555fb19cc069:crates/comms-member-daemon/src/ws_tests.rs:generic-api-key:369
