@@ -86,6 +86,11 @@ pub enum Request {
     /// Flag-A — report whether the networked relay link is currently up. Cheap health query (no group
     /// state); citrate-core uses it so a mid-session relay DROP shows as "degraded", not "healthy".
     RelayStatus,
+    /// Join every group this member has a pending Welcome for (the add-by-address path, for a
+    /// headless member that is never told the group id). Answers `Joined`.
+    JoinPending,
+    /// This daemon's member (wallet) address — the address a human adds to a group. Answers `Whoami`.
+    Whoami,
 }
 
 /// One roster entry: the member address (hex) + role string.
@@ -143,6 +148,14 @@ pub enum Response {
     /// relay is configured but the link is down, so relayed ops will fail until it reconnects.
     RelayStatus {
         connected: bool,
+    },
+    /// The groups `JoinPending` just joined (hex ids; empty = nothing was pending).
+    Joined {
+        groups: Vec<String>,
+    },
+    /// The member address (`0x`-prefixed hex) — answer to `Whoami`.
+    Whoami {
+        address: String,
     },
     Error {
         message: String,
@@ -362,11 +375,7 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 },
             }
         }
-        Request::RedeemInvite {
-            group,
-            token,
-            name,
-        } => {
+        Request::RedeemInvite { group, token, name } => {
             let gid = match parse_gid(&group) {
                 Ok(g) => g,
                 Err(m) => return Response::Error { message: m },
@@ -442,6 +451,17 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
         // valid answer, `connected: false`, not an error).
         Request::RelayStatus => Response::RelayStatus {
             connected: daemon.relay_connected(),
+        },
+        Request::JoinPending => match daemon.join_pending() {
+            Ok(gids) => Response::Joined {
+                groups: gids.into_iter().map(|g| hex::encode(g.0)).collect(),
+            },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::Whoami => Response::Whoami {
+            address: format!("0x{}", hex::encode(daemon.owner().0)),
         },
     }
 }

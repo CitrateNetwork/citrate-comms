@@ -11,6 +11,12 @@ description = "citrate-comms member daemon — runs a wallet-owned MLS member + 
 name = "comms-member-daemon"
 path = "src/main.rs"
 
+# Scriptable IPC client for a headless member (an ops bot): whoami / status / join-pending /
+# redeem / send. Holds no key; talks to a running daemon over its bearer-authenticated socket.
+[[bin]]
+name = "comms-send"
+path = "src/bin/comms-send.rs"
+
 [dependencies]
 comms-proto = { path = "../comms-proto" }
 comms-core = { path = "../comms-core" }

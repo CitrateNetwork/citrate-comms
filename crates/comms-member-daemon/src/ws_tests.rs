@@ -223,3 +223,174 @@ fn two_daemons_self_admit_via_invite_no_owner_add() {
     }
     assert!(got_bob_msg, "owner must decrypt the self-admitted member's message");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Headless member (ops bot) paths — `comms-send` relies on these.
+// ---------------------------------------------------------------------------------------------
+
+/// Spawn a real relay WS server (ephemeral port) and return its `ws://` URL.
+fn spawn_ws_relay(trust_anchor: WalletAddress) -> String {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("server rt");
+        rt.block_on(async move {
+            let service = DeliveryService::new("relay.test", trust_anchor, 0).expect("service");
+            let server = RelayServer::new(service);
+            let (addr, handle) = server.bind("127.0.0.1:0").await.expect("bind");
+            addr_tx.send(addr).expect("send addr");
+            let _ = handle.await;
+        });
+    });
+    format!("ws://{}", addr_rx.recv().expect("relay bound"))
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .expect("clock")
+}
+
+fn ws_member(url: &str, w: EthWallet) -> MemberDaemon {
+    let ws = WsRelay::connect_insecure(url).expect("ws connect");
+    MemberDaemon::new_with_relay(w, Box::new(ws), "relay.test", wall_ms()).expect("daemon")
+}
+
+/// Poll `d` on `gid` until a message with `body` arrives (or give up).
+fn await_body(d: &mut MemberDaemon, gid: GroupId, body: &str) -> bool {
+    for _ in 0..60 {
+        if let Ok(msgs) = d.poll_messages(gid) {
+            if msgs.iter().any(|m| m.body == body) {
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+// The add-by-address path for a member that is never told the group id: the owner adds the bot
+// by address, the bot calls `join_pending` and is in — then its alert decrypts on the owner side.
+#[test]
+fn a_headless_member_added_by_address_joins_pending_and_posts() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let gid = owner.create_group("ops").expect("create");
+
+    let bot_w = EthWallet::generate();
+    let bot_addr = bot_w.address();
+    let mut bot = ws_member(&url, bot_w);
+    // Not invited yet: nothing to join, and no group.
+    assert!(bot.join_pending().expect("nothing pending").is_empty());
+    assert!(bot.list_groups().is_empty());
+
+    owner.add_member(gid, bot_addr).expect("owner adds the bot by address");
+
+    let mut joined = Vec::new();
+    for _ in 0..60 {
+        joined = bot.join_pending().expect("join pending");
+        if !joined.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(joined, vec![gid], "the bot joins exactly the group it was added to");
+    assert_eq!(bot.list_groups().len(), 1);
+
+    bot.send(gid, "[CRIT] rpc-1 disk 93%").expect("bot send");
+    assert!(
+        await_body(&mut owner, gid, "[CRIT] rpc-1 disk 93%"),
+        "the owner must decrypt the bot's alert"
+    );
+}
+
+// Red→green for the drained-mailbox bug: `fetch` DRAINS the relay session, so polling group B
+// used to throw away group A's traffic. Bob is in TWO groups (A by address, B by invite); a
+// message in A must survive a poll of B.
+#[test]
+fn polling_one_group_does_not_drop_another_groups_messages() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let ga = owner.create_group("a").expect("ga");
+    let gb = owner.create_group("b").expect("gb");
+
+    let bob_w = EthWallet::generate();
+    let bob_addr = bob_w.address();
+    let mut bob = ws_member(&url, bob_w);
+
+    // A: by address (uses bob's startup KeyPackage).
+    owner.add_member(ga, bob_addr).expect("add to a");
+    let mut joined = Vec::new();
+    for _ in 0..60 {
+        joined = bob.join_pending().expect("join");
+        if !joined.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(joined, vec![ga]);
+
+    // B: by invite (self-admit; carries its own fresh KeyPackage). Owner merges the commit.
+    let token = b"two-groups-token".to_vec();
+    owner
+        .publish_invite(gb, *blake3::hash(&token).as_bytes(), wall_ms() + 600_000)
+        .expect("mint");
+    bob.redeem_invite(gb, token, "b").expect("redeem b");
+    for _ in 0..40 {
+        let _ = owner.poll_messages(gb);
+        if owner.roster(gb).map(|r| r.len()).unwrap_or(0) == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    owner.send(ga, "for group a").expect("send a");
+    // Let the relay push it into bob's session, then poll the OTHER group first.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let in_b = bob.poll_messages(gb).expect("poll b");
+    assert!(in_b.iter().all(|m| m.body != "for group a"));
+    assert!(
+        await_body(&mut bob, ga, "for group a"),
+        "group a's message must survive a poll of group b"
+    );
+}
+
+// The invite-link path with a link EXACTLY as citrate-core mints it (base64url token, owner
+// publishes BLAKE3 of the token string's bytes), parsed by `comms-send`'s link parser and redeemed
+// through the IPC dispatcher. Proves the token encoding end to end against a real relay.
+#[test]
+fn a_core_minted_invite_link_redeems_through_the_ipc() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let gid = owner.create_group("ops").expect("create");
+    let token = "Zm9vYmFyLWNvcmUtbWludGVkLXRva2VuLTAxMjM0NTY3"; // base64url, like random_state() gitleaks:allow (test fixture)
+    owner
+        .publish_invite(gid, *blake3::hash(token.as_bytes()).as_bytes(), wall_ms() + 600_000)
+        .expect("mint");
+    let link = format!("citrate://invite?g={}&t={token}&k=02aa", hex::encode(gid.0));
+
+    let mut bot = ws_member(&url, EthWallet::generate());
+    let inv = crate::client::parse_invite_link(&link).expect("link");
+    let resp = crate::ipc::handle_request(
+        &mut bot,
+        serde_json::from_value(serde_json::json!({
+            "op": "redeemInvite", "group": inv.group, "token": inv.token_hex, "name": "ops"
+        }))
+        .expect("request"),
+    );
+    assert_eq!(resp, crate::ipc::Response::Ok);
+
+    // The owner merges the external commit, then reads the bot's alert.
+    for _ in 0..40 {
+        let _ = owner.poll_messages(gid);
+        if owner.roster(gid).map(|r| r.len()).unwrap_or(0) == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    bot.send(gid, "[RECOVERED] chain tip advancing").expect("bot send");
+    assert!(await_body(&mut owner, gid, "[RECOVERED] chain tip advancing"));
+}

@@ -25,6 +25,7 @@ use comms_proto::{
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
+pub mod client;
 pub mod ipc;
 pub mod persist;
 pub mod relay;
@@ -117,7 +118,18 @@ pub struct MemberDaemon {
     /// `Some` = snapshot every MLS + registry mutation to an encrypted file and rehydrate
     /// it on startup.
     persist: Option<PersistCtx>,
+    /// Envelopes already fetched from the relay but not yet consumed: a `poll_messages(g1)` that
+    /// drains a Commit or Application for `g2`, or a Welcome for a group not joined yet. `fetch`
+    /// DRAINS the relay session, so without this buffer those envelopes were silently dropped —
+    /// a second group's traffic was lost to the first group's poll, and an unrelated poll ate a
+    /// pending Welcome. In-memory only (the relay already delivered them once); bounded by
+    /// [`INBOX_CAP`].
+    inbox: Vec<Envelope>,
 }
+
+/// Upper bound on [`MemberDaemon::inbox`]: oldest envelopes beyond it are dropped, so a group that is
+/// never polled cannot grow the daemon's memory without bound.
+const INBOX_CAP: usize = 4096;
 
 /// Where and how the daemon persists its encrypted state.
 struct PersistCtx {
@@ -235,6 +247,7 @@ impl MemberDaemon {
             groups,
             now: d_now + 1,
             persist,
+            inbox: Vec::new(),
         };
         daemon.persist_state()?;
         Ok(daemon)
@@ -368,19 +381,81 @@ impl MemberDaemon {
     /// from the relay (addresses only — a joiner is not the admin, so it does not learn others'
     /// signature keys or roles). After this the member can decrypt group messages and address its own.
     pub fn join_group(&mut self, gid: GroupId, name: impl Into<String>) -> Result<(), DaemonError> {
-        let me = self.wallet.address();
         // The Welcome was delivered to this member's mailbox when the owner onboarded them.
-        let welcome = self
-            .relay
-            .fetch(&me)
-            .into_iter()
-            .find(|e| e.kind == EnvelopeKind::Welcome && e.group_id == gid)
-            .ok_or_else(|| {
-                DaemonError::Relay(format!(
+        let mut all = self.take_inbox();
+        let pos = all
+            .iter()
+            .position(|e| e.kind == EnvelopeKind::Welcome && e.group_id == gid);
+        let welcome = match pos {
+            Some(i) => all.remove(i),
+            None => {
+                self.stash(all);
+                return Err(DaemonError::Relay(format!(
                     "no pending welcome for group {}",
                     hex::encode(gid.0)
-                ))
-            })?;
+                )));
+            }
+        };
+        // Everything else that was fetched stays buffered for the op that consumes it.
+        self.stash(all);
+        match self.join_with_welcome(gid, &welcome.ciphertext, name.into()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Keep the Welcome so a retry (e.g. after a transient relay error fetching the
+                // tree) can still use it.
+                self.stash(vec![welcome]);
+                Err(e)
+            }
+        }
+    }
+
+    /// **Headless join.** Join EVERY group this member has a pending Welcome for, without the caller
+    /// knowing the group ids. A human owner adds this member by address ("Add by address" in Commons)
+    /// and the Welcome lands in this member's mailbox; a headless member (an ops bot) cannot be told
+    /// the id out of band, so it accepts whatever it was added to. Returns the newly joined group
+    /// ids (empty = nothing pending). Envelopes that are not join candidates stay buffered.
+    ///
+    /// Only an owner/admin of a group can produce a Welcome for it (the relay enforces that), so
+    /// this admits the member to nothing a group's own owner did not choose.
+    pub fn join_pending(&mut self) -> Result<Vec<GroupId>, DaemonError> {
+        let all = self.take_inbox();
+        let mut joined: Vec<GroupId> = Vec::new();
+        let mut rest = Vec::new();
+        let mut first_err = None;
+        for e in all {
+            let candidate = e.kind == EnvelopeKind::Welcome
+                && !joined.contains(&e.group_id)
+                && !self.groups.iter().any(|g| g.id == e.group_id);
+            if !candidate {
+                rest.push(e);
+                continue;
+            }
+            match self.join_with_welcome(e.group_id, &e.ciphertext, String::new()) {
+                Ok(()) => joined.push(e.group_id),
+                // A Welcome we cannot process is not retried forever; surface the first failure
+                // if nothing at all could be joined.
+                Err(err) => {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        self.stash(rest);
+        match (joined.is_empty(), first_err) {
+            (true, Some(err)) => Err(err),
+            _ => Ok(joined),
+        }
+    }
+
+    /// Process one Welcome: fetch the group's public ratchet tree, join the MLS group, and record
+    /// the roster from the relay (addresses only — a joiner is not the admin, so it does not learn
+    /// others' signature keys or roles).
+    fn join_with_welcome(
+        &mut self,
+        gid: GroupId,
+        welcome: &[u8],
+        name: String,
+    ) -> Result<(), DaemonError> {
+        let me = self.wallet.address();
         let tree = self
             .relay
             .ratchet_tree(gid)
@@ -388,7 +463,7 @@ impl MemberDaemon {
             .ok_or_else(|| DaemonError::Relay("group has no ratchet tree".into()))?;
         let handle = self
             .mls
-            .join(&welcome.ciphertext, &tree)
+            .join(welcome, &tree)
             .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let epoch = handle.epoch();
         let member_addrs = self
@@ -410,13 +485,36 @@ impl MemberDaemon {
             .collect();
         self.groups.push(GroupState {
             id: gid,
-            name: name.into(),
+            name,
             handle,
             epoch,
             members,
         });
         self.persist_state()?;
         Ok(())
+    }
+
+    /// Everything waiting for this member: envelopes an earlier op fetched but did not consume,
+    /// then whatever the relay has delivered since (in delivery order).
+    fn take_inbox(&mut self) -> Vec<Envelope> {
+        let me = self.wallet.address();
+        let mut all = std::mem::take(&mut self.inbox);
+        all.extend(self.relay.fetch(&me));
+        all
+    }
+
+    /// Put fetched-but-unconsumed envelopes back, keeping only those a later op can still use: any
+    /// envelope for a group we are in (another group's poll consumes it), and Welcomes for groups
+    /// we have not joined (join candidates). Anything else could never be consumed and is dropped.
+    fn stash(&mut self, envs: Vec<Envelope>) {
+        let groups = &self.groups;
+        self.inbox.extend(envs.into_iter().filter(|e| {
+            groups.iter().any(|g| g.id == e.group_id) || e.kind == EnvelopeKind::Welcome
+        }));
+        if self.inbox.len() > INBOX_CAP {
+            let excess = self.inbox.len() - INBOX_CAP;
+            self.inbox.drain(..excess);
+        }
     }
 
     /// **INVITE-S2 (owner mints).** Export this group's PUBLIC `GroupInfo` and publish a
@@ -490,8 +588,7 @@ impl MemberDaemon {
             .group_members(gid)
             .map_err(DaemonError::Relay)?
             .unwrap_or_default();
-        let recipients: Vec<WalletAddress> =
-            members.into_iter().filter(|a| *a != joiner).collect();
+        let recipients: Vec<WalletAddress> = members.into_iter().filter(|a| *a != joiner).collect();
         submit_commit(
             self.relay.as_mut(),
             gid,
@@ -648,59 +745,92 @@ impl MemberDaemon {
     /// (not relay metadata). Envelopes are processed in delivery order, so a Commit that
     /// precedes application traffic at the new epoch is applied first.
     pub fn poll_messages(&mut self, gid: GroupId) -> Result<Vec<Msg>, DaemonError> {
-        let me = self.wallet.address();
-        let mls = &self.mls;
-        let g = self
-            .groups
-            .iter_mut()
-            .find(|g| g.id == gid)
-            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        // Check membership BEFORE draining, so an unknown group id cannot eat other groups' mail.
+        if !self.groups.iter().any(|g| g.id == gid) {
+            return Err(DaemonError::NoGroup(hex::encode(gid.0)));
+        }
+        let envs = self.take_inbox();
         let mut out = Vec::new();
         let mut changed = false;
-        for e in self.relay.fetch(&me) {
-            if e.group_id != gid {
-                continue;
-            }
-            match e.kind {
-                EnvelopeKind::Commit => {
-                    // Merge an incoming membership commit (e.g. a self-admitted joiner).
-                    g.handle
-                        .process_commit(mls, &e.ciphertext)
-                        .map_err(|err| DaemonError::Mls(err.to_string()))?;
-                    g.epoch = g.handle.epoch();
-                    reconcile_roster(g);
-                    changed = true;
+        // Envelopes for OTHER groups (and anything left after a failure) go back to the inbox
+        // instead of being dropped: `fetch` drained them from the relay session.
+        let mut keep = Vec::new();
+        let mut failure = None;
+        {
+            let mls = &self.mls;
+            let g = self
+                .groups
+                .iter_mut()
+                .find(|g| g.id == gid)
+                .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+            let mut iter = envs.into_iter();
+            for e in iter.by_ref() {
+                if e.group_id != gid {
+                    keep.push(e);
+                    continue;
                 }
-                EnvelopeKind::Application => {
-                    let received = g
-                        .handle
-                        .receive(mls, &e.ciphertext)
-                        .map_err(|err| DaemonError::Mls(err.to_string()))?;
-                    let body =
-                        String::from_utf8(received.plaintext).map_err(|_| DaemonError::BadUtf8)?;
-                    // Attribute from the authenticated MLS credential, not the
-                    // relay-controlled `e.sender` routing field (CM2-B-A002).
-                    let sender = WalletAddress::from_identity(&received.sender_identity)
-                        .ok_or_else(|| {
-                            DaemonError::Mls("authenticated sender identity is not a wallet".into())
-                        })?;
-                    out.push(Msg {
-                        group: gid,
-                        sender,
-                        body,
-                    });
-                    changed = true;
+                match e.kind {
+                    EnvelopeKind::Commit => {
+                        // Merge an incoming membership commit (e.g. a self-admitted joiner).
+                        if let Err(err) = g.handle.process_commit(mls, &e.ciphertext) {
+                            failure = Some(DaemonError::Mls(err.to_string()));
+                            break;
+                        }
+                        g.epoch = g.handle.epoch();
+                        reconcile_roster(g);
+                        changed = true;
+                    }
+                    EnvelopeKind::Application => {
+                        let received = match g.handle.receive(mls, &e.ciphertext) {
+                            Ok(r) => r,
+                            Err(err) => {
+                                failure = Some(DaemonError::Mls(err.to_string()));
+                                break;
+                            }
+                        };
+                        changed = true;
+                        let body = match String::from_utf8(received.plaintext) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                failure = Some(DaemonError::BadUtf8);
+                                break;
+                            }
+                        };
+                        // Attribute from the authenticated MLS credential, not the
+                        // relay-controlled `e.sender` routing field (CM2-B-A002).
+                        let sender = match WalletAddress::from_identity(&received.sender_identity) {
+                            Some(s) => s,
+                            None => {
+                                failure = Some(DaemonError::Mls(
+                                    "authenticated sender identity is not a wallet".into(),
+                                ));
+                                break;
+                            }
+                        };
+                        out.push(Msg {
+                            group: gid,
+                            sender,
+                            body,
+                        });
+                    }
+                    // Welcome/Proposal are not consumed here.
+                    _ => continue,
                 }
-                // Welcome/Proposal are not consumed here.
-                _ => continue,
             }
+            // On failure the failing envelope is consumed (retrying it cannot succeed); the ones
+            // after it are kept for the next poll.
+            keep.extend(iter);
         }
+        self.stash(keep);
         // Processing advanced the inbound ratchet / epoch; persist so the restored state
         // reflects what was already consumed. Skip the write if nothing changed.
         if changed {
             self.persist_state()?;
         }
-        Ok(out)
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(out),
+        }
     }
 
     /// The group roster: `(wallet, role)` for every current member (owner first).
