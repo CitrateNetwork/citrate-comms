@@ -89,7 +89,9 @@ fn keystore_persisted_by_older_openmls_reloads_and_stays_usable() {
     assert!(roster.iter().any(|id| id == BOB), "roster has bob");
 
     // A message encrypted by the old release decrypts from Bob's persisted ratchet.
-    let got = bob_g.receive(&bob, &fx.in_flight).expect("in-flight message decrypts");
+    let got = bob_g
+        .receive(&bob, &fx.in_flight)
+        .expect("in-flight message decrypts");
     assert_eq!(got.plaintext, IN_FLIGHT);
     assert_eq!(got.sender_identity, ALICE);
 
@@ -101,7 +103,10 @@ fn keystore_persisted_by_older_openmls_reloads_and_stays_usable() {
 
     // Both directions keep working on the reloaded state.
     let ct = alice_g.send(&alice, b"post-upgrade a->b").unwrap();
-    assert_eq!(bob_g.receive(&bob, &ct).unwrap().plaintext, b"post-upgrade a->b");
+    assert_eq!(
+        bob_g.receive(&bob, &ct).unwrap().plaintext,
+        b"post-upgrade a->b"
+    );
     let ct = bob_g.send(&bob, b"post-upgrade b->a").unwrap();
     let back = alice_g.receive(&alice, &ct).unwrap();
     assert_eq!(back.plaintext, b"post-upgrade b->a");
@@ -113,14 +118,24 @@ fn keystore_persisted_by_older_openmls_reloads_and_stays_usable() {
     let add = alice_g
         .add(&alice, &carol.fresh_key_package().unwrap())
         .expect("add from reloaded state");
-    bob_g.process_commit(&bob, &add.commit).expect("bob merges commit");
-    let mut carol_g = carol.join(&add.welcome, &add.ratchet_tree).expect("carol joins");
+    bob_g
+        .process_commit(&bob, &add.commit)
+        .expect("bob merges commit");
+    let mut carol_g = carol
+        .join(&add.welcome, &add.ratchet_tree)
+        .expect("carol joins");
     assert_eq!(alice_g.epoch(), fx.epoch + 1);
     assert_eq!(bob_g.epoch(), fx.epoch + 1);
     assert_eq!(carol_g.epoch(), fx.epoch + 1);
     let ct = alice_g.send(&alice, b"epoch after upgrade").unwrap();
-    assert_eq!(bob_g.receive(&bob, &ct).unwrap().plaintext, b"epoch after upgrade");
-    assert_eq!(carol_g.receive(&carol, &ct).unwrap().plaintext, b"epoch after upgrade");
+    assert_eq!(
+        bob_g.receive(&bob, &ct).unwrap().plaintext,
+        b"epoch after upgrade"
+    );
+    assert_eq!(
+        carol_g.receive(&carol, &ct).unwrap().plaintext,
+        b"epoch after upgrade"
+    );
 }
 
 #[test]
@@ -155,7 +170,9 @@ fn write_fixture() {
     let alice = MlsMember::new(ALICE).unwrap();
     let bob = MlsMember::new(BOB).unwrap();
     let mut alice_g = alice.create_group().unwrap();
-    let add = alice_g.add(&alice, &bob.fresh_key_package().unwrap()).unwrap();
+    let add = alice_g
+        .add(&alice, &bob.fresh_key_package().unwrap())
+        .unwrap();
     let mut bob_g = bob.join(&add.welcome, &add.ratchet_tree).unwrap();
     // Advance both secret trees before persisting.
     let ct = alice_g.send(&alice, b"warm-up a->b").unwrap();
