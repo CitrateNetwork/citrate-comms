@@ -40,7 +40,9 @@ fn init_test_platform() {
 }
 
 fn goldens_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("goldens")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("goldens")
 }
 
 fn to_rgba(snap: &SharedPixelBuffer<Rgba8Pixel>) -> RgbaImage {
@@ -60,9 +62,20 @@ fn compare_or_save(label: &str, image: &RgbaImage) {
         return;
     }
     let golden = image::open(&path).expect("open golden").to_rgba8();
-    assert_eq!(image.dimensions(), golden.dimensions(), "{label}: dimension mismatch");
-    let diffs = image.pixels().zip(golden.pixels()).filter(|(a, b)| a != b).count();
-    assert_eq!(diffs, 0, "{label}: {diffs} pixel diffs (regen with {REGEN_ENV}=1 if intended)");
+    assert_eq!(
+        image.dimensions(),
+        golden.dimensions(),
+        "{label}: dimension mismatch"
+    );
+    let diffs = image
+        .pixels()
+        .zip(golden.pixels())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        diffs, 0,
+        "{label}: {diffs} pixel diffs (regen with {REGEN_ENV}=1 if intended)"
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +83,11 @@ struct Size {
     w: u32,
     h: u32,
 }
-const SIZES: [Size; 3] = [Size { w: 1280, h: 800 }, Size { w: 1440, h: 900 }, Size { w: 1920, h: 1080 }];
+const SIZES: [Size; 3] = [
+    Size { w: 1280, h: 800 },
+    Size { w: 1440, h: 900 },
+    Size { w: 1920, h: 1080 },
+];
 
 /// Render any proof window (they all expose `set_proof_width/height`) to an RgbaImage.
 macro_rules! render_window {
@@ -94,36 +111,92 @@ fn screen_goldens_across_sizes() {
         let kit = render_window!(ProofRoot, size);
         // Sanity: non-blank.
         let first = kit.pixels().next().copied();
-        assert!(kit.pixels().any(|p| Some(*p) != first), "render must not be flat");
+        assert!(
+            kit.pixels().any(|p| Some(*p) != first),
+            "render must not be flat"
+        );
         compare_or_save(&format!("kit_{}x{}", size.w, size.h), &kit);
 
-        compare_or_save(&format!("comms_{}x{}", size.w, size.h), &render_window!(CommsProofWindow, size));
-        compare_or_save(&format!("crm_{}x{}", size.w, size.h), &render_window!(CrmProofWindow, size));
-        compare_or_save(&format!("settings_{}x{}", size.w, size.h), &render_window!(SettingsProofWindow, size));
-        compare_or_save(&format!("projects_{}x{}", size.w, size.h), &render_window!(ProjectsProofWindow, size));
-        compare_or_save(&format!("members_{}x{}", size.w, size.h), &render_window!(MembersProofWindow, size));
-        compare_or_save(&format!("agents_{}x{}", size.w, size.h), &render_window!(AgentsProofWindow, size));
-        compare_or_save(&format!("audit_{}x{}", size.w, size.h), &render_window!(AuditProofWindow, size));
-        compare_or_save(&format!("security_{}x{}", size.w, size.h), &render_window!(SecurityProofWindow, size));
-        compare_or_save(&format!("forum_{}x{}", size.w, size.h), &render_window!(ForumProofWindow, size));
+        compare_or_save(
+            &format!("comms_{}x{}", size.w, size.h),
+            &render_window!(CommsProofWindow, size),
+        );
+        compare_or_save(
+            &format!("crm_{}x{}", size.w, size.h),
+            &render_window!(CrmProofWindow, size),
+        );
+        compare_or_save(
+            &format!("settings_{}x{}", size.w, size.h),
+            &render_window!(SettingsProofWindow, size),
+        );
+        compare_or_save(
+            &format!("projects_{}x{}", size.w, size.h),
+            &render_window!(ProjectsProofWindow, size),
+        );
+        compare_or_save(
+            &format!("members_{}x{}", size.w, size.h),
+            &render_window!(MembersProofWindow, size),
+        );
+        compare_or_save(
+            &format!("agents_{}x{}", size.w, size.h),
+            &render_window!(AgentsProofWindow, size),
+        );
+        compare_or_save(
+            &format!("audit_{}x{}", size.w, size.h),
+            &render_window!(AuditProofWindow, size),
+        );
+        compare_or_save(
+            &format!("security_{}x{}", size.w, size.h),
+            &render_window!(SecurityProofWindow, size),
+        );
+        compare_or_save(
+            &format!("forum_{}x{}", size.w, size.h),
+            &render_window!(ForumProofWindow, size),
+        );
     }
 
     // Full-content proofs: a tall window reveals everything the scroll now reaches, so a
     // golden documents that no card is lost (the "unreachable settings cards" regression).
-    compare_or_save("settings_full_1440x1700", &render_window!(SettingsProofWindow, Size { w: 1440, h: 1700 }));
-    compare_or_save("crm_full_1440x1500", &render_window!(CrmProofWindow, Size { w: 1440, h: 1500 }));
+    compare_or_save(
+        "settings_full_1440x1700",
+        &render_window!(SettingsProofWindow, Size { w: 1440, h: 1700 }),
+    );
+    compare_or_save(
+        "crm_full_1440x1500",
+        &render_window!(CrmProofWindow, Size { w: 1440, h: 1500 }),
+    );
 
     // Narrow comms — the message rows must not overlap / clash when the thread column is
     // squeezed (the reported "sections crash into each other at different sizes" bug).
-    compare_or_save("comms_narrow_1100x720", &render_window!(CommsProofWindow, Size { w: 1100, h: 720 }));
-    compare_or_save("comms_narrow_980x680", &render_window!(CommsProofWindow, Size { w: 980, h: 680 }));
+    compare_or_save(
+        "comms_narrow_1100x720",
+        &render_window!(CommsProofWindow, Size { w: 1100, h: 720 }),
+    );
+    compare_or_save(
+        "comms_narrow_980x680",
+        &render_window!(CommsProofWindow, Size { w: 980, h: 680 }),
+    );
 
     // Full shell (title bar + rail + routed screen) — proves the header-relative layout
     // (the "content crashes past the header" report). force-shell renders the signed-in
     // shell without the live relay.
     let app_size = Size { w: 1440, h: 900 };
-    compare_or_save("app_settings_1440x900", &render_app(comms_client_proof::AppWindow::new().expect("app"), "settings", app_size));
-    compare_or_save("app_crm_1440x900", &render_app(comms_client_proof::AppWindow::new().expect("app"), "crm", app_size));
+    compare_or_save(
+        "app_settings_1440x900",
+        &render_app(
+            comms_client_proof::AppWindow::new().expect("app"),
+            "settings",
+            app_size,
+        ),
+    );
+    compare_or_save(
+        "app_crm_1440x900",
+        &render_app(
+            comms_client_proof::AppWindow::new().expect("app"),
+            "crm",
+            app_size,
+        ),
+    );
 }
 
 /// Render the full AppWindow at a route via force-shell (no live relay).

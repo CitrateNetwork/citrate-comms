@@ -167,7 +167,11 @@ impl AgentSocket {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .map_err(SocketError::Io)?;
         }
-        Ok(Self { listener, bearer: bearer.into(), path })
+        Ok(Self {
+            listener,
+            bearer: bearer.into(),
+            path,
+        })
     }
 
     /// The socket path (for the daemon to advertise to the runtime).
@@ -181,9 +185,15 @@ impl AgentSocket {
     pub async fn accept(&self) -> Result<AgentConn, SocketError> {
         let stream = self.listener.accept().await.map_err(SocketError::Io)?;
         let (read, write) = stream.split();
-        let mut conn = AgentConn { reader: BufReader::new(read), writer: write };
+        let mut conn = AgentConn {
+            reader: BufReader::new(read),
+            writer: write,
+        };
 
-        let hello: Handshake = conn.read_frame().await?.ok_or(SocketError::HandshakeClosed)?;
+        let hello: Handshake = conn
+            .read_frame()
+            .await?
+            .ok_or(SocketError::HandshakeClosed)?;
         let Handshake::Auth { token } = hello;
         // Audited constant-time comparator (`subtle`) — never `==` on the secret bearer.
         if !bool::from(token.as_bytes().ct_eq(self.bearer.as_bytes())) {
@@ -222,7 +232,10 @@ impl AgentConn {
 
     async fn write_frame<T: Serialize>(&mut self, value: &T) -> Result<(), SocketError> {
         let line = crate::ipc::to_line(value).map_err(SocketError::Codec)?;
-        self.writer.write_all(line.as_bytes()).await.map_err(SocketError::Io)?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(SocketError::Io)?;
         self.writer.flush().await.map_err(SocketError::Io)?;
         Ok(())
     }
@@ -238,7 +251,14 @@ impl AgentConn {
     /// Split into independent send/receive halves so a daemon loop can push events and
     /// read commands concurrently (e.g. inside `tokio::select!`) without aliasing.
     pub fn split(self) -> (AgentSink, AgentSource) {
-        (AgentSink { writer: self.writer }, AgentSource { reader: self.reader })
+        (
+            AgentSink {
+                writer: self.writer,
+            },
+            AgentSource {
+                reader: self.reader,
+            },
+        )
     }
 }
 
@@ -250,7 +270,10 @@ pub struct AgentSink {
 impl AgentSink {
     pub async fn send_event(&mut self, ev: &AgentInbound) -> Result<(), SocketError> {
         let line = crate::ipc::to_line(ev).map_err(SocketError::Codec)?;
-        self.writer.write_all(line.as_bytes()).await.map_err(SocketError::Io)?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(SocketError::Io)?;
         self.writer.flush().await.map_err(SocketError::Io)?;
         Ok(())
     }
@@ -281,7 +304,10 @@ pub struct RuntimeClient {
 
 impl RuntimeClient {
     /// Connect to the bridge socket and complete the bearer handshake.
-    pub async fn connect(path: impl AsRef<Path>, bearer: impl Into<String>) -> Result<Self, SocketError> {
+    pub async fn connect(
+        path: impl AsRef<Path>,
+        bearer: impl Into<String>,
+    ) -> Result<Self, SocketError> {
         let path_str = path.as_ref().to_str().ok_or_else(|| {
             SocketError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -291,8 +317,14 @@ impl RuntimeClient {
         let name = endpoint_name(path_str).map_err(SocketError::Io)?;
         let stream = Stream::connect(name).await.map_err(SocketError::Io)?;
         let (read, write) = stream.split();
-        let mut me = Self { reader: BufReader::new(read), writer: write };
-        me.write_frame(&Handshake::Auth { token: bearer.into() }).await?;
+        let mut me = Self {
+            reader: BufReader::new(read),
+            writer: write,
+        };
+        me.write_frame(&Handshake::Auth {
+            token: bearer.into(),
+        })
+        .await?;
         // Wait for the bridge's ready ack; a closed socket here means rejected.
         let _ack: Ack = me.read_frame().await?.ok_or(SocketError::Unauthorized)?;
         Ok(me)
@@ -310,7 +342,10 @@ impl RuntimeClient {
 
     async fn write_frame<T: Serialize>(&mut self, value: &T) -> Result<(), SocketError> {
         let line = crate::ipc::to_line(value).map_err(SocketError::Codec)?;
-        self.writer.write_all(line.as_bytes()).await.map_err(SocketError::Io)?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(SocketError::Io)?;
         self.writer.flush().await.map_err(SocketError::Io)?;
         Ok(())
     }
@@ -425,13 +460,22 @@ mod tests {
         let ev = client.recv_event().await.unwrap().unwrap();
         assert!(matches!(ev, AgentInbound::Message { ref text, .. } if text.contains("Northwind")));
         client
-            .send_command(&AgentOutbound::Send { group: "0xdeals".into(), text: "on it".into() })
+            .send_command(&AgentOutbound::Send {
+                group: "0xdeals".into(),
+                text: "on it".into(),
+            })
             .await
             .unwrap();
         drop(client); // clean EOF
 
         let (cmd, eof) = server.await.unwrap();
-        assert_eq!(cmd, Some(AgentOutbound::Send { group: "0xdeals".into(), text: "on it".into() }));
+        assert_eq!(
+            cmd,
+            Some(AgentOutbound::Send {
+                group: "0xdeals".into(),
+                text: "on it".into()
+            })
+        );
         assert_eq!(eof, None);
     }
 

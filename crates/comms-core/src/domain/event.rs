@@ -66,12 +66,29 @@ impl DomainEvent {
         fields: Vec<(String, FieldValue)>,
         clock: Lamport,
     ) -> Self {
-        Self { space_id, entity_type, entity_id, op: Op::Upsert { fields }, clock }
+        Self {
+            space_id,
+            entity_type,
+            entity_id,
+            op: Op::Upsert { fields },
+            clock,
+        }
     }
 
     /// Build a delete (tombstone) event.
-    pub fn delete(space_id: SpaceId, entity_type: EntityType, entity_id: EntityId, clock: Lamport) -> Self {
-        Self { space_id, entity_type, entity_id, op: Op::Delete, clock }
+    pub fn delete(
+        space_id: SpaceId,
+        entity_type: EntityType,
+        entity_id: EntityId,
+        clock: Lamport,
+    ) -> Self {
+        Self {
+            space_id,
+            entity_type,
+            entity_id,
+            op: Op::Delete,
+            clock,
+        }
     }
 
     /// Serialize to the bytes that get MLS-encrypted (canonical CBOR).

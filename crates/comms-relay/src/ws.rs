@@ -424,13 +424,10 @@ impl RelayServer {
                     return send_err(out_tx, "not authenticated");
                 };
                 let r = {
-                    self.service.lock().await.publish_invite(
-                        addr,
-                        group_id,
-                        token_hash,
-                        group_info,
-                        expires_at,
-                    )
+                    self.service
+                        .lock()
+                        .await
+                        .publish_invite(addr, group_id, token_hash, group_info, expires_at)
                 };
                 match r {
                     Ok(_) => ack(out_tx, None),

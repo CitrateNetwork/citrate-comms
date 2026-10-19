@@ -883,7 +883,11 @@ mod tests {
         let alice2 = MlsMember::restore(b"alice-identity", &alice_sig, &snapshot).expect("restore");
         let mut group2 = alice2.load_group(&mls_gid).expect("reload group");
         assert_eq!(group2.group_id(), mls_gid);
-        assert_eq!(group2.epoch(), 1, "reloaded group is at the pre-restart epoch");
+        assert_eq!(
+            group2.epoch(),
+            1,
+            "reloaded group is at the pre-restart epoch"
+        );
 
         // USABLE: the restored member can still commit a NEW member (Carol) — this needs
         // the live signer + epoch secrets — and Carol joins from the produced Welcome.
@@ -891,7 +895,9 @@ mod tests {
         let carol_kp = carol.fresh_key_package().unwrap();
         let add = group2.add(&alice2, &carol_kp).expect("add after restore");
         assert_eq!(group2.epoch(), 2, "the post-restore add advanced the epoch");
-        let carol_group = carol.join(&add.welcome, &add.ratchet_tree).expect("carol joins");
+        let carol_group = carol
+            .join(&add.welcome, &add.ratchet_tree)
+            .expect("carol joins");
         assert_eq!(carol_group.group_id(), mls_gid);
     }
 
@@ -959,7 +965,9 @@ mod tests {
         let alice = MlsMember::new(b"alice-identity").unwrap();
         let mut alice_group = alice.create_group().unwrap();
         assert_eq!(alice_group.epoch(), 0);
-        let group_info = alice_group.export_group_info(&alice).expect("export group info");
+        let group_info = alice_group
+            .export_group_info(&alice)
+            .expect("export group info");
 
         // Bob (a fresh identity that the owner never added) self-admits by external commit,
         // using ONLY the public GroupInfo. No Welcome, no owner participation.
@@ -968,7 +976,11 @@ mod tests {
             .external_commit_join(&group_info)
             .expect("bob self-admits by external commit");
         assert_eq!(bob_group.group_id(), alice_group.group_id());
-        assert_eq!(bob_group.epoch(), 1, "external commit advanced the epoch to 1");
+        assert_eq!(
+            bob_group.epoch(),
+            1,
+            "external commit advanced the epoch to 1"
+        );
 
         // The existing member (Alice) merges Bob's published external commit — the only
         // step that touches the owner, and it is passive message processing, not an admit.
@@ -978,7 +990,9 @@ mod tests {
         assert_eq!(alice_group.epoch(), 1, "alice advanced to the shared epoch");
 
         // Same group, same epoch → they exchange an ENCRYPTED message both ways.
-        let ct = alice_group.send(&alice, b"welcome, self-admitted bob").unwrap();
+        let ct = alice_group
+            .send(&alice, b"welcome, self-admitted bob")
+            .unwrap();
         let got = bob_group.receive(&bob, &ct).unwrap();
         assert_eq!(got.plaintext, b"welcome, self-admitted bob");
         assert_eq!(

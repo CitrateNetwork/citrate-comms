@@ -36,7 +36,14 @@ async fn login(client: &RelayClient, nonce: String, wallet: &EthWallet) -> Walle
     client.authenticate(msg, sig).await.unwrap()
 }
 
-fn env(gid: GroupId, sender: WalletAddress, kind: EnvelopeKind, epoch: u64, ct: &[u8], to: &[WalletAddress]) -> Envelope {
+fn env(
+    gid: GroupId,
+    sender: WalletAddress,
+    kind: EnvelopeKind,
+    epoch: u64,
+    ct: &[u8],
+    to: &[WalletAddress],
+) -> Envelope {
     Envelope {
         group_id: gid,
         epoch: EpochId(epoch),
@@ -72,7 +79,14 @@ async fn over_the_wire_onboard_and_sender_binding() {
             gid,
             mallory.address(),
             None, // alice is the owner / trust anchor
-            env(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome", &[mallory.address()]),
+            env(
+                gid,
+                alice.address(),
+                EnvelopeKind::Welcome,
+                1,
+                b"welcome",
+                &[mallory.address()],
+            ),
             b"rt".to_vec(),
         )
         .await
@@ -80,7 +94,14 @@ async fn over_the_wire_onboard_and_sender_binding() {
 
     // Mallory honestly submits as herself → accepted.
     let seq = mallory_c
-        .submit(env(gid, mallory.address(), EnvelopeKind::Application, 1, b"HONEST", &[alice.address()]))
+        .submit(env(
+            gid,
+            mallory.address(),
+            EnvelopeKind::Application,
+            1,
+            b"HONEST",
+            &[alice.address()],
+        ))
         .await
         .unwrap();
     assert!(seq >= 1, "honest submit accepted with a seq");
@@ -88,7 +109,17 @@ async fn over_the_wire_onboard_and_sender_binding() {
     // FWA-C11-01: Mallory submits an envelope SPOOFING alice as the sender → the relay
     // binds the sender to Mallory's authenticated connection and rejects it.
     let spoof = mallory_c
-        .submit(env(gid, alice.address(), EnvelopeKind::Application, 1, b"FORGED", &[mallory.address()]))
+        .submit(env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Application,
+            1,
+            b"FORGED",
+            &[mallory.address()],
+        ))
         .await;
-    assert!(spoof.is_err(), "spoofed sender must be rejected over the wire, got {spoof:?}");
+    assert!(
+        spoof.is_err(),
+        "spoofed sender must be rejected over the wire, got {spoof:?}"
+    );
 }

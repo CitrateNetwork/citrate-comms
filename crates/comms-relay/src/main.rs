@@ -27,7 +27,10 @@ use comms_relay::ws::RelayServer;
 use comms_relay::DeliveryService;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Non-reversible fingerprint of the admin bearer token for log correlation.
@@ -70,7 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let owner_hex = env::var("CITRATE_COMMS_OWNER")
         .map_err(|_| "set CITRATE_COMMS_OWNER=0x<40 hex> (the workspace owner wallet)")?;
-    let owner = WalletAddress::from_hex(&owner_hex).map_err(|_| "CITRATE_COMMS_OWNER must be a 20-byte hex address")?;
+    let owner = WalletAddress::from_hex(&owner_hex)
+        .map_err(|_| "CITRATE_COMMS_OWNER must be a 20-byte hex address")?;
 
     // At-rest master key source priority (CM2-B-A010):
     //   1. CITRATE_COMMS_MASTER_KEY_FILE — a 0600 file holding the hex key. PREFERRED:
@@ -84,7 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Held in `Zeroizing` so the decoded key is wiped on drop (CM2-B-A009).
     let decode_hex = |hex_key: &str| -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
         let v = zeroize::Zeroizing::new(
-            hex::decode(hex_key.trim().trim_start_matches("0x")).map_err(|_| "master key must be hex".to_string())?,
+            hex::decode(hex_key.trim().trim_start_matches("0x"))
+                .map_err(|_| "master key must be hex".to_string())?,
         );
         let arr: [u8; 32] = v
             .as_slice()
@@ -93,55 +98,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(zeroize::Zeroizing::new(arr))
     };
 
-    let (master, key_source): (zeroize::Zeroizing<[u8; 32]>, String) =
-        if let Ok(path) = env::var("CITRATE_COMMS_MASTER_KEY_FILE") {
-            let contents = std::fs::read_to_string(&path)
-                .map_err(|e| format!("CITRATE_COMMS_MASTER_KEY_FILE {path}: {e}"))?;
-            (decode_hex(&contents)?, format!("key file ({path})"))
-        } else if env::var("CITRATE_COMMS_MASTER_KEY").is_ok() {
-            // Inline env key present — accept it only with an explicit unsafe opt-in.
-            if env::var("CITRATE_COMMS_ALLOW_ENV_KEY").as_deref() != Ok("1") {
-                return Err("CITRATE_COMMS_MASTER_KEY is set inline in the environment (leaks via \
+    let (master, key_source): (zeroize::Zeroizing<[u8; 32]>, String) = if let Ok(path) =
+        env::var("CITRATE_COMMS_MASTER_KEY_FILE")
+    {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("CITRATE_COMMS_MASTER_KEY_FILE {path}: {e}"))?;
+        (decode_hex(&contents)?, format!("key file ({path})"))
+    } else if env::var("CITRATE_COMMS_MASTER_KEY").is_ok() {
+        // Inline env key present — accept it only with an explicit unsafe opt-in.
+        if env::var("CITRATE_COMMS_ALLOW_ENV_KEY").as_deref() != Ok("1") {
+            return Err("CITRATE_COMMS_MASTER_KEY is set inline in the environment (leaks via \
                      /proc/<pid>/environ and to child processes). Use CITRATE_COMMS_MASTER_KEY_FILE \
                      (a 0600 file) or the OS keyring instead, or set CITRATE_COMMS_ALLOW_ENV_KEY=1 \
                      to override for a dev/test run."
                     .into());
-            }
-            let hex_key = env::var("CITRATE_COMMS_MASTER_KEY").unwrap();
-            (decode_hex(&hex_key)?, "environment (explicit, unsafe opt-in)".to_string())
-        } else {
-            let key = keyvault::load_or_create_master_key(
+        }
+        let hex_key = env::var("CITRATE_COMMS_MASTER_KEY").unwrap();
+        (
+            decode_hex(&hex_key)?,
+            "environment (explicit, unsafe opt-in)".to_string(),
+        )
+    } else {
+        let key = keyvault::load_or_create_master_key(
+            keyvault::KEYRING_SERVICE,
+            keyvault::KEYRING_ACCOUNT,
+        )?;
+        (
+            key,
+            format!(
+                "OS keyring ({}/{})",
                 keyvault::KEYRING_SERVICE,
-                keyvault::KEYRING_ACCOUNT,
-            )?;
-            (
-                key,
-                format!("OS keyring ({}/{})", keyvault::KEYRING_SERVICE, keyvault::KEYRING_ACCOUNT),
-            )
-        };
+                keyvault::KEYRING_ACCOUNT
+            ),
+        )
+    };
 
     let service = DeliveryService::open(&data, domain.clone(), owner, *master, now_ms())?;
     let server = RelayServer::new(service);
     let (addr, accept) = server.clone().bind(&bind).await?;
 
     // Bearer-gated, loopback-only admin surface.
-    let admin_bind = env::var("CITRATE_COMMS_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:8788".into());
+    let admin_bind =
+        env::var("CITRATE_COMMS_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:8788".into());
     let mut tok = [0u8; 32];
     getrandom::getrandom(&mut tok).map_err(|_| "failed to generate admin token")?;
     let admin_token = hex::encode(tok);
-    let (admin_addr, _admin) = serve_admin(server.clone(), &admin_bind, admin_token.clone()).await?;
+    let (admin_addr, _admin) =
+        serve_admin(server.clone(), &admin_bind, admin_token.clone()).await?;
 
     eprintln!("citrate-comms relay — serving {domain} on ws://{addr}");
     eprintln!("  owner (RBAC anchor): {}", owner.to_hex());
     eprintln!("  store: {data} (RocksDB + AES-256-GCM at rest)");
     eprintln!("  master key: {key_source}");
     eprintln!("  server-blind: stores ciphertext + routing metadata only; never reads plaintext");
-    eprintln!("  admin: http://{admin_addr} (loopback-only)  GET /health|/status  POST /pause|/resume");
+    eprintln!(
+        "  admin: http://{admin_addr} (loopback-only)  GET /health|/status  POST /pause|/resume"
+    );
     // FWA-C11-07: never print the admin bearer token in cleartext — a journald/log
     // reader would gain admin-surface control. Log only a redacted fingerprint so
     // operators can correlate the running instance; the real token is exported via
     // the CITRATE_COMMS_ADMIN_TOKEN_FILE path below for tooling that needs it.
-    eprintln!("  admin auth: bearer enabled (token fp {})", redact_token(&admin_token));
+    eprintln!(
+        "  admin auth: bearer enabled (token fp {})",
+        redact_token(&admin_token)
+    );
     match env::var("CITRATE_COMMS_ADMIN_TOKEN_FILE") {
         Ok(path) => match write_token_file(&path, &admin_token) {
             Ok(()) => eprintln!("  admin token written to {path} (0600)"),
@@ -152,7 +172,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
     if !addr.ip().is_loopback() {
-        eprintln!("  WARNING: bound to a non-loopback address — ensure TLS termination + access control");
+        eprintln!(
+            "  WARNING: bound to a non-loopback address — ensure TLS termination + access control"
+        );
     }
 
     accept.await?;
@@ -165,18 +187,26 @@ mod fwa_c11_07 {
 
     /// A realistic admin token: 32 random bytes hex-encoded (64 chars), exactly as
     /// generated in `main`.
-    const SAMPLE_TOKEN: &str =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const SAMPLE_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// Regression for FWA-C11-07: the redacted fingerprint must NOT contain the raw
     /// token, must be clearly labeled, and must not be reversible to the token.
     #[test]
     fn redacted_fingerprint_does_not_leak_token() {
         let fp = redact_token(SAMPLE_TOKEN);
-        assert!(!fp.contains(SAMPLE_TOKEN), "redacted log leaked the full token: {fp}");
+        assert!(
+            !fp.contains(SAMPLE_TOKEN),
+            "redacted log leaked the full token: {fp}"
+        );
         // No long run of the token's hex should survive (guard against partial leak).
-        assert!(!fp.contains(&SAMPLE_TOKEN[..16]), "redacted log leaked a token prefix: {fp}");
-        assert!(fp.starts_with("sha256:"), "fingerprint must be clearly labeled: {fp}");
+        assert!(
+            !fp.contains(&SAMPLE_TOKEN[..16]),
+            "redacted log leaked a token prefix: {fp}"
+        );
+        assert!(
+            fp.starts_with("sha256:"),
+            "fingerprint must be clearly labeled: {fp}"
+        );
         // The fingerprint is a 12-hex SHA-256 prefix — far too short to recover 256 bits.
         assert!(fp.contains("len=64"));
     }

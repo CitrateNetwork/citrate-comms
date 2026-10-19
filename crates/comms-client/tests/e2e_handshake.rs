@@ -10,10 +10,14 @@
 //! `DeliveryService`; the WebSocket transport wrapper lands in COMMS-S1.
 
 use comms_core::domain::event::fields as f;
-use comms_core::domain::{DealStage, DomainEvent, DomainStore, EntityId, EntityType, FieldValue, Lamport};
+use comms_core::domain::{
+    DealStage, DomainEvent, DomainStore, EntityId, EntityType, FieldValue, Lamport,
+};
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::MlsMember;
-use comms_proto::{Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID};
+use comms_proto::{
+    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID,
+};
 use comms_relay::{DeliveryService, OffboardRequest};
 
 /// SIWE login helper — mirrors the handshake a client performs on connect.
@@ -72,34 +76,70 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
     let alice_member = MlsMember::new(&alice_wallet.address().0).unwrap();
     let mut alice_group = alice_member.create_group().unwrap();
     let gid = group_id_of(&alice_group);
-    relay.register_group(gid, alice_wallet.address(), 13).unwrap();
+    relay
+        .register_group(gid, alice_wallet.address(), 13)
+        .unwrap();
     assert_eq!(alice_group.epoch(), 0);
 
     // ── 4. Alice pulls Bob's KeyPackage (one-time-use) and adds him. ──
     let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
-    assert_eq!(relay.key_package_count(&bob_wallet.address()), 0, "KeyPackage is one-time-use");
+    assert_eq!(
+        relay.key_package_count(&bob_wallet.address()),
+        0,
+        "KeyPackage is one-time-use"
+    );
 
-    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
-    assert_eq!(alice_group.epoch(), 1, "epoch advances by exactly 1 (MonotoneEpoch)");
+    let add = alice_group
+        .add(&alice_member, &bobs_kp.key_package)
+        .unwrap();
+    assert_eq!(
+        alice_group.epoch(),
+        1,
+        "epoch advances by exactly 1 (MonotoneEpoch)"
+    );
 
     // The Commit goes to existing members (none besides Alice here) for ordering/audit.
     let commit_env = Envelope {
-        group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
-        sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit.clone(), group_seq: None,
+        group_id: gid,
+        epoch: EpochId(1),
+        kind: EnvelopeKind::Commit,
+        sender: alice_wallet.address(),
+        recipients: vec![],
+        ciphertext: add.commit.clone(),
+        group_seq: None,
     };
-    relay.submit_as(alice_wallet.address(), commit_env, 14).unwrap();
+    relay
+        .submit_as(alice_wallet.address(), commit_env, 14)
+        .unwrap();
 
     // Onboard Bob: roster update + Welcome delivered to his mailbox + public ratchet tree.
     let welcome_env = Envelope {
-        group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
-        sender: alice_wallet.address(), recipients: vec![bob_wallet.address()],
-        ciphertext: add.welcome.clone(), group_seq: None,
+        group_id: gid,
+        epoch: EpochId(1),
+        kind: EnvelopeKind::Welcome,
+        sender: alice_wallet.address(),
+        recipients: vec![bob_wallet.address()],
+        ciphertext: add.welcome.clone(),
+        group_seq: None,
     };
-    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome_env, add.ratchet_tree.clone(), 15).unwrap();
+    relay
+        .onboard(
+            gid,
+            alice_wallet.address(),
+            None,
+            bob_wallet.address(),
+            welcome_env,
+            add.ratchet_tree.clone(),
+            15,
+        )
+        .unwrap();
 
     // ── 5. Bob joins from his Welcome + the relay's public ratchet tree. ──
     let inbox = relay.fetch(&bob_wallet.address());
-    let welcome = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).expect("welcome delivered");
+    let welcome = inbox
+        .iter()
+        .find(|e| e.kind == EnvelopeKind::Welcome)
+        .expect("welcome delivered");
     let ratchet_tree = relay.ratchet_tree(&gid).unwrap().to_vec();
     let mut bob_group = bob_member.join(&welcome.ciphertext, &ratchet_tree).unwrap();
     assert_eq!(bob_group.group_id(), alice_group.group_id());
@@ -109,26 +149,52 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
     let plaintext = b"deal with Acme closes Friday; loop in @crm-agent";
     let ciphertext = alice_group.send(&alice_member, plaintext).unwrap();
     let app_env = Envelope {
-        group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application,
-        sender: alice_wallet.address(), recipients: vec![bob_wallet.address()],
-        ciphertext: ciphertext.clone(), group_seq: None,
+        group_id: gid,
+        epoch: EpochId(1),
+        kind: EnvelopeKind::Application,
+        sender: alice_wallet.address(),
+        recipients: vec![bob_wallet.address()],
+        ciphertext: ciphertext.clone(),
+        group_seq: None,
     };
-    let seq = relay.submit_as(alice_wallet.address(), app_env, 16).unwrap();
+    let seq = relay
+        .submit_as(alice_wallet.address(), app_env, 16)
+        .unwrap();
     // Order so far: Commit(0), Welcome(1, via onboard), Application(2).
-    assert_eq!(seq, 2, "third accepted envelope in the group gets group_seq 2");
+    assert_eq!(
+        seq, 2,
+        "third accepted envelope in the group gets group_seq 2"
+    );
 
     // Bob fetches and decrypts.
     let inbox = relay.fetch(&bob_wallet.address());
-    let app = inbox.iter().find(|e| e.kind == EnvelopeKind::Application).expect("app delivered");
+    let app = inbox
+        .iter()
+        .find(|e| e.kind == EnvelopeKind::Application)
+        .expect("app delivered");
     let decrypted = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
-    assert_eq!(decrypted.plaintext, plaintext, "Bob decrypts Alice's message");
+    assert_eq!(
+        decrypted.plaintext, plaintext,
+        "Bob decrypts Alice's message"
+    );
 
     // ── 7. The server-blind invariant: the relay's durable store is ciphertext-only. ──
     let log = relay.group_log(&gid).unwrap();
-    assert_eq!(log.len(), 3, "relay stored the Commit + Welcome + Application envelopes");
+    assert_eq!(
+        log.len(),
+        3,
+        "relay stored the Commit + Welcome + Application envelopes"
+    );
     for e in log {
-        assert_ne!(e.ciphertext.as_slice(), plaintext, "relay never stores plaintext");
-        assert!(e.group_seq.is_some(), "every stored envelope has a total-order seq");
+        assert_ne!(
+            e.ciphertext.as_slice(),
+            plaintext,
+            "relay never stores plaintext"
+        );
+        assert!(
+            e.group_seq.is_some(),
+            "every stored envelope has a total-order seq"
+        );
     }
     // The MLS ciphertext on the wire is genuinely not the plaintext.
     assert_ne!(ciphertext.as_slice(), plaintext);
@@ -142,7 +208,10 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
 
     // Audit recorded the metadata events (group create, key package, member add, receipts) — never content.
     let n = relay.audit().len();
-    assert!(n >= 5, "expected genesis + group + kp + member-add + >=2 receipts, got {n}");
+    assert!(
+        n >= 5,
+        "expected genesis + group + kp + member-add + >=2 receipts, got {n}"
+    );
 }
 
 /// COMMS-S1 (WP-1.3) — atomic offboard. An owner removes a member; from the next
@@ -166,7 +235,9 @@ fn offboard_atomically_revokes_role_and_future_access() {
                 wallet: bob_wallet.address(),
                 key_package: bob_member.fresh_key_package().unwrap(),
                 mls_sig_pubkey: bob_sig_pub.clone(),
-                binding_attestation: bob_wallet.sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce).to_vec(),
+                binding_attestation: bob_wallet
+                    .sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce)
+                    .to_vec(),
                 nonce: pub_nonce,
                 relay_domain: relay.domain().to_string(),
             },
@@ -177,55 +248,106 @@ fn offboard_atomically_revokes_role_and_future_access() {
     let alice_member = MlsMember::new(&alice_wallet.address().0).unwrap();
     let mut alice_group = alice_member.create_group().unwrap();
     let gid = group_id_of(&alice_group);
-    relay.register_group(gid, alice_wallet.address(), 13).unwrap();
+    relay
+        .register_group(gid, alice_wallet.address(), 13)
+        .unwrap();
 
     let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
-    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
+    let add = alice_group
+        .add(&alice_member, &bobs_kp.key_package)
+        .unwrap();
     relay
-        .submit_as(alice_wallet.address(), 
-            Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
-                sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None },
+        .submit_as(
+            alice_wallet.address(),
+            Envelope {
+                group_id: gid,
+                epoch: EpochId(1),
+                kind: EnvelopeKind::Commit,
+                sender: alice_wallet.address(),
+                recipients: vec![],
+                ciphertext: add.commit,
+                group_seq: None,
+            },
             14,
         )
         .unwrap();
-    let welcome_env = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
-        sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
-    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome_env, add.ratchet_tree, 15).unwrap();
+    let welcome_env = Envelope {
+        group_id: gid,
+        epoch: EpochId(1),
+        kind: EnvelopeKind::Welcome,
+        sender: alice_wallet.address(),
+        recipients: vec![bob_wallet.address()],
+        ciphertext: add.welcome,
+        group_seq: None,
+    };
+    relay
+        .onboard(
+            gid,
+            alice_wallet.address(),
+            None,
+            bob_wallet.address(),
+            welcome_env,
+            add.ratchet_tree,
+            15,
+        )
+        .unwrap();
     let inbox = relay.fetch(&bob_wallet.address());
-    let welcome = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
+    let welcome = inbox
+        .iter()
+        .find(|e| e.kind == EnvelopeKind::Welcome)
+        .unwrap();
     let ratchet_tree = relay.ratchet_tree(&gid).unwrap().to_vec();
     let mut bob_group = bob_member.join(&welcome.ciphertext, &ratchet_tree).unwrap();
 
     // Pre-offboard: Bob can read.
     let ct1 = alice_group.send(&alice_member, b"before offboard").unwrap();
-    assert_eq!(bob_group.receive(&bob_member, &ct1).unwrap().plaintext, b"before offboard");
+    assert_eq!(
+        bob_group.receive(&bob_member, &ct1).unwrap().plaintext,
+        b"before offboard"
+    );
 
     // ── OFFBOARD: Alice removes Bob (MLS Remove → epoch 2), then the relay applies it atomically. ──
-    let bob_leaf = alice_group.member_index_by_sig(&bob_sig_pub).expect("bob is a member");
+    let bob_leaf = alice_group
+        .member_index_by_sig(&bob_sig_pub)
+        .expect("bob is a member");
     let removal = alice_group.remove(&alice_member, bob_leaf).unwrap();
     assert_eq!(alice_group.epoch(), 2, "remove commit advances the epoch");
 
-    let remove_commit = Envelope { group_id: gid, epoch: EpochId(2), kind: EnvelopeKind::Commit,
-        sender: alice_wallet.address(), recipients: vec![], ciphertext: removal.commit, group_seq: None };
+    let remove_commit = Envelope {
+        group_id: gid,
+        epoch: EpochId(2),
+        kind: EnvelopeKind::Commit,
+        sender: alice_wallet.address(),
+        recipients: vec![],
+        ciphertext: removal.commit,
+        group_seq: None,
+    };
     // Alice is the owner → no assertion needed (the trust anchor).
-    relay.offboard(
-        OffboardRequest {
-            group_id: gid,
-            admin: alice_wallet.address(),
-            admin_assertion: None,
-            removed: bob_wallet.address(),
-            remove_commit,
-            ratchet_tree: removal.ratchet_tree,
-        },
-        16,
-    ).unwrap();
+    relay
+        .offboard(
+            OffboardRequest {
+                group_id: gid,
+                admin: alice_wallet.address(),
+                admin_assertion: None,
+                removed: bob_wallet.address(),
+                remove_commit,
+                ratchet_tree: removal.ratchet_tree,
+            },
+            16,
+        )
+        .unwrap();
 
     // Bob is off the roster.
     let members = relay.group_members(&gid).unwrap();
-    assert!(!members.contains(&bob_wallet.address()), "removed member is off the roster");
+    assert!(
+        !members.contains(&bob_wallet.address()),
+        "removed member is off the roster"
+    );
 
     // ── Forward security: a post-offboard message cannot be decrypted by Bob. ──
-    let ct2 = alice_group.send(&alice_member, b"after offboard - confidential").unwrap();
+    let ct2 = alice_group
+        .send(&alice_member, b"after offboard - confidential")
+        .unwrap();
     assert!(
         bob_group.receive(&bob_member, &ct2).is_err(),
         "removed member must not decrypt messages from the new epoch"
@@ -233,11 +355,20 @@ fn offboard_atomically_revokes_role_and_future_access() {
 
     // Audit recorded the offboard (MemberRemoved + RoleRevoked) and still verifies.
     relay.audit().verify_integrity().unwrap();
-    let saw_removed = relay.audit().records().iter().any(|r| matches!(
-        r.event, comms_proto::AuditEvent::MemberRemoved { .. }));
-    let saw_revoked = relay.audit().records().iter().any(|r| matches!(
-        r.event, comms_proto::AuditEvent::RoleRevoked { .. }));
-    assert!(saw_removed && saw_revoked, "offboard recorded both member removal and role revocation");
+    let saw_removed = relay
+        .audit()
+        .records()
+        .iter()
+        .any(|r| matches!(r.event, comms_proto::AuditEvent::MemberRemoved { .. }));
+    let saw_revoked = relay
+        .audit()
+        .records()
+        .iter()
+        .any(|r| matches!(r.event, comms_proto::AuditEvent::RoleRevoked { .. }));
+    assert!(
+        saw_removed && saw_revoked,
+        "offboard recorded both member removal and role revocation"
+    );
 }
 
 /// COMMS-S1 (WP-1.8) — a CRM record (a Deal) replicates end-to-end over MLS through
@@ -261,7 +392,9 @@ fn domain_record_replicates_e2e_over_relay() {
                 wallet: bob_wallet.address(),
                 key_package: bob_member.fresh_key_package().unwrap(),
                 mls_sig_pubkey: bob_sig_pub.clone(),
-                binding_attestation: bob_wallet.sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce).to_vec(),
+                binding_attestation: bob_wallet
+                    .sign_binding(&bob_sig_pub, relay.domain(), &pub_nonce)
+                    .to_vec(),
                 nonce: pub_nonce,
                 relay_domain: relay.domain().to_string(),
             },
@@ -271,15 +404,56 @@ fn domain_record_replicates_e2e_over_relay() {
     let alice_member = MlsMember::new(&alice_wallet.address().0).unwrap();
     let mut alice_group = alice_member.create_group().unwrap();
     let gid = group_id_of(&alice_group);
-    relay.register_group(gid, alice_wallet.address(), 13).unwrap();
+    relay
+        .register_group(gid, alice_wallet.address(), 13)
+        .unwrap();
     let bobs_kp = relay.take_key_package(&bob_wallet.address()).unwrap();
-    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
-    relay.submit_as(alice_wallet.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: alice_wallet.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, 14).unwrap();
-    let welcome = Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext: add.welcome, group_seq: None };
-    relay.onboard(gid, alice_wallet.address(), None, bob_wallet.address(), welcome, add.ratchet_tree.clone(), 15).unwrap();
+    let add = alice_group
+        .add(&alice_member, &bobs_kp.key_package)
+        .unwrap();
+    relay
+        .submit_as(
+            alice_wallet.address(),
+            Envelope {
+                group_id: gid,
+                epoch: EpochId(1),
+                kind: EnvelopeKind::Commit,
+                sender: alice_wallet.address(),
+                recipients: vec![],
+                ciphertext: add.commit,
+                group_seq: None,
+            },
+            14,
+        )
+        .unwrap();
+    let welcome = Envelope {
+        group_id: gid,
+        epoch: EpochId(1),
+        kind: EnvelopeKind::Welcome,
+        sender: alice_wallet.address(),
+        recipients: vec![bob_wallet.address()],
+        ciphertext: add.welcome,
+        group_seq: None,
+    };
+    relay
+        .onboard(
+            gid,
+            alice_wallet.address(),
+            None,
+            bob_wallet.address(),
+            welcome,
+            add.ratchet_tree.clone(),
+            15,
+        )
+        .unwrap();
     let inbox = relay.fetch(&bob_wallet.address());
-    let w = inbox.iter().find(|e| e.kind == EnvelopeKind::Welcome).unwrap();
-    let mut bob_group = bob_member.join(&w.ciphertext, relay.ratchet_tree(&gid).unwrap()).unwrap();
+    let w = inbox
+        .iter()
+        .find(|e| e.kind == EnvelopeKind::Welcome)
+        .unwrap();
+    let mut bob_group = bob_member
+        .join(&w.ciphertext, relay.ratchet_tree(&gid).unwrap())
+        .unwrap();
 
     // ── Alice creates a Deal (a domain event), MLS-encrypts it, and submits. ──
     let deal_id = EntityId([42; 16]);
@@ -292,24 +466,48 @@ fn domain_record_replicates_e2e_over_relay() {
             (f::STAGE.into(), FieldValue::Tag("Proposal".into())),
             (f::VALUE.into(), FieldValue::Money(2_500_000)),
         ],
-        Lamport { counter: 1, actor: alice_wallet.address() },
+        Lamport {
+            counter: 1,
+            actor: alice_wallet.address(),
+        },
     );
     let payload = ev.encode().unwrap();
     let ciphertext = alice_group.send(&alice_member, &payload).unwrap();
-    relay.submit_as(alice_wallet.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: alice_wallet.address(), recipients: vec![bob_wallet.address()], ciphertext, group_seq: None }, 16).unwrap();
+    relay
+        .submit_as(
+            alice_wallet.address(),
+            Envelope {
+                group_id: gid,
+                epoch: EpochId(1),
+                kind: EnvelopeKind::Application,
+                sender: alice_wallet.address(),
+                recipients: vec![bob_wallet.address()],
+                ciphertext,
+                group_seq: None,
+            },
+            16,
+        )
+        .unwrap();
 
     let mut alice_store = DomainStore::new();
     alice_store.apply(&ev);
 
     // ── Bob receives, decrypts, decodes, and folds — converging on the same Deal. ──
     let inbox = relay.fetch(&bob_wallet.address());
-    let app = inbox.iter().find(|e| e.kind == EnvelopeKind::Application).unwrap();
+    let app = inbox
+        .iter()
+        .find(|e| e.kind == EnvelopeKind::Application)
+        .unwrap();
     let plain = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
     let bob_ev = DomainEvent::decode(&plain.plaintext).unwrap();
     let mut bob_store = DomainStore::new();
     bob_store.apply(&bob_ev);
 
-    assert_eq!(alice_store.deal(deal_id), bob_store.deal(deal_id), "both members converge on the Deal");
+    assert_eq!(
+        alice_store.deal(deal_id),
+        bob_store.deal(deal_id),
+        "both members converge on the Deal"
+    );
     let d = bob_store.deal(deal_id).unwrap();
     assert_eq!(d.name, "Acme Corp - Q3");
     assert_eq!(d.stage, DealStage::Proposal);

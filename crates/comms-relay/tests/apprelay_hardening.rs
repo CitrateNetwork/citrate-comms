@@ -39,7 +39,14 @@ async fn login(client: &RelayClient, nonce: String, wallet: &EthWallet) -> Walle
     client.authenticate(msg, sig).await.unwrap()
 }
 
-fn env(gid: GroupId, sender: WalletAddress, kind: EnvelopeKind, epoch: u64, ct: &[u8], to: &[WalletAddress]) -> Envelope {
+fn env(
+    gid: GroupId,
+    sender: WalletAddress,
+    kind: EnvelopeKind,
+    epoch: u64,
+    ct: &[u8],
+    to: &[WalletAddress],
+) -> Envelope {
     Envelope {
         group_id: gid,
         epoch: EpochId(epoch),
@@ -104,7 +111,14 @@ async fn submit_rejects_non_member_recipients_and_oversized_fanout() {
     // A recipient who is not a member of the group must be rejected (no mailbox
     // placement into arbitrary wallets).
     let outsider = EthWallet::generate().address();
-    let e1 = env(gid, alice_addr, EnvelopeKind::Application, 0, b"hi", &[outsider]);
+    let e1 = env(
+        gid,
+        alice_addr,
+        EnvelopeKind::Application,
+        0,
+        b"hi",
+        &[outsider],
+    );
     assert!(
         alice_c.submit(e1).await.is_err(),
         "submit with a non-member recipient must be rejected"
@@ -120,8 +134,18 @@ async fn submit_rejects_non_member_recipients_and_oversized_fanout() {
     );
 
     // Sanity: a well-formed submit to a member recipient still works.
-    let e3 = env(gid, alice_addr, EnvelopeKind::Application, 0, b"hi", &[alice_addr]);
-    assert!(alice_c.submit(e3).await.is_ok(), "a valid submit must still succeed");
+    let e3 = env(
+        gid,
+        alice_addr,
+        EnvelopeKind::Application,
+        0,
+        b"hi",
+        &[alice_addr],
+    );
+    assert!(
+        alice_c.submit(e3).await.is_ok(),
+        "a valid submit must still succeed"
+    );
 }
 
 // ─────────────────────────── CM2-B-B009 ───────────────────────────
@@ -138,5 +162,8 @@ async fn unauthenticated_challenge_flood_is_capped() {
             refused += 1;
         }
     }
-    assert!(refused > 0, "the relay must cap per-connection challenge requests");
+    assert!(
+        refused > 0,
+        "the relay must cap per-connection challenge requests"
+    );
 }

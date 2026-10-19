@@ -17,7 +17,9 @@ const DOMAIN: &str = "relay.citrate.ai";
 /// lets us read to EOF without parsing content-length.
 async fn http(addr: SocketAddr, method: &str, path: &str, bearer: Option<&str>) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let auth = bearer.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    let auth = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n"
     );
@@ -40,7 +42,9 @@ async fn admin_surface_health_auth_pause_resume() {
     let service = DeliveryService::new(DOMAIN, owner.address(), 0).unwrap();
     let server = RelayServer::new(service);
     let token = "s3cr3t-admin-token";
-    let (admin, _h) = serve_admin(server.clone(), "127.0.0.1:0", token.into()).await.unwrap();
+    let (admin, _h) = serve_admin(server.clone(), "127.0.0.1:0", token.into())
+        .await
+        .unwrap();
 
     // /health is unauthenticated (loopback-only already limits exposure) → 200 JSON.
     let (s, body) = http(admin, "GET", "/health", None).await;
@@ -90,7 +94,9 @@ async fn paused_relay_rejects_mutations_over_ws() {
     let (ws_addr, _accept) = server.clone().bind("127.0.0.1:0").await.unwrap();
 
     // Connect + authenticate as the owner.
-    let (client, nonce) = RelayClient::connect(&format!("ws://{ws_addr}")).await.unwrap();
+    let (client, nonce) = RelayClient::connect(&format!("ws://{ws_addr}"))
+        .await
+        .unwrap();
     let msg = SiweMessage {
         domain: DOMAIN.into(),
         address: owner.address(),
@@ -114,19 +120,32 @@ async fn paused_relay_rejects_mutations_over_ws() {
     // A mutating op is now rejected (the pause gate fires before any group logic).
     let err = client
         .submit(Envelope {
-            group_id: gid, epoch: EpochId(0), kind: EnvelopeKind::Application,
-            sender: owner.address(), recipients: vec![], ciphertext: b"x".to_vec(), group_seq: None,
+            group_id: gid,
+            epoch: EpochId(0),
+            kind: EnvelopeKind::Application,
+            sender: owner.address(),
+            recipients: vec![],
+            ciphertext: b"x".to_vec(),
+            group_seq: None,
         })
         .await
         .unwrap_err();
-    assert!(matches!(err, WsError::Server(ref m) if m.contains("paused")), "got {err:?}");
+    assert!(
+        matches!(err, WsError::Server(ref m) if m.contains("paused")),
+        "got {err:?}"
+    );
 
     // After resume, mutations are accepted again.
     server.set_paused(false);
     client
         .submit(Envelope {
-            group_id: gid, epoch: EpochId(0), kind: EnvelopeKind::Application,
-            sender: owner.address(), recipients: vec![], ciphertext: b"x".to_vec(), group_seq: None,
+            group_id: gid,
+            epoch: EpochId(0),
+            kind: EnvelopeKind::Application,
+            sender: owner.address(),
+            recipients: vec![],
+            ciphertext: b"x".to_vec(),
+            group_seq: None,
         })
         .await
         .unwrap();

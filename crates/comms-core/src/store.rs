@@ -64,8 +64,12 @@ impl EncryptedStore {
             .iter()
             .map(|n| ColumnFamilyDescriptor::new(*n, Options::default()))
             .collect::<Vec<_>>();
-        let db = DB::open_cf_descriptors(&opts, path, cfs).map_err(|e| StoreError::Db(e.to_string()))?;
-        Ok(Self { db, master: Zeroizing::new(master) })
+        let db =
+            DB::open_cf_descriptors(&opts, path, cfs).map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(Self {
+            db,
+            master: Zeroizing::new(master),
+        })
     }
 
     fn cipher(&self, cf: &str) -> Aes256GcmSiv {
@@ -88,18 +92,30 @@ impl EncryptedStore {
         getrandom::getrandom(&mut nonce).map_err(|_| StoreError::Rng)?;
         let ct = self
             .cipher(cf)
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: cf.as_bytes() })
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: cf.as_bytes(),
+                },
+            )
             .map_err(|_| StoreError::Crypto)?;
         let mut val = Vec::with_capacity(12 + ct.len());
         val.extend_from_slice(&nonce);
         val.extend_from_slice(&ct);
-        self.db.put_cf(handle, key, val).map_err(|e| StoreError::Db(e.to_string()))
+        self.db
+            .put_cf(handle, key, val)
+            .map_err(|e| StoreError::Db(e.to_string()))
     }
 
     /// Fetch + decrypt the value under `key` in `cf`.
     pub fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let handle = self.db.cf_handle(cf).ok_or(StoreError::NoCf)?;
-        match self.db.get_cf(handle, key).map_err(|e| StoreError::Db(e.to_string()))? {
+        match self
+            .db
+            .get_cf(handle, key)
+            .map_err(|e| StoreError::Db(e.to_string()))?
+        {
             None => Ok(None),
             Some(v) => Ok(Some(self.decrypt(cf, &v)?)),
         }
@@ -122,7 +138,13 @@ impl EncryptedStore {
         }
         let (nonce, ct) = raw.split_at(12);
         self.cipher(cf)
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: cf.as_bytes() })
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ct,
+                    aad: cf.as_bytes(),
+                },
+            )
             .map_err(|_| StoreError::Crypto)
     }
 }
@@ -234,7 +256,11 @@ mod tests {
 
         let pt1 = b"PLAINTEXT-ONE-secret-deal-with-Acme--";
         let pt2 = b"PLAINTEXT-TWO-other-secret-message-XY";
-        assert_eq!(pt1.len(), pt2.len(), "equal length to expose the keystream-XOR identity");
+        assert_eq!(
+            pt1.len(),
+            pt2.len(),
+            "equal length to expose the keystream-XOR identity"
+        );
 
         let ct1 = cipher.encrypt(nonce, Payload { msg: pt1, aad }).unwrap();
         let ct2 = cipher.encrypt(nonce, Payload { msg: pt2, aad }).unwrap();
@@ -247,13 +273,22 @@ mod tests {
         let pt_xor: Vec<u8> = pt1.iter().zip(pt2).map(|(a, b)| a ^ b).collect();
 
         // The GCM catastrophe: ct1^ct2 == pt1^pt2 (keystream cancels). MUST NOT hold.
-        assert_ne!(ct_xor, pt_xor, "nonce reuse must not leak the plaintext XOR (GCM-SIV resists misuse)");
+        assert_ne!(
+            ct_xor, pt_xor,
+            "nonce reuse must not leak the plaintext XOR (GCM-SIV resists misuse)"
+        );
 
         // Distinct plaintexts under a reused nonce still produce distinct ciphertexts and
         // each decrypts correctly.
         assert_ne!(body1, body2);
-        assert_eq!(cipher.decrypt(nonce, Payload { msg: &ct1, aad }).unwrap(), pt1);
-        assert_eq!(cipher.decrypt(nonce, Payload { msg: &ct2, aad }).unwrap(), pt2);
+        assert_eq!(
+            cipher.decrypt(nonce, Payload { msg: &ct1, aad }).unwrap(),
+            pt1
+        );
+        assert_eq!(
+            cipher.decrypt(nonce, Payload { msg: &ct2, aad }).unwrap(),
+            pt2
+        );
     }
 
     fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
