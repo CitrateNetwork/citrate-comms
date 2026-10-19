@@ -78,6 +78,16 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace path deps (`path = "../x"`, no version) are intra-repo, not registry
+# wildcards; registry and git wildcards stay denied.
+allow-wildcard-paths = true
+# Minimum-version floors for crates whose patched release is not (yet) in the
+# RustSec database, so `advisories` alone would not hold the line. Each entry is a
+# floor, not a pin: any version at or above it passes. Remove an entry once the
+# advisory DB covers it.
+deny = [
+    { crate = "openmls:<0.8.2", reason = "dependency update to the patched release; keep >= 0.8.2" },
+]
 
 [sources]
 unknown-registry = "deny"
