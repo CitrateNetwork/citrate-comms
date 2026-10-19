@@ -777,8 +777,10 @@ impl DeliveryService {
         if self.groups.contains_key(&group_id) {
             return Err(RelayError::GroupExists);
         }
-        let mut state = GroupState::default();
-        state.creator = Some(creator);
+        let mut state = GroupState {
+            creator: Some(creator),
+            ..Default::default()
+        };
         state.members.insert(creator);
         self.groups.insert(group_id, state);
         self.persist_group(&group_id)?;
