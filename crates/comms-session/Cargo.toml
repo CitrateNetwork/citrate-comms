@@ -23,3 +23,6 @@ rustls = { version = "0.23", features = ["ring"] }
 [dev-dependencies]
 tokio = { workspace = true }
 comms-relay = { path = "../comms-relay" }
+# Loopback rewriting proxy in tests/untrusted_relay.rs (the relay is untrusted).
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
