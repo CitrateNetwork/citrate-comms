@@ -31,7 +31,10 @@ fn run_relay(tmp: &Path, extra: &[(&str, String)]) -> Output {
 #[test]
 fn inline_env_master_key_is_refused_without_the_opt_in() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_relay(tmp.path(), &[("CITRATE_COMMS_MASTER_KEY", DUMMY_KEY.into())]);
+    let out = run_relay(
+        tmp.path(),
+        &[("CITRATE_COMMS_MASTER_KEY", DUMMY_KEY.into())],
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
@@ -52,7 +55,10 @@ fn master_key_file_takes_priority_over_an_inline_key() {
     let out = run_relay(
         tmp.path(),
         &[
-            ("CITRATE_COMMS_MASTER_KEY_FILE", missing.display().to_string()),
+            (
+                "CITRATE_COMMS_MASTER_KEY_FILE",
+                missing.display().to_string(),
+            ),
             ("CITRATE_COMMS_MASTER_KEY", DUMMY_KEY.into()),
             ("CITRATE_COMMS_ALLOW_ENV_KEY", "1".into()),
         ],
@@ -79,7 +85,16 @@ fn inline_env_master_key_is_accepted_with_the_opt_in() {
         ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "the unusable bind address must stop startup");
-    assert!(!stderr.contains("is set inline"), "opt-in must not be refused: {stderr}");
-    assert!(tmp.path().join("data").exists(), "startup must have reached the store");
+    assert!(
+        !out.status.success(),
+        "the unusable bind address must stop startup"
+    );
+    assert!(
+        !stderr.contains("is set inline"),
+        "opt-in must not be refused: {stderr}"
+    );
+    assert!(
+        tmp.path().join("data").exists(),
+        "startup must have reached the store"
+    );
 }

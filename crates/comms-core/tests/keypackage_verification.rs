@@ -40,7 +40,8 @@ fn a_consistent_publication_for_another_wallet_is_refused_as_the_wrong_wallet() 
     let bob = EthWallet::generate();
     let carol = EthWallet::generate();
     let carols = publication(&carol, &carol.address().0);
-    verify_incoming_key_package(&carols, &carol.address()).expect("control: valid for its own wallet");
+    verify_incoming_key_package(&carols, &carol.address())
+        .expect("control: valid for its own wallet");
 
     let msg = binding_message(verify_incoming_key_package(&carols, &bob.address()).unwrap_err());
     assert!(
@@ -57,7 +58,8 @@ fn a_keypackage_whose_credential_names_another_identity_is_refused() {
     let carol = EthWallet::generate();
     // Bob's wallet attests a key whose MLS credential identity is Carol's address.
     let mismatched = publication(&bob, &carol.address().0);
-    let msg = binding_message(verify_incoming_key_package(&mismatched, &bob.address()).unwrap_err());
+    let msg =
+        binding_message(verify_incoming_key_package(&mismatched, &bob.address()).unwrap_err());
     assert!(
         msg.contains("credential identity"),
         "the credential-identity check must be what rejects this, got: {msg}"

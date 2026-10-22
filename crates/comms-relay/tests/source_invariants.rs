@@ -31,7 +31,10 @@ fn unwrapped_secret_bindings(src: &str, names: &[&str]) -> Vec<String> {
 #[test]
 fn member_daemon_wallet_seed_copies_are_wiped() {
     let bad = unwrapped_secret_bindings(DAEMON_MAIN, &["seed_hex", "seed_bytes", "seed"]);
-    assert!(bad.is_empty(), "seed material not held in Zeroizing: {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "seed material not held in Zeroizing: {bad:?}"
+    );
 }
 
 #[test]
@@ -88,10 +91,19 @@ fn world_readable_secret_writes(script: &str) -> Vec<String> {
 
 #[test]
 fn bootstrap_creates_key_and_env_files_owner_only() {
-    assert!(BOOTSTRAP.contains("openssl rand"), "bootstrap no longer generates the key here");
-    assert!(BOOTSTRAP.contains(">\"$PREFIX/.env\""), "bootstrap no longer writes the env file here");
+    assert!(
+        BOOTSTRAP.contains("openssl rand"),
+        "bootstrap no longer generates the key here"
+    );
+    assert!(
+        BOOTSTRAP.contains(">\"$PREFIX/.env\""),
+        "bootstrap no longer writes the env file here"
+    );
     let bad = world_readable_secret_writes(BOOTSTRAP);
-    assert!(bad.is_empty(), "secret files written without umask 077: {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "secret files written without umask 077: {bad:?}"
+    );
 }
 
 #[test]
@@ -117,11 +129,20 @@ fn non_siv_gcm_uses(src: &str) -> usize {
 
 #[test]
 fn at_rest_store_uses_aes_gcm_siv_only() {
-    assert!(STORE.contains("Aes256GcmSiv::new("), "the store must construct AES-256-GCM-SIV");
-    assert_eq!(non_siv_gcm_uses(STORE), 0, "the store must not use plain AES-256-GCM");
     assert!(
-        !CORE_MANIFEST.lines().any(|l| l.trim_start().starts_with("aes-gcm ")
-            || l.trim_start().starts_with("aes-gcm=")),
+        STORE.contains("Aes256GcmSiv::new("),
+        "the store must construct AES-256-GCM-SIV"
+    );
+    assert_eq!(
+        non_siv_gcm_uses(STORE),
+        0,
+        "the store must not use plain AES-256-GCM"
+    );
+    assert!(
+        !CORE_MANIFEST
+            .lines()
+            .any(|l| l.trim_start().starts_with("aes-gcm ")
+                || l.trim_start().starts_with("aes-gcm=")),
         "comms-core must not depend on the plain aes-gcm crate"
     );
 }

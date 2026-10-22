@@ -75,7 +75,12 @@ fn env(
 
 /// A KeyPackage publication for `wallet`, attested by `signer` over `nonce`. The relay
 /// does not parse MLS bytes, so the package body is an opaque marker.
-fn publication(wallet: &EthWallet, signer: &EthWallet, nonce: &str, tag: u8) -> KeyPackagePublication {
+fn publication(
+    wallet: &EthWallet,
+    signer: &EthWallet,
+    nonce: &str,
+    tag: u8,
+) -> KeyPackagePublication {
     let mls_sig_pubkey = vec![tag; 32];
     KeyPackagePublication {
         wallet: wallet.address(),
@@ -189,7 +194,10 @@ async fn ws_oversized_inbound_message_closes_the_connection() {
         next_server_frame(&mut read).await,
         Some(ServerFrame::Challenge { .. })
     ));
-    write.send(Message::binary(vec![0xFFu8; 1024])).await.unwrap();
+    write
+        .send(Message::binary(vec![0xFFu8; 1024]))
+        .await
+        .unwrap();
     let reply = tokio::time::timeout(Duration::from_secs(10), next_server_frame(&mut read))
         .await
         .expect("relay answers a small message");
@@ -205,7 +213,9 @@ async fn ws_oversized_inbound_message_closes_the_connection() {
         next_server_frame(&mut read).await,
         Some(ServerFrame::Challenge { .. })
     ));
-    let _ = write.send(Message::binary(vec![0xFFu8; 3 * 1024 * 1024])).await;
+    let _ = write
+        .send(Message::binary(vec![0xFFu8; 3 * 1024 * 1024]))
+        .await;
     let after = tokio::time::timeout(Duration::from_secs(20), next_server_frame(&mut read))
         .await
         .expect("relay must close the connection promptly");
@@ -234,24 +244,48 @@ fn identical_commit_resubmission_is_idempotent() {
             alice.address(),
             None,
             bob.address(),
-            env(gid, alice.address(), EnvelopeKind::Welcome, 0, b"w", &[bob.address()]),
+            env(
+                gid,
+                alice.address(),
+                EnvelopeKind::Welcome,
+                0,
+                b"w",
+                &[bob.address()],
+            ),
             b"rt".to_vec(),
             3,
         )
         .unwrap();
     let _ = relay.fetch(&bob.address());
 
-    let commit = env(gid, alice.address(), EnvelopeKind::Commit, 1, b"commit-1", &[bob.address()]);
+    let commit = env(
+        gid,
+        alice.address(),
+        EnvelopeKind::Commit,
+        1,
+        b"commit-1",
+        &[bob.address()],
+    );
     let seq = relay.submit_as(alice.address(), commit.clone(), 4).unwrap();
     let log_len = relay.group_log(&gid).unwrap().len();
     let audit_len = relay.audit().len();
     assert_eq!(relay.fetch(&bob.address()).len(), 1);
 
     let again = relay.submit_as(alice.address(), commit, 5).unwrap();
-    assert_eq!(again, seq, "a replayed Commit must return the original sequence number");
-    assert_eq!(relay.group_log(&gid).unwrap().len(), log_len, "no second log entry");
+    assert_eq!(
+        again, seq,
+        "a replayed Commit must return the original sequence number"
+    );
+    assert_eq!(
+        relay.group_log(&gid).unwrap().len(),
+        log_len,
+        "no second log entry"
+    );
     assert_eq!(relay.audit().len(), audit_len, "no second audit record");
-    assert!(relay.fetch(&bob.address()).is_empty(), "no duplicate delivery");
+    assert!(
+        relay.fetch(&bob.address()).is_empty(),
+        "no duplicate delivery"
+    );
 }
 
 /// The per-wallet KeyPackage directory is capped.
@@ -268,7 +302,10 @@ fn key_package_directory_is_capped_per_wallet() {
             Ok(_) => accepted += 1,
             Err(e) => break e,
         }
-        assert!(accepted <= 1024, "the directory accepted {accepted} packages without a cap");
+        assert!(
+            accepted <= 1024,
+            "the directory accepted {accepted} packages without a cap"
+        );
     };
     assert!(
         matches!(refused, RelayError::KeyPackageQuotaExceeded { max } if max == accepted),
@@ -294,7 +331,14 @@ fn offboard_ends_the_removed_members_session() {
             alice.address(),
             None,
             bob.address(),
-            env(gid, alice.address(), EnvelopeKind::Welcome, 0, b"w", &[bob.address()]),
+            env(
+                gid,
+                alice.address(),
+                EnvelopeKind::Welcome,
+                0,
+                b"w",
+                &[bob.address()],
+            ),
             b"rt".to_vec(),
             3,
         )
@@ -321,7 +365,10 @@ fn offboard_ends_the_removed_members_session() {
     assert!(relay.has_session(&alice.address()));
     let after = relay.submit_claim(
         &bob.address(),
-        ClaimSubmission { token_hash: [1; 32], ciphertext: vec![1] },
+        ClaimSubmission {
+            token_hash: [1; 32],
+            ciphertext: vec![1],
+        },
     );
     assert!(matches!(after, Err(RelayError::NotAuthenticated)));
 }
@@ -345,7 +392,14 @@ fn onboard_with_a_grant_lacking_add_member_is_refused() {
             owner.address(),
             None,
             delegate.address(),
-            env(gid, owner.address(), EnvelopeKind::Welcome, 0, b"w", &[delegate.address()]),
+            env(
+                gid,
+                owner.address(),
+                EnvelopeKind::Welcome,
+                0,
+                b"w",
+                &[delegate.address()],
+            ),
             b"rt".to_vec(),
             3,
         )
@@ -353,15 +407,28 @@ fn onboard_with_a_grant_lacking_add_member_is_refused() {
 
     let far = now_ms() + 3_600_000;
     for role in [Role::Member, Role::Partner, Role::Guest, Role::Agent] {
-        let grant =
-            rbac::sign_role_assertion(&owner, Role::Owner, delegate.address(), role, Some(gid), Some(far))
-                .unwrap();
+        let grant = rbac::sign_role_assertion(
+            &owner,
+            Role::Owner,
+            delegate.address(),
+            role,
+            Some(gid),
+            Some(far),
+        )
+        .unwrap();
         let r = relay.onboard(
             gid,
             delegate.address(),
             Some(&grant),
             joiner.address(),
-            env(gid, delegate.address(), EnvelopeKind::Welcome, 0, b"w2", &[joiner.address()]),
+            env(
+                gid,
+                delegate.address(),
+                EnvelopeKind::Welcome,
+                0,
+                b"w2",
+                &[joiner.address()],
+            ),
             b"rt-x".to_vec(),
             4,
         );
@@ -369,23 +436,42 @@ fn onboard_with_a_grant_lacking_add_member_is_refused() {
             matches!(r, Err(RelayError::NotAuthorized)),
             "a {role:?} grant must not authorize onboarding, got {r:?}"
         );
-        assert!(!relay.group_members(&gid).unwrap().contains(&joiner.address()));
+        assert!(!relay
+            .group_members(&gid)
+            .unwrap()
+            .contains(&joiner.address()));
     }
 
     // Control: an Admin grant does authorize it.
-    let admin_grant =
-        rbac::sign_role_assertion(&owner, Role::Owner, delegate.address(), Role::Admin, Some(gid), Some(far))
-            .unwrap();
+    let admin_grant = rbac::sign_role_assertion(
+        &owner,
+        Role::Owner,
+        delegate.address(),
+        Role::Admin,
+        Some(gid),
+        Some(far),
+    )
+    .unwrap();
     relay
         .onboard(
             gid,
             delegate.address(),
             Some(&admin_grant),
             joiner.address(),
-            env(gid, delegate.address(), EnvelopeKind::Welcome, 0, b"w3", &[joiner.address()]),
+            env(
+                gid,
+                delegate.address(),
+                EnvelopeKind::Welcome,
+                0,
+                b"w3",
+                &[joiner.address()],
+            ),
             b"rt-y".to_vec(),
             5,
         )
         .unwrap();
-    assert!(relay.group_members(&gid).unwrap().contains(&joiner.address()));
+    assert!(relay
+        .group_members(&gid)
+        .unwrap()
+        .contains(&joiner.address()));
 }
