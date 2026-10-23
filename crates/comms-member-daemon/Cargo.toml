@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "citrate-comms member daemon — runs a wallet-owned MLS member + an in-process server-blind relay, exposing a loopback UDS JSON IPC so a lean client (citrate-core Commons) drives Groups without linking the MLS/relay tree."
 
 [[bin]]

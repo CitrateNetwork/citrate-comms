@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "citrate-comms member session — SIWE login, KeyPackage publication, channel create/join, and encrypted send/receive over a server-blind relay. UI-free, and it never requires the caller to hand over a private key."
 
 [dependencies]
