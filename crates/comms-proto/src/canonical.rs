@@ -25,7 +25,8 @@ pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtoError> {
 /// hashed/signed, so it rejects any residue after the value.
 pub fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtoError> {
     let mut cursor = std::io::Cursor::new(bytes);
-    let value = ciborium::de::from_reader(&mut cursor).map_err(|e| ProtoError::Encode(e.to_string()))?;
+    let value =
+        ciborium::de::from_reader(&mut cursor).map_err(|e| ProtoError::Encode(e.to_string()))?;
     let consumed = cursor.position() as usize;
     if consumed != bytes.len() {
         return Err(ProtoError::Encode(format!(
@@ -92,18 +93,18 @@ mod tests {
         .unwrap();
 
         let mut corpus: Vec<Vec<u8>> = vec![
-            vec![],                              // empty
-            vec![0x00],                          // single byte
-            vec![0xff; 8],                       // garbage
-            good[..good.len() / 2].to_vec(),     // truncated mid-value
-            good[1..].to_vec(),                  // dropped leading byte (frame shift)
+            vec![],                          // empty
+            vec![0x00],                      // single byte
+            vec![0xff; 8],                   // garbage
+            good[..good.len() / 2].to_vec(), // truncated mid-value
+            good[1..].to_vec(),              // dropped leading byte (frame shift)
             {
                 let mut g = good.clone();
                 g.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // trailing garbage
                 g
             },
             vec![0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // array with a giant declared length
-            vec![0xbf; 4096],                    // many indefinite-length map openers (nesting bomb)
+            vec![0xbf; 4096], // many indefinite-length map openers (nesting bomb)
         ];
         // Every single-byte flip of the valid encoding.
         for i in 0..good.len() {

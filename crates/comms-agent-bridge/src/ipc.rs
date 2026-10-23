@@ -25,14 +25,25 @@ mod tests {
 
     #[test]
     fn line_roundtrip_and_tagging() {
-        let ev = AgentInbound::Message { group: "0x4cd1".into(), sender: "0x1f2e".into(), text: "hi".into() };
+        let ev = AgentInbound::Message {
+            group: "0x4cd1".into(),
+            sender: "0x1f2e".into(),
+            text: "hi".into(),
+        };
         let line = to_line(&ev).unwrap();
         assert!(line.ends_with('\n'));
         assert!(line.contains("\"type\":\"message\""));
         assert_eq!(from_line::<AgentInbound>(&line).unwrap(), ev);
 
         // A command the runtime sends back parses by its tag.
-        let cmd: AgentOutbound = from_line("{\"type\":\"send\",\"group\":\"deals\",\"text\":\"ok\"}\n").unwrap();
-        assert_eq!(cmd, AgentOutbound::Send { group: "deals".into(), text: "ok".into() });
+        let cmd: AgentOutbound =
+            from_line("{\"type\":\"send\",\"group\":\"deals\",\"text\":\"ok\"}\n").unwrap();
+        assert_eq!(
+            cmd,
+            AgentOutbound::Send {
+                group: "deals".into(),
+                text: "ok".into()
+            }
+        );
     }
 }

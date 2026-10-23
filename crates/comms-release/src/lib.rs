@@ -71,7 +71,10 @@ impl Manifest {
         let mut artifacts = Vec::with_capacity(files.len());
         for rel in &files {
             let bytes = std::fs::read(staging.join(rel)).map_err(ReleaseError::Io)?;
-            artifacts.push(Artifact { path: rel.clone(), sha256: sha256_hex(&bytes) });
+            artifacts.push(Artifact {
+                path: rel.clone(),
+                sha256: sha256_hex(&bytes),
+            });
         }
 
         let manifest = Manifest {
@@ -102,8 +105,13 @@ impl Manifest {
     /// The canonical bytes that are signed: the manifest TOML with the signature block
     /// omitted. Deterministic (serde struct order + sorted artifacts).
     pub fn signing_bytes(&self) -> Result<Vec<u8>, ReleaseError> {
-        let unsigned = Manifest { signature: None, ..self.clone() };
-        Ok(toml::to_string(&unsigned).map_err(|e| ReleaseError::Toml(e.to_string()))?.into_bytes())
+        let unsigned = Manifest {
+            signature: None,
+            ..self.clone()
+        };
+        Ok(toml::to_string(&unsigned)
+            .map_err(|e| ReleaseError::Toml(e.to_string()))?
+            .into_bytes())
     }
 
     /// Attach an Ed25519 signature over [`signing_bytes`](Self::signing_bytes).
@@ -138,7 +146,8 @@ impl Manifest {
         let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| ReleaseError::BadKey)?;
         let sig = Signature::from_bytes(&sig_bytes);
         let msg = self.signing_bytes()?;
-        vk.verify(&msg, &sig).map_err(|_| ReleaseError::BadSignature)?;
+        vk.verify(&msg, &sig)
+            .map_err(|_| ReleaseError::BadSignature)?;
         Ok(vk)
     }
 
@@ -185,7 +194,11 @@ pub enum ReleaseError {
     #[error("expected artifact `{0}` not found in the staging tree")]
     ExpectMissing(String),
     #[error("reproducibility gate failed for `{path}`: expected {want}, staged {got}")]
-    ExpectMismatch { path: String, want: String, got: String },
+    ExpectMismatch {
+        path: String,
+        want: String,
+        got: String,
+    },
     #[error("manifest is unsigned")]
     Unsigned,
     #[error("unsupported signature algorithm `{0}`")]
@@ -230,18 +243,34 @@ mod tests {
         let dir = staging_with(&[("bin/comms-relay", b"RELAY")]);
         let good = sha256_hex(b"RELAY");
         // Matching hash → ok.
-        assert!(Manifest::build("v1", "g", dir.path(), &[("bin/comms-relay".into(), good.clone())]).is_ok());
+        assert!(Manifest::build(
+            "v1",
+            "g",
+            dir.path(),
+            &[("bin/comms-relay".into(), good.clone())]
+        )
+        .is_ok());
         // Wrong hash → fails closed (the staged binary isn't the gated one).
-        let err = Manifest::build("v1", "g", dir.path(), &[("bin/comms-relay".into(), "dead".into())]).unwrap_err();
+        let err = Manifest::build(
+            "v1",
+            "g",
+            dir.path(),
+            &[("bin/comms-relay".into(), "dead".into())],
+        )
+        .unwrap_err();
         assert!(matches!(err, ReleaseError::ExpectMismatch { .. }));
         // Missing artifact → fails.
-        let err = Manifest::build("v1", "g", dir.path(), &[("bin/ghost".into(), good)]).unwrap_err();
+        let err =
+            Manifest::build("v1", "g", dir.path(), &[("bin/ghost".into(), good)]).unwrap_err();
         assert!(matches!(err, ReleaseError::ExpectMissing(_)));
     }
 
     #[test]
     fn sign_then_verify_roundtrips_and_detects_tampering() {
-        let dir = staging_with(&[("bin/comms-relay", b"RELAY"), ("bin/citrate-comms", b"CLIENT")]);
+        let dir = staging_with(&[
+            ("bin/comms-relay", b"RELAY"),
+            ("bin/citrate-comms", b"CLIENT"),
+        ]);
         let mut m = Manifest::build("v0.1.0", "abc123", dir.path(), &[]).unwrap();
         let key = SigningKey::from_bytes(&[7u8; 32]);
         m.sign(&key).unwrap();

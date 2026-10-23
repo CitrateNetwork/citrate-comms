@@ -777,8 +777,10 @@ impl DeliveryService {
         if self.groups.contains_key(&group_id) {
             return Err(RelayError::GroupExists);
         }
-        let mut state = GroupState::default();
-        state.creator = Some(creator);
+        let mut state = GroupState {
+            creator: Some(creator),
+            ..Default::default()
+        };
         state.members.insert(creator);
         self.groups.insert(group_id, state);
         self.persist_group(&group_id)?;
@@ -1322,13 +1324,25 @@ mod tests {
         let th = [9u8; 32];
         let genuine = b"GENUINE-CONNECT-REQUEST".to_vec();
         relay
-            .submit_claim(&owner.address(), ClaimSubmission { token_hash: th, ciphertext: genuine.clone() })
+            .submit_claim(
+                &owner.address(),
+                ClaimSubmission {
+                    token_hash: th,
+                    ciphertext: genuine.clone(),
+                },
+            )
             .unwrap();
         // Flood with distinct junk well past the cap.
         for i in 0..40u16 {
             let ct = vec![(i & 0xff) as u8; 8 + i as usize];
             relay
-                .submit_claim(&attacker.address(), ClaimSubmission { token_hash: th, ciphertext: ct })
+                .submit_claim(
+                    &attacker.address(),
+                    ClaimSubmission {
+                        token_hash: th,
+                        ciphertext: ct,
+                    },
+                )
                 .unwrap();
         }
         let got = relay.poll_claims(&owner.address(), &th).unwrap();
@@ -1348,13 +1362,22 @@ mod tests {
         login(&mut relay, &owner, 10);
         assert!(relay.has_session(&owner.address()));
         relay
-            .submit_claim(&owner.address(), ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![1] })
+            .submit_claim(
+                &owner.address(),
+                ClaimSubmission {
+                    token_hash: [3u8; 32],
+                    ciphertext: vec![1],
+                },
+            )
             .unwrap();
         relay.end_session(&owner.address());
         assert!(!relay.has_session(&owner.address()));
         let after = relay.submit_claim(
             &owner.address(),
-            ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![2] },
+            ClaimSubmission {
+                token_hash: [3u8; 32],
+                ciphertext: vec![2],
+            },
         );
         assert!(matches!(after, Err(RelayError::NotAuthenticated)));
     }
@@ -1821,7 +1844,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            relay.group_members(&gid).unwrap().contains(&member.address()),
+            relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&member.address()),
             "the group creator must be able to onboard into their own group"
         );
 
@@ -1848,7 +1874,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !relay.group_members(&gid).unwrap().contains(&member.address()),
+            !relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&member.address()),
             "the group creator must be able to offboard from their own group"
         );
     }
@@ -1912,7 +1941,10 @@ mod tests {
             "creator of A must not be authorized in B, got {err:?}"
         );
         assert!(
-            !relay.group_members(&gid_b).unwrap().contains(&victim.address()),
+            !relay
+                .group_members(&gid_b)
+                .unwrap()
+                .contains(&victim.address()),
             "victim must NOT have entered group B's roster"
         );
     }
@@ -2076,7 +2108,10 @@ mod tests {
                 6,
             )
             .unwrap();
-        assert!(relay.group_members(&gid).unwrap().contains(&victim.address()));
+        assert!(relay
+            .group_members(&gid)
+            .unwrap()
+            .contains(&victim.address()));
     }
 
     /// CM2-B-A003 red→green — commit epochs MUST be contiguous. A member cannot
@@ -2277,7 +2312,13 @@ mod tests {
         let token_hash = *blake3::hash(&token).as_bytes();
         let group_info = b"PUBLIC-GROUP-INFO-BLOB".to_vec();
         relay
-            .publish_invite(owner.address(), gid, token_hash, group_info.clone(), u64::MAX)
+            .publish_invite(
+                owner.address(),
+                gid,
+                token_hash,
+                group_info.clone(),
+                u64::MAX,
+            )
             .unwrap();
 
         // First redeem: succeeds, returns the stored GroupInfo, adds the joiner to the roster.
@@ -2286,7 +2327,10 @@ mod tests {
             .expect("first redeem succeeds");
         assert_eq!(gi, group_info, "redeem returns the stored public GroupInfo");
         assert!(
-            relay.group_members(&gid).unwrap().contains(&invitee.address()),
+            relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&invitee.address()),
             "redeemer joins the routing roster"
         );
         // Attribution recorded: inviter -> 1 distinct joiner.
@@ -2301,7 +2345,11 @@ mod tests {
             matches!(err, RelayError::InviteRedeem(RedeemError::Consumed)),
             "second redeem must fail closed as consumed, got {err:?}"
         );
-        assert_eq!(relay.referral_count(), 1, "a refused redeem records no referral");
+        assert_eq!(
+            relay.referral_count(),
+            1,
+            "a refused redeem records no referral"
+        );
     }
 
     #[test]
@@ -2344,8 +2392,13 @@ mod tests {
             .unwrap();
 
         // A non-minter cannot revoke.
-        let denied = relay.revoke_invite(invitee.address(), token_hash).unwrap_err();
-        assert!(matches!(denied, RelayError::NotAuthorized), "got {denied:?}");
+        let denied = relay
+            .revoke_invite(invitee.address(), token_hash)
+            .unwrap_err();
+        assert!(
+            matches!(denied, RelayError::NotAuthorized),
+            "got {denied:?}"
+        );
 
         // The minter revokes → redeem then fails closed.
         relay.revoke_invite(owner.address(), token_hash).unwrap();
@@ -2379,7 +2432,10 @@ mod tests {
         let unknown = relay
             .redeem_invite(invitee.address(), gid, b"never-minted", b"KP", 100)
             .unwrap_err();
-        assert!(matches!(unknown, RelayError::InviteRedeem(RedeemError::UnknownToken)));
+        assert!(matches!(
+            unknown,
+            RelayError::InviteRedeem(RedeemError::UnknownToken)
+        ));
 
         // Known token, WRONG group (group-bound) → UnknownToken (fail closed).
         let wrong_group = relay
@@ -2438,7 +2494,13 @@ mod tests {
             login(&mut relay, &invitee, 11);
             relay.register_group(gid, owner.address(), 12).unwrap();
             relay
-                .publish_invite(owner.address(), gid, token_hash, b"GI-DURABLE".to_vec(), u64::MAX)
+                .publish_invite(
+                    owner.address(),
+                    gid,
+                    token_hash,
+                    b"GI-DURABLE".to_vec(),
+                    u64::MAX,
+                )
                 .unwrap();
             relay
                 .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
@@ -2454,16 +2516,24 @@ mod tests {
             assert_eq!(relay.referral_count(), 1, "referral survived restart");
             assert_eq!(relay.referral_tally(), vec![(owner.address(), 1)]);
             assert!(
-                relay.group_members(&gid).unwrap().contains(&invitee.address()),
+                relay
+                    .group_members(&gid)
+                    .unwrap()
+                    .contains(&invitee.address()),
                 "the redeemer's roster membership survived restart"
             );
         }
 
         // A redeem AFTER restart must still see the invite as consumed (no single-use replay).
         {
-            let mut relay =
-                DeliveryService::open(dir.path(), "relay.citrate.ai", owner.address(), master, 1000)
-                    .unwrap();
+            let mut relay = DeliveryService::open(
+                dir.path(),
+                "relay.citrate.ai",
+                owner.address(),
+                master,
+                1000,
+            )
+            .unwrap();
             login(&mut relay, &invitee, 1001);
             let err = relay
                 .redeem_invite(invitee.address(), gid, &token, b"KP", 1002)

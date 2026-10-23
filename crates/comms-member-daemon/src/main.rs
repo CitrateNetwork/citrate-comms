@@ -39,7 +39,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if bearer.is_empty() {
         return Err("bearer file is empty (fail closed)".into());
     }
-    let domain = env::var("CITRATE_MEMBER_DOMAIN").unwrap_or_else(|_| "relay.citrate.internal".into());
+    let domain =
+        env::var("CITRATE_MEMBER_DOMAIN").unwrap_or_else(|_| "relay.citrate.internal".into());
 
     // Seed: prefer a 0600 FILE (the secret never crosses env/argv, which leak to `ps`), mirroring
     // the bearer. Fall back to the inline CITRATE_MEMBER_SEED for back-compat / tests.

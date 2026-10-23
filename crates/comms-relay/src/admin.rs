@@ -72,10 +72,17 @@ pub async fn serve_admin(
     if !requested.ip().is_loopback() {
         return Err(AdminError::NotLoopback);
     }
-    let listener = TcpListener::bind(requested).await.map_err(|e| AdminError::Io(e.to_string()))?;
-    let addr = listener.local_addr().map_err(|e| AdminError::Io(e.to_string()))?;
+    let listener = TcpListener::bind(requested)
+        .await
+        .map_err(|e| AdminError::Io(e.to_string()))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| AdminError::Io(e.to_string()))?;
 
-    let state = AdminState { server, token: Arc::new(token) };
+    let state = AdminState {
+        server,
+        token: Arc::new(token),
+    };
     let app = Router::new()
         .route("/health", get(health))
         .route("/status", get(status))

@@ -51,9 +51,14 @@ pub fn start(app: &AppWindow) -> Sender<UiCmd> {
     let cfg = Cfg::from_env();
     std::thread::Builder::new()
         .name("comms-net".into())
-        .spawn(move || match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt.block_on(run(weak, cfg, cmd_rx)),
-            Err(e) => eprintln!("citrate-comms: could not start network runtime: {e}"),
+        .spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(run(weak, cfg, cmd_rx)),
+                Err(e) => eprintln!("citrate-comms: could not start network runtime: {e}"),
+            }
         })
         .ok();
     cmd_tx
@@ -72,7 +77,9 @@ impl Cfg {
         Self {
             url: std::env::var("CITRATE_COMMS_RELAY").unwrap_or_else(|_| DEFAULT_RELAY.into()),
             domain: std::env::var("CITRATE_COMMS_DOMAIN").unwrap_or_else(|_| DEFAULT_DOMAIN.into()),
-            peer: std::env::var("CITRATE_COMMS_PEER").ok().filter(|s| !s.is_empty()),
+            peer: std::env::var("CITRATE_COMMS_PEER")
+                .ok()
+                .filter(|s| !s.is_empty()),
             wallet_account: std::env::var("CITRATE_COMMS_WALLET_ACCOUNT")
                 .unwrap_or_else(|_| "client:default:wallet".into()),
             allow_insecure: std::env::var("CITRATE_COMMS_ALLOW_INSECURE_WS").is_ok(),
@@ -104,10 +111,22 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
             return;
         }
     };
-    let mut session = match NetSession::login(&cfg.url, &cfg.domain, Box::new(wallet), now_ms(), cfg.allow_insecure).await {
+    let mut session = match NetSession::login(
+        &cfg.url,
+        &cfg.domain,
+        Box::new(wallet),
+        now_ms(),
+        cfg.allow_insecure,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
-            system(&weak, &mut log, &format!("Could not connect to {}: {e}", cfg.url));
+            system(
+                &weak,
+                &mut log,
+                &format!("Could not connect to {}: {e}", cfg.url),
+            );
             status(&weak, "offline", &endpoint, false);
             return;
         }
@@ -120,8 +139,16 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
     }
     eprintln!("citrate-comms: signed in as {me_hex} on {}", cfg.url);
     status(&weak, "live", &endpoint, true);
-    system(&weak, &mut log, &format!("Signed in. Your address: {me_hex}"));
-    system(&weak, &mut log, "Share it with a teammate, then use Invite to start a channel — or wait to be invited.");
+    system(
+        &weak,
+        &mut log,
+        &format!("Signed in. Your address: {me_hex}"),
+    );
+    system(
+        &weak,
+        &mut log,
+        "Share it with a teammate, then use Invite to start a channel — or wait to be invited.",
+    );
 
     // Convenience: if a peer was pre-set via env (CLI / airgap), create the channel now.
     if let Some(peer_hex) = cfg.peer.clone() {
@@ -181,23 +208,44 @@ async fn run(weak: Weak<AppWindow>, cfg: Cfg, cmd_rx: Receiver<UiCmd>) {
 
 /// Create a channel and invite `addr` (a `0x…` wallet). The peer must have signed in
 /// already (so their KeyPackage is published). Reports progress to the UI.
-async fn create_channel(weak: &Weak<AppWindow>, log: &mut Vec<Line>, session: &mut NetSession, addr: &str) {
+async fn create_channel(
+    weak: &Weak<AppWindow>,
+    log: &mut Vec<Line>,
+    session: &mut NetSession,
+    addr: &str,
+) {
     let addr = addr.trim();
     let peer = match WalletAddress::from_hex(addr) {
         Ok(p) => p,
         Err(_) => {
-            system(weak, log, &format!("\"{addr}\" is not a valid 0x wallet address."));
+            system(
+                weak,
+                log,
+                &format!("\"{addr}\" is not a valid 0x wallet address."),
+            );
             return;
         }
     };
     if session.in_channel() {
-        system(weak, log, "Already in a channel (one channel per session for now).");
+        system(
+            weak,
+            log,
+            "Already in a channel (one channel per session for now).",
+        );
         return;
     }
     system(weak, log, &format!("Inviting {addr} to a new channel…"));
     match session.create_channel(&[peer]).await {
-        Ok(_) => system(weak, log, "Channel created — they'll join automatically when they're online."),
-        Err(e) => system(weak, log, &format!("Couldn't invite them (are they signed in yet?): {e}")),
+        Ok(_) => system(
+            weak,
+            log,
+            "Channel created — they'll join automatically when they're online.",
+        ),
+        Err(e) => system(
+            weak,
+            log,
+            &format!("Couldn't invite them (are they signed in yet?): {e}"),
+        ),
     }
 }
 
@@ -214,7 +262,10 @@ fn load_wallet(account: &str) -> Result<EthWallet, String> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ───────────────────────────── UI rendering ─────────────────────────────
@@ -230,13 +281,28 @@ struct Line {
 
 impl Line {
     fn mine(addr_hex: &str, text: &str) -> Self {
-        Self { author: addr_hex.into(), text: text.into(), system: false, mine: true }
+        Self {
+            author: addr_hex.into(),
+            text: text.into(),
+            system: false,
+            mine: true,
+        }
     }
     fn peer(addr_hex: &str, text: &str) -> Self {
-        Self { author: addr_hex.into(), text: text.into(), system: false, mine: false }
+        Self {
+            author: addr_hex.into(),
+            text: text.into(),
+            system: false,
+            mine: false,
+        }
     }
     fn sys(text: &str) -> Self {
-        Self { author: String::new(), text: text.into(), system: true, mine: false }
+        Self {
+            author: String::new(),
+            text: text.into(),
+            system: true,
+            mine: false,
+        }
     }
 }
 
@@ -274,15 +340,27 @@ fn status(weak: &Weak<AppWindow>, label: &str, endpoint: &str, ok: bool) {
 
 fn line_to_msg(l: &Line) -> Msg {
     let (author, initials, tint) = if l.system {
-        ("citrate-comms".to_string(), "··".to_string(), (140, 140, 140))
+        (
+            "citrate-comms".to_string(),
+            "··".to_string(),
+            (140, 140, 140),
+        )
     } else {
-        (short_addr(&l.author), initials_of(&l.author), tint_for(&l.author))
+        (
+            short_addr(&l.author),
+            initials_of(&l.author),
+            tint_for(&l.author),
+        )
     };
     Msg {
         author: author.into(),
         initials: initials.into(),
         tint: Color::from_rgb_u8(tint.0, tint.1, tint.2),
-        role: if l.mine { "you".into() } else { SharedString::new() },
+        role: if l.mine {
+            "you".into()
+        } else {
+            SharedString::new()
+        },
         ts: SharedString::new(),
         text: l.text.as_str().into(),
         is_agent: false,

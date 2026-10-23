@@ -130,7 +130,10 @@ pub fn verify_siwe_login(
     }
     // 2. Chain binding (anti cross-chain replay).
     if message.chain_id != CITRATE_CHAIN_ID {
-        return Err(IdentityError::WrongChain { expected: CITRATE_CHAIN_ID, found: message.chain_id });
+        return Err(IdentityError::WrongChain {
+            expected: CITRATE_CHAIN_ID,
+            found: message.chain_id,
+        });
     }
     // 3. Domain binding (anti-phishing).
     if message.domain != expected_domain {
@@ -179,7 +182,12 @@ pub fn verify_binding_attestation(pubn: &KeyPackagePublication) -> Result<(), Id
         .as_slice()
         .try_into()
         .map_err(|_| IdentityError::BadSignatureLength)?;
-    let digest = binding_digest(&pubn.wallet, &pubn.mls_sig_pubkey, &pubn.relay_domain, &pubn.nonce);
+    let digest = binding_digest(
+        &pubn.wallet,
+        &pubn.mls_sig_pubkey,
+        &pubn.relay_domain,
+        &pubn.nonce,
+    );
     let recovered = recover_address(&digest, sig)?;
     if recovered != pubn.wallet {
         return Err(IdentityError::AddressMismatch);
@@ -214,7 +222,10 @@ fn address_from_verifying_key(vk: &VerifyingKey) -> WalletAddress {
 
 /// Recover the signing wallet address from a 32-byte digest + a 65-byte
 /// `r‖s‖v` signature. Enforces low-S (rejects malleable high-S signatures).
-fn recover_address(digest: &[u8; 32], signature: &[u8; 65]) -> Result<WalletAddress, IdentityError> {
+fn recover_address(
+    digest: &[u8; 32],
+    signature: &[u8; 65],
+) -> Result<WalletAddress, IdentityError> {
     let sig = Signature::from_slice(&signature[..64]).map_err(|_| IdentityError::BadSignature)?;
     // Low-S enforcement: if normalize_s() returns Some, the signature was high-S → reject.
     if sig.normalize_s().is_some() {
@@ -242,7 +253,10 @@ impl EthWallet {
     pub fn generate() -> Self {
         let signing_key = SigningKey::random(&mut rand_core::OsRng);
         let address = address_from_verifying_key(signing_key.verifying_key());
-        Self { signing_key, address }
+        Self {
+            signing_key,
+            address,
+        }
     }
 
     /// Restore a wallet from its 32-byte secp256k1 secret (e.g. unsealed from the OS
@@ -250,7 +264,10 @@ impl EthWallet {
     pub fn from_secret_key(secret: &[u8; 32]) -> Result<Self, IdentityError> {
         let signing_key = SigningKey::from_slice(secret).map_err(|_| IdentityError::BadKey)?;
         let address = address_from_verifying_key(signing_key.verifying_key());
-        Ok(Self { signing_key, address })
+        Ok(Self {
+            signing_key,
+            address,
+        })
     }
 
     /// Export the 32-byte secret for sealing in the OS keyring. Handle with care.
@@ -385,9 +402,9 @@ mod tests {
     fn high_s_signatures_are_rejected() {
         // secp256k1 group order N, big-endian.
         const N: [u8; 32] = [
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-            0x41, 0x41,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
         ];
         // Big-endian `a - b` for a >= b.
         fn sub_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -411,7 +428,10 @@ mod tests {
         let wallet = EthWallet::generate();
         let low = wallet.sign_blob(domain, blob);
         // Sanity: the honest low-S signature verifies.
-        assert_eq!(recover_blob_signer(domain, blob, &low).unwrap(), wallet.address());
+        assert_eq!(
+            recover_blob_signer(domain, blob, &low).unwrap(),
+            wallet.address()
+        );
 
         // Forge its high-S malleable twin: s' = N - s, flip recovery parity.
         let mut s = [0u8; 32];
@@ -433,7 +453,13 @@ mod tests {
         let mut nonces = InMemoryNonceStore::new();
         let nonce = nonces.fresh(1_000);
         let wallet = EthWallet::generate();
-        let m = msg("relay.citrate.ai", wallet.address(), &nonce, CITRATE_CHAIN_ID, 1_000_000);
+        let m = msg(
+            "relay.citrate.ai",
+            wallet.address(),
+            &nonce,
+            CITRATE_CHAIN_ID,
+            1_000_000,
+        );
         let sig = wallet.sign_siwe(&m);
         let v = verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap();
         assert_eq!(v.address, wallet.address());
@@ -444,7 +470,13 @@ mod tests {
         let mut nonces = InMemoryNonceStore::new();
         let nonce = nonces.fresh(1_000);
         let wallet = EthWallet::generate();
-        let m = msg("relay.citrate.ai", wallet.address(), &nonce, CITRATE_CHAIN_ID, 1_000_000);
+        let m = msg(
+            "relay.citrate.ai",
+            wallet.address(),
+            &nonce,
+            CITRATE_CHAIN_ID,
+            1_000_000,
+        );
         let sig = wallet.sign_siwe(&m);
         verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap();
         // Second use of the same nonce must fail.
@@ -460,7 +492,13 @@ mod tests {
         let m = msg("relay.citrate.ai", wallet.address(), &nonce, 1, 1_000_000); // chain 1, not 40204
         let sig = wallet.sign_siwe(&m);
         let err = verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap_err();
-        assert_eq!(err, IdentityError::WrongChain { expected: CITRATE_CHAIN_ID, found: 1 });
+        assert_eq!(
+            err,
+            IdentityError::WrongChain {
+                expected: CITRATE_CHAIN_ID,
+                found: 1
+            }
+        );
     }
 
     #[test]
@@ -468,7 +506,13 @@ mod tests {
         let mut nonces = InMemoryNonceStore::new();
         let nonce = nonces.fresh(1_000);
         let wallet = EthWallet::generate();
-        let m = msg("evil.example", wallet.address(), &nonce, CITRATE_CHAIN_ID, 1_000_000);
+        let m = msg(
+            "evil.example",
+            wallet.address(),
+            &nonce,
+            CITRATE_CHAIN_ID,
+            1_000_000,
+        );
         let sig = wallet.sign_siwe(&m);
         let err = verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap_err();
         assert_eq!(err, IdentityError::DomainMismatch);
@@ -479,7 +523,13 @@ mod tests {
         let mut nonces = InMemoryNonceStore::new();
         let nonce = nonces.fresh(1_000);
         let wallet = EthWallet::generate();
-        let m = msg("relay.citrate.ai", wallet.address(), &nonce, CITRATE_CHAIN_ID, 2_000);
+        let m = msg(
+            "relay.citrate.ai",
+            wallet.address(),
+            &nonce,
+            CITRATE_CHAIN_ID,
+            2_000,
+        );
         let sig = wallet.sign_siwe(&m);
         let err = verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap_err();
         assert_eq!(err, IdentityError::Expired);
@@ -492,7 +542,13 @@ mod tests {
         let victim = EthWallet::generate();
         let attacker = EthWallet::generate();
         // Attacker claims the victim's address but signs with its own key.
-        let m = msg("relay.citrate.ai", victim.address(), &nonce, CITRATE_CHAIN_ID, 1_000_000);
+        let m = msg(
+            "relay.citrate.ai",
+            victim.address(),
+            &nonce,
+            CITRATE_CHAIN_ID,
+            1_000_000,
+        );
         let sig = attacker.sign_siwe(&m);
         let err = verify_siwe_login(&m, &sig, "relay.citrate.ai", 5_000, &mut nonces).unwrap_err();
         assert_eq!(err, IdentityError::AddressMismatch);
@@ -521,6 +577,9 @@ mod tests {
             binding_attestation: spoof_sig.to_vec(),
             ..good
         };
-        assert_eq!(verify_binding_attestation(&spoof).unwrap_err(), IdentityError::AddressMismatch);
+        assert_eq!(
+            verify_binding_attestation(&spoof).unwrap_err(),
+            IdentityError::AddressMismatch
+        );
     }
 }

@@ -172,7 +172,9 @@ fn main() -> Result<(), slint::PlatformError> {
     register_brand_fonts();
     if debug_ui() {
         app.set_debug_ui(true);
-        eprintln!("[ui] CITRATE_COMMS_DEBUG on — logging interactions. Click through every screen.");
+        eprintln!(
+            "[ui] CITRATE_COMMS_DEBUG on — logging interactions. Click through every screen."
+        );
     }
 
     if netdrive::is_enabled() {

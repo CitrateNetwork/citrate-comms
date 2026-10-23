@@ -7,7 +7,9 @@
 
 use comms_core::identity::{EthWallet, SiweMessage};
 use comms_core::mls::{GroupHandle, MlsMember};
-use comms_proto::{Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID};
+use comms_proto::{
+    Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, CITRATE_CHAIN_ID,
+};
 use comms_relay::ws::{RelayClient, RelayServer};
 use comms_relay::DeliveryService;
 
@@ -55,12 +57,18 @@ async fn two_clients_exchange_a_message_over_websocket() {
     let (alice, a_nonce) = RelayClient::connect(&url).await.unwrap();
     let a_msg = siwe(DOMAIN, &alice_w, a_nonce);
     let a_sig = alice_w.sign_siwe(&a_msg);
-    assert_eq!(alice.authenticate(a_msg, a_sig).await.unwrap(), alice_w.address());
+    assert_eq!(
+        alice.authenticate(a_msg, a_sig).await.unwrap(),
+        alice_w.address()
+    );
 
     let (bob, b_nonce) = RelayClient::connect(&url).await.unwrap();
     let b_msg = siwe(DOMAIN, &bob_w, b_nonce);
     let b_sig = bob_w.sign_siwe(&b_msg);
-    assert_eq!(bob.authenticate(b_msg, b_sig).await.unwrap(), bob_w.address());
+    assert_eq!(
+        bob.authenticate(b_msg, b_sig).await.unwrap(),
+        bob_w.address()
+    );
 
     // ── Bob publishes a KeyPackage (with a wallet binding attestation). ──
     let bob_member = MlsMember::new(&bob_w.address().0).unwrap();
@@ -70,7 +78,9 @@ async fn two_clients_exchange_a_message_over_websocket() {
         wallet: bob_w.address(),
         key_package: bob_member.fresh_key_package().unwrap(),
         mls_sig_pubkey: bob_sig_pub.clone(),
-        binding_attestation: bob_w.sign_binding(&bob_sig_pub, DOMAIN, &bind_nonce).to_vec(),
+        binding_attestation: bob_w
+            .sign_binding(&bob_sig_pub, DOMAIN, &bind_nonce)
+            .to_vec(),
         nonce: bind_nonce,
         relay_domain: DOMAIN.into(),
     })
@@ -83,12 +93,23 @@ async fn two_clients_exchange_a_message_over_websocket() {
     let gid = gid_of(&alice_group);
     alice.register_group(gid).await.unwrap();
 
-    let bobs_kp = alice.take_key_package(bob_w.address()).await.unwrap().expect("kp present");
-    let add = alice_group.add(&alice_member, &bobs_kp.key_package).unwrap();
+    let bobs_kp = alice
+        .take_key_package(bob_w.address())
+        .await
+        .unwrap()
+        .expect("kp present");
+    let add = alice_group
+        .add(&alice_member, &bobs_kp.key_package)
+        .unwrap();
     alice
         .submit(Envelope {
-            group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit,
-            sender: alice_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None,
+            group_id: gid,
+            epoch: EpochId(1),
+            kind: EnvelopeKind::Commit,
+            sender: alice_w.address(),
+            recipients: vec![],
+            ciphertext: add.commit,
+            group_seq: None,
         })
         .await
         .unwrap();
@@ -98,8 +119,13 @@ async fn two_clients_exchange_a_message_over_websocket() {
             bob_w.address(),
             None,
             Envelope {
-                group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome,
-                sender: alice_w.address(), recipients: vec![bob_w.address()], ciphertext: add.welcome, group_seq: None,
+                group_id: gid,
+                epoch: EpochId(1),
+                kind: EnvelopeKind::Welcome,
+                sender: alice_w.address(),
+                recipients: vec![bob_w.address()],
+                ciphertext: add.welcome,
+                group_seq: None,
             },
             add.ratchet_tree,
         )
@@ -117,14 +143,26 @@ async fn two_clients_exchange_a_message_over_websocket() {
     let ciphertext = alice_group.send(&alice_member, plaintext).unwrap();
     alice
         .submit(Envelope {
-            group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application,
-            sender: alice_w.address(), recipients: vec![bob_w.address()], ciphertext: ciphertext.clone(), group_seq: None,
+            group_id: gid,
+            epoch: EpochId(1),
+            kind: EnvelopeKind::Application,
+            sender: alice_w.address(),
+            recipients: vec![bob_w.address()],
+            ciphertext: ciphertext.clone(),
+            group_seq: None,
         })
         .await
         .unwrap();
 
     let app = next_kind(&bob, EnvelopeKind::Application).await;
-    assert_ne!(app.ciphertext.as_slice(), plaintext, "the wire carries ciphertext, not plaintext");
+    assert_ne!(
+        app.ciphertext.as_slice(),
+        plaintext,
+        "the wire carries ciphertext, not plaintext"
+    );
     let decrypted = bob_group.receive(&bob_member, &app.ciphertext).unwrap();
-    assert_eq!(decrypted.plaintext, plaintext, "Bob decrypts Alice's message received over the socket");
+    assert_eq!(
+        decrypted.plaintext, plaintext,
+        "Bob decrypts Alice's message received over the socket"
+    );
 }
