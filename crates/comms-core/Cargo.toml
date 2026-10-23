@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "citrate-comms domain library — MLS engine, SIWE→MLS identity binding, RBAC, CRM/PM domain, encrypted store, BLAKE3 audit chain."
 
 [features]

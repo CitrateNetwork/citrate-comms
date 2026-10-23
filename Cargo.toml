@@ -29,6 +29,8 @@ edition = "2021"
 license = "BUSL-1.1"
 authors = ["Citrate Network / Citrate Inc."]
 repository = "https://github.com/CitrateNetwork/citrate-comms"
+# Not published to crates.io (intra-workspace path deps; BUSL-1.1).
+publish = false
 
 # Shared versions. A crate opts in with `dep.workspace = true`; unused entries are
 # not fetched. Versions are pinned to match the chain's crypto grade (PLANSET/02 §crypto).
