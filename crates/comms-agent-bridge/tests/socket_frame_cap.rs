@@ -18,11 +18,17 @@ fn sock_path(dir: &tempfile::TempDir) -> PathBuf {
 }
 
 fn short_tempdir() -> tempfile::TempDir {
-    tempfile::Builder::new().prefix("cab").tempdir_in("/tmp").expect("tempdir")
+    tempfile::Builder::new()
+        .prefix("cab")
+        .tempdir_in("/tmp")
+        .expect("tempdir")
 }
 
 fn send_of(text_len: usize) -> AgentOutbound {
-    AgentOutbound::Send { group: "g".into(), text: "x".repeat(text_len) }
+    AgentOutbound::Send {
+        group: "g".into(),
+        text: "x".repeat(text_len),
+    }
 }
 
 #[tokio::test]
@@ -43,7 +49,11 @@ async fn an_oversized_command_frame_is_refused_by_the_connection_reader() {
     client.send_command(&send_of(CAP + 16)).await.unwrap();
     let (first, second) = server.await.unwrap();
 
-    assert_eq!(first.unwrap(), Some(send_of(1024)), "an in-bounds frame is delivered");
+    assert_eq!(
+        first.unwrap(),
+        Some(send_of(1024)),
+        "an in-bounds frame is delivered"
+    );
     assert!(
         matches!(second, Err(SocketError::FrameTooLarge(n)) if n == CAP),
         "an over-cap frame must be refused, got {second:?}"
@@ -68,7 +78,11 @@ async fn an_oversized_command_frame_is_refused_by_the_split_source_used_by_serve
     client.send_command(&send_of(CAP + 16)).await.unwrap();
     let (first, second) = server.await.unwrap();
 
-    assert_eq!(first.unwrap(), Some(send_of(CAP / 2)), "a half-cap frame is delivered");
+    assert_eq!(
+        first.unwrap(),
+        Some(send_of(CAP / 2)),
+        "a half-cap frame is delivered"
+    );
     assert!(
         matches!(second, Err(SocketError::FrameTooLarge(n)) if n == CAP),
         "an over-cap frame must be refused, got {second:?}"

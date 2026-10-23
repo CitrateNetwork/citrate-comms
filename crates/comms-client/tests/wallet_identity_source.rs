@@ -52,7 +52,10 @@ fn wallet_fallback_problems(src: &str) -> Vec<String> {
             if !sig.contains("Result<") {
                 problems.push("load_wallet does not return a Result".to_string());
             }
-            if body.contains("unwrap_or_else") || body.contains("unwrap_or(") || body.contains(".ok()") {
+            if body.contains("unwrap_or_else")
+                || body.contains("unwrap_or(")
+                || body.contains(".ok()")
+            {
                 problems.push("load_wallet swallows a keyring/key error".to_string());
             }
         }
@@ -76,7 +79,10 @@ fn netdrive_wallet_load_fails_closed() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/netdrive.rs");
     let src = std::fs::read_to_string(&path).expect("read src/netdrive.rs");
     let problems = wallet_fallback_problems(&src);
-    assert!(problems.is_empty(), "wallet load must fail closed: {problems:?}");
+    assert!(
+        problems.is_empty(),
+        "wallet load must fail closed: {problems:?}"
+    );
 }
 
 #[test]
@@ -94,5 +100,8 @@ fn load_wallet(account: &str) -> EthWallet {
 }
 "#;
     let problems = wallet_fallback_problems(old);
-    assert!(problems.len() >= 3, "the old fallback shape must be flagged: {problems:?}");
+    assert!(
+        problems.len() >= 3,
+        "the old fallback shape must be flagged: {problems:?}"
+    );
 }

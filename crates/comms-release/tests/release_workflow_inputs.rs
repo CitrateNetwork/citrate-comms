@@ -40,7 +40,9 @@ fn run_lines(src: &str) -> Vec<(usize, String)> {
             let rest = rest.trim();
             if rest.starts_with('|') || rest.starts_with('>') {
                 i += 1;
-                while i < lines.len() && (lines[i].trim().is_empty() || indent(lines[i]) > key_indent) {
+                while i < lines.len()
+                    && (lines[i].trim().is_empty() || indent(lines[i]) > key_indent)
+                {
                     out.push((i + 1, lines[i].to_string()));
                     i += 1;
                 }
@@ -109,8 +111,17 @@ fn step_script(src: &str, name: &str) -> String {
                 body.push(lines[i]);
                 i += 1;
             }
-            let pad = body.iter().filter(|b| !b.trim().is_empty()).map(|b| indent(b)).min().unwrap_or(0);
-            return body.iter().map(|b| if b.len() >= pad { &b[pad..] } else { "" }).collect::<Vec<_>>().join("\n");
+            let pad = body
+                .iter()
+                .filter(|b| !b.trim().is_empty())
+                .map(|b| indent(b))
+                .min()
+                .unwrap_or(0);
+            return body
+                .iter()
+                .map(|b| if b.len() >= pad { &b[pad..] } else { "" })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         i += 1;
     }
@@ -135,26 +146,41 @@ fn resolve_tag(script: &str, tag_input: &str) -> (bool, String) {
         .env("GITHUB_OUTPUT", &out)
         .status()
         .expect("run bash");
-    (status.success(), std::fs::read_to_string(&out).unwrap_or_default())
+    (
+        status.success(),
+        std::fs::read_to_string(&out).unwrap_or_default(),
+    )
 }
 
 #[test]
 fn no_run_line_interpolates_a_dispatch_input() {
     let bad = input_interpolations(&release_yml());
-    assert!(bad.is_empty(), "dispatch input interpolated into a shell line:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "dispatch input interpolated into a shell line:\n{}",
+        bad.join("\n")
+    );
 }
 
 #[test]
 fn input_scanner_negative_control() {
     let wf = "jobs:\n  r:\n    steps:\n      - name: a\n        run: |\n          echo ok\n          TAG=${{ github.event.inputs.tag }}\n      - run: echo ${{ inputs.tag }}\n      - name: b\n        env:\n          T: ${{ github.event.inputs.tag }}\n        run: echo \"$T\"\n";
     let bad = input_interpolations(wf);
-    assert_eq!(bad.len(), 2, "scanner must flag both run-line interpolations and not the env: one: {bad:?}");
+    assert_eq!(
+        bad.len(),
+        2,
+        "scanner must flag both run-line interpolations and not the env: one: {bad:?}"
+    );
 }
 
 #[test]
 fn every_action_is_pinned_to_a_commit_sha() {
     let bad = unpinned_uses(&release_yml());
-    assert!(bad.is_empty(), "actions not pinned to a commit SHA:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "actions not pinned to a commit SHA:\n{}",
+        bad.join("\n")
+    );
 }
 
 #[test]
@@ -169,7 +195,10 @@ fn resolve_tag_accepts_version_tags() {
     for tag in ["v0.1.0", "v1.2.3-rc.1", "v10.20.30-beta"] {
         let (ok, out) = resolve_tag(&script, tag);
         assert!(ok, "a version tag {tag:?} must be accepted");
-        assert!(out.lines().any(|l| l == format!("tag={tag}")), "tag output for {tag:?}: {out:?}");
+        assert!(
+            out.lines().any(|l| l == format!("tag={tag}")),
+            "tag output for {tag:?}: {out:?}"
+        );
     }
 }
 
@@ -187,7 +216,8 @@ fn resolve_tag_refuses_a_tag_that_is_not_a_version_before_writing_outputs() {
         let (ok, out) = resolve_tag(&script, tag);
         assert!(!ok, "a non-version tag {tag:?} must fail the step");
         assert!(
-            !out.lines().any(|l| l.starts_with("tag=") || l.starts_with("gated_sha256=")),
+            !out.lines()
+                .any(|l| l.starts_with("tag=") || l.starts_with("gated_sha256=")),
             "nothing may be written to GITHUB_OUTPUT for {tag:?}: {out:?}"
         );
     }
