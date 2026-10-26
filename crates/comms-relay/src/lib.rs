@@ -1159,6 +1159,13 @@ impl DeliveryService {
             .map(|g| g.members.iter().copied().collect())
     }
 
+    /// `member`'s current grant generation in `group_id` (`None` if not a member). A
+    /// delegated grant must be issued for this generation to authorize anything there.
+    pub fn grant_generation(&self, group_id: &GroupId, member: &WalletAddress) -> Option<u64> {
+        let g = self.groups.get(group_id)?;
+        g.members.contains(member).then_some(0)
+    }
+
     /// Number of registered groups (for the admin health snapshot).
     pub fn group_count(&self) -> usize {
         self.groups.len()

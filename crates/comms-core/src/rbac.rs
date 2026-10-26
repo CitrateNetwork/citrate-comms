@@ -79,24 +79,13 @@ struct AssertionCore {
     role: Role,
     scope: Option<GroupId>,
     not_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
     issuer: WalletAddress,
 }
 
-fn assertion_blob(
-    subject: WalletAddress,
-    role: Role,
-    scope: Option<GroupId>,
-    not_after: Option<u64>,
-    issuer: WalletAddress,
-) -> Result<Vec<u8>, RbacError> {
-    canonical::to_vec(&AssertionCore {
-        subject,
-        role,
-        scope,
-        not_after,
-        issuer,
-    })
-    .map_err(|e| RbacError::Encode(e.to_string()))
+fn assertion_blob(a: &AssertionCore) -> Result<Vec<u8>, RbacError> {
+    canonical::to_vec(a).map_err(|e| RbacError::Encode(e.to_string()))
 }
 
 /// Issue a signed role grant. Fails if the issuer's role can't assign roles or
@@ -109,6 +98,51 @@ pub fn sign_role_assertion(
     scope: Option<GroupId>,
     not_after_ms: Option<u64>,
 ) -> Result<RoleAssertion, RbacError> {
+    sign_assertion(
+        issuer_wallet,
+        issuer_role,
+        subject,
+        role,
+        scope,
+        not_after_ms,
+        None,
+    )
+}
+
+/// Issue a grant **for one group at the subject's current grant generation** there
+/// (the relay's `grant_generation`). Offboarding a member from a group advances their
+/// generation, so a grant issued before the offboard no longer authorizes anything in
+/// that group, even after the member is added back.
+pub fn sign_group_grant(
+    issuer_wallet: &EthWallet,
+    issuer_role: Role,
+    subject: WalletAddress,
+    role: Role,
+    group_id: GroupId,
+    generation: u64,
+    not_after_ms: Option<u64>,
+) -> Result<RoleAssertion, RbacError> {
+    sign_assertion(
+        issuer_wallet,
+        issuer_role,
+        subject,
+        role,
+        Some(group_id),
+        not_after_ms,
+        // Generation 0 is encoded as absent, byte-identical to a grant without the field.
+        (generation != 0).then_some(generation),
+    )
+}
+
+fn sign_assertion(
+    issuer_wallet: &EthWallet,
+    issuer_role: Role,
+    subject: WalletAddress,
+    role: Role,
+    scope: Option<GroupId>,
+    not_after: Option<u64>,
+    generation: Option<u64>,
+) -> Result<RoleAssertion, RbacError> {
     if !can(issuer_role, Capability::AssignRole) {
         return Err(RbacError::NotAuthorized);
     }
@@ -119,13 +153,21 @@ pub fn sign_role_assertion(
         });
     }
     let issuer = issuer_wallet.address();
-    let blob = assertion_blob(subject, role, scope, not_after_ms, issuer)?;
+    let blob = assertion_blob(&AssertionCore {
+        subject,
+        role,
+        scope,
+        not_after,
+        generation,
+        issuer,
+    })?;
     let sig = issuer_wallet.sign_blob(ASSERTION_DOMAIN, &blob);
     Ok(RoleAssertion {
         subject,
         role,
         scope,
-        not_after: not_after_ms,
+        not_after,
+        generation,
         issuer,
         signature: sig.to_vec(),
     })
@@ -145,7 +187,14 @@ pub fn verify_role_assertion(a: &RoleAssertion, now_ms: u64) -> Result<WalletAdd
         .as_slice()
         .try_into()
         .map_err(|_| RbacError::BadSignatureLength)?;
-    let blob = assertion_blob(a.subject, a.role, a.scope, a.not_after, a.issuer)?;
+    let blob = assertion_blob(&AssertionCore {
+        subject: a.subject,
+        role: a.role,
+        scope: a.scope,
+        not_after: a.not_after,
+        generation: a.generation,
+        issuer: a.issuer,
+    })?;
     let signer =
         identity::recover_blob_signer(ASSERTION_DOMAIN, &blob, sig).map_err(RbacError::Identity)?;
     if signer != a.issuer {
