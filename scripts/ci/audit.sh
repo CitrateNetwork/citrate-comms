@@ -30,6 +30,10 @@ python3 scripts/ci/check_crypto_bigint_users.py
 echo "== cargo deny check advisories (vulnerabilities deny; accepted = deny.toml ignore) =="
 cargo deny check advisories
 
+echo "== cargo-audit ignore guard (.cargo/audit.toml = deny.toml + lockfile-only crates) =="
+python3 scripts/ci/check_audit_ignores.py --self-test
+python3 scripts/ci/check_audit_ignores.py
+
 echo "== cargo audit (whole Cargo.lock; accepted = .cargo/audit.toml) =="
 cargo audit
 
