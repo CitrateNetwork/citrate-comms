@@ -544,3 +544,205 @@ fn failed_welcome_submit_is_not_persisted_by_a_later_write() {
         "a refused onboard must not reach the durable roster"
     );
 }
+
+#[test]
+fn membership_ops_refuse_the_wrong_envelope_kind() {
+    let mut w = world();
+    let owner = w.owner.address();
+    let before = members(&w.relay, GID_A);
+    let (log, ep) = (log_len(&w.relay, GID_A), epoch(&w.relay, GID_A));
+
+    // An onboard carrying a Commit (which would advance the epoch) instead of a Welcome.
+    let j = EthWallet::generate().address();
+    let r = w.relay.onboard(
+        GID_A,
+        owner,
+        None,
+        j,
+        env(
+            GID_A,
+            owner,
+            EnvelopeKind::Commit,
+            ep + 1,
+            b"not-a-welcome",
+            &[j],
+        ),
+        b"tree-new".to_vec(),
+        T,
+    );
+    assert!(r.is_err(), "got {r:?}");
+    assert_eq!(members(&w.relay, GID_A), before);
+    assert_eq!(
+        (log_len(&w.relay, GID_A), epoch(&w.relay, GID_A)),
+        (log, ep)
+    );
+
+    // An offboard carrying an application message instead of a Remove commit.
+    let dave = w.dave.address();
+    let r = w.relay.offboard(
+        OffboardRequest {
+            group_id: GID_A,
+            admin: owner,
+            admin_assertion: None,
+            removed: dave,
+            remove_commit: env(GID_A, owner, EnvelopeKind::Application, ep, b"msg", &[]),
+            ratchet_tree: b"tree-after".to_vec(),
+        },
+        T,
+    );
+    assert!(r.is_err(), "got {r:?}");
+    assert_eq!(members(&w.relay, GID_A), before);
+    assert_eq!(log_len(&w.relay, GID_A), log);
+}
+
+// ─────────────────────── the generation over the wire ───────────────────────
+
+#[tokio::test]
+async fn grant_generation_is_served_to_members_only() {
+    use comms_relay::ws::{RelayClient, RelayServer};
+
+    async fn ws_login(c: &RelayClient, nonce: String, wallet: &EthWallet) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let msg = SiweMessage {
+            domain: DOMAIN.into(),
+            address: wallet.address(),
+            statement: "Sign in to citrate-comms".into(),
+            uri: format!("wss://{DOMAIN}"),
+            version: "1".into(),
+            chain_id: CITRATE_CHAIN_ID,
+            nonce,
+            issued_at_ms: now,
+            expiration_ms: now + 600_000,
+        };
+        let sig = wallet.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
+    }
+
+    let owner = EthWallet::generate();
+    let dave = EthWallet::generate();
+    let stranger = EthWallet::generate();
+    let server = RelayServer::new(DeliveryService::new(DOMAIN, owner.address(), 0).unwrap());
+    let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{addr}");
+    let (owner_c, n) = RelayClient::connect(&url).await.unwrap();
+    ws_login(&owner_c, n, &owner).await;
+    let (dave_c, n) = RelayClient::connect(&url).await.unwrap();
+    ws_login(&dave_c, n, &dave).await;
+    let (stranger_c, n) = RelayClient::connect(&url).await.unwrap();
+    ws_login(&stranger_c, n, &stranger).await;
+
+    let (o, d) = (owner.address(), dave.address());
+    owner_c.register_group(GID_A).await.unwrap();
+    let welcome = |ct: &[u8]| env(GID_A, o, EnvelopeKind::Welcome, 0, ct, &[d]);
+    owner_c
+        .onboard(GID_A, d, None, welcome(b"w1"), b"t".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(owner_c.grant_generation(GID_A, d).await.unwrap(), Some(0));
+    owner_c
+        .offboard(
+            GID_A,
+            d,
+            None,
+            env(GID_A, o, EnvelopeKind::Commit, 1, b"rm", &[]),
+            b"t2".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner_c.grant_generation(GID_A, d).await.unwrap(), None);
+    owner_c
+        .onboard(GID_A, d, None, welcome(b"w2"), b"t3".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(owner_c.grant_generation(GID_A, d).await.unwrap(), Some(1));
+    // A non-member may not read a group's membership metadata.
+    assert!(stranger_c.grant_generation(GID_A, d).await.is_err());
+    drop(dave_c);
+}
+
+// ───────────────────────────── tripwire ─────────────────────────────
+
+/// Structural problems in relay production code (`lib.rs` before its test module):
+/// - a member may leave a roster only through `end_membership`, which also advances
+///   their grant generation (so no grant outlives the membership it was issued for);
+/// - `onboard` and `offboard` must check their envelope with `require_op_envelope`
+///   before submitting it.
+fn membership_tripwire(src: &str) -> Vec<String> {
+    let prod = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+    let mut out = Vec::new();
+    let removes = prod.matches("members.remove(").count();
+    let helper = prod
+        .split("fn end_membership(")
+        .nth(1)
+        .and_then(|b| b.split("\n    }").next())
+        .unwrap_or("");
+    if removes != 1 || !helper.contains("members.remove(") {
+        out.push(format!(
+            "`members.remove(` must appear exactly once, inside `end_membership` (found {removes})"
+        ));
+    }
+    if !helper.contains("grant_generations") {
+        out.push("`end_membership` must advance the grant generation".into());
+    }
+    for op in ["pub fn onboard(", "pub fn offboard("] {
+        let body = prod
+            .split(op)
+            .nth(1)
+            .and_then(|b| b.split("\n    pub fn ").next())
+            .unwrap_or("");
+        let check = body.find("require_op_envelope(");
+        let submit = body.find("self.submit_as(admin");
+        match (check, submit) {
+            (Some(c), Some(s)) if c < s => {}
+            _ => out.push(format!(
+                "`{op}` must call `require_op_envelope` before `submit_as`"
+            )),
+        }
+    }
+    out
+}
+
+#[test]
+fn tripwire_membership_ends_grants_and_ops_check_their_envelope() {
+    let v = membership_tripwire(include_str!("../src/lib.rs"));
+    assert!(v.is_empty(), "TRIPWIRE: {v:#?}");
+}
+
+#[test]
+fn tripwire_membership_negative_control() {
+    let good = "\
+    fn end_membership(&mut self, m: &W) {
+        self.members.remove(m);
+        self.grant_generations.entry(*m);
+    }
+    pub fn onboard(&mut self) {
+        require_op_envelope(&w, g, K)?;
+        self.submit_as(admin, w, n)?;
+    }
+    pub fn offboard(&mut self) {
+        require_op_envelope(&c, g, K)?;
+        self.submit_as(admin, c, n)?;
+    }
+";
+    assert!(membership_tripwire(good).is_empty());
+    // A second roster removal that bypasses the generation bump.
+    let extra = good.replace(
+        "pub fn offboard(&mut self) {",
+        "pub fn offboard(&mut self) {\n        state.members.remove(&x);",
+    );
+    assert_eq!(membership_tripwire(&extra).len(), 1);
+    // The helper stops advancing the generation.
+    let no_bump = good.replace("self.grant_generations.entry(*m);", "");
+    assert_eq!(membership_tripwire(&no_bump).len(), 1);
+    // An op that submits before checking its envelope, or never checks it.
+    let late = good.replace(
+        "        require_op_envelope(&w, g, K)?;\n        self.submit_as(admin, w, n)?;",
+        "        self.submit_as(admin, w, n)?;\n        require_op_envelope(&w, g, K)?;",
+    );
+    assert_eq!(membership_tripwire(&late).len(), 1);
+    let none = good.replace("        require_op_envelope(&c, g, K)?;\n", "");
+    assert_eq!(membership_tripwire(&none).len(), 1);
+}
