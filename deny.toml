@@ -50,16 +50,11 @@ ignore = [
     # RUSTSEC-2026-0195 — quick-xml: unbounded namespace-decl allocation (desktop)
     "RUSTSEC-2026-0195",
     # ── crypto-bigint < 0.7.6 (time-boxed) — EXPIRES 2026-11-09 ──
-    # RUSTSEC-2026-0387 — operations meant to be constant-time could branch, depending on
-    # compiler and target. Patched only in 0.7.6. crypto-bigint 0.5.5 comes in only through
-    # elliptic-curve 0.13: k256 0.13 (comms-core identity, hpke-rs-rust-crypto 0.6) and
-    # p256 / p384 0.13 (openmls_rust_crypto 0.5, openmls_basic_credential, hpke-rs-rust-crypto).
-    # No 0.13.x curve release takes crypto-bigint 0.7; the fix is the 0.14 curve line, and no
-    # published openmls_rust_crypto accepts p256 0.14 yet (0.6.0 still requires ^0.13). The
-    # items the advisory names (UintRef equality, BoxedMontyForm::invert, the 0.7
-    # borrowing_sub) are not in 0.5.x; the 0.13 curve crates use only 0.5.x's fixed-width
-    # add/sub/compare/select. scripts/ci/check_crypto_bigint_users.py (run by audit.sh) fails
-    # if another crate pulls a crypto-bigint < 0.7.6, if none is left, or after the expiry.
+    # RUSTSEC-2026-0387 — crypto-bigint < 0.7.6: multiple timing variability issues in
+    # operations intended to be constant-time. elliptic-curve 0.13 requires crypto-bigint
+    # ^0.5; the fix is in the 0.14 curve line, held back upstream (revm-precompile,
+    # openmls_rust_crypto and bip32 still require the 0.13 line).
+    # Guard: scripts/ci/check_crypto_bigint_users.py (run by scripts/ci/audit.sh).
     "RUSTSEC-2026-0387",
 ]
 
