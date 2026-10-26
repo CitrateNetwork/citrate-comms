@@ -21,9 +21,9 @@ if ! command -v cargo-deny >/dev/null 2>&1; then
   exit 127
 fi
 
-echo "== RUSTSEC-2026-0387 ignore guard (self-test, then the repo lockfiles) =="
-python3 scripts/ci/test_check_crypto_bigint_users.py
-python3 scripts/ci/check-crypto-bigint-users.py
+echo "== RUSTSEC-2026-0387 ignore guard (crypto-bigint < 0.7.6 only via elliptic-curve 0.13) =="
+python3 scripts/ci/check_crypto_bigint_users.py --self-test
+python3 scripts/ci/check_crypto_bigint_users.py
 
 echo "== cargo deny check advisories (vulnerabilities deny; accepted = deny.toml ignore) =="
 cargo deny check advisories
