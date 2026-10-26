@@ -21,7 +21,7 @@ if ! command -v cargo-deny >/dev/null 2>&1; then
   exit 127
 fi
 
-echo "== RUSTSEC-2026-0387 ignore guard (crypto-bigint < 0.7.6 only via elliptic-curve 0.13) =="
+echo "== RUSTSEC-2026-0387 ignore guard (crypto-bigint < 0.7.6 only via elliptic-curve 0.13, every tracked Cargo.lock; expires 2027-01-31) =="
 python3 scripts/ci/check_crypto_bigint_users.py --self-test
 python3 scripts/ci/check_crypto_bigint_users.py
 
