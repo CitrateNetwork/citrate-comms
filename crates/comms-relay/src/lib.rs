@@ -788,6 +788,33 @@ impl DeliveryService {
         Ok(())
     }
 
+    /// The one RBAC gate for membership-mutating ops (onboard / offboard) in `group_id`.
+    /// Authorized iff the actor is the global workspace owner, THIS group's creator, or
+    /// presents an owner-signed grant **scoped to `group_id`** whose role carries `cap`.
+    /// A grant for another group, or with no group at all, is refused (fail closed).
+    fn authorize_membership_op(
+        &self,
+        group_id: GroupId,
+        group_creator: Option<WalletAddress>,
+        admin: WalletAddress,
+        admin_assertion: Option<&RoleAssertion>,
+        cap: Capability,
+        now_ms: u64,
+    ) -> Result<(), RelayError> {
+        if admin == self.owner || group_creator == Some(admin) {
+            return Ok(());
+        }
+        let Some(a) = admin_assertion else {
+            return Err(RelayError::NotAuthorized);
+        };
+        rbac::verify_grant_for_group(a, admin, self.owner, group_id, now_ms)
+            .map_err(RelayError::Rbac)?;
+        if !rbac::can(a.role, cap) {
+            return Err(RelayError::NotAuthorized);
+        }
+        Ok(())
+    }
+
     /// Onboard a member: add to the roster, stash the public ratchet tree, and
     /// deliver the Welcome to the joiner's mailbox. The MLS Add/Commit themselves
     /// are submitted as envelopes; this updates the routing roster + audit.
@@ -820,19 +847,14 @@ impl DeliveryService {
         // or presents an owner-signed assertion whose role carries `AddMember`. A plain
         // member with none of these is rejected — otherwise any member could insert an
         // arbitrary joiner into the routing roster and overwrite the stored ratchet tree.
-        let authorized = admin == self.owner
-            || group_creator == Some(admin)
-            || match admin_assertion {
-                Some(a) => {
-                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
-                        .map_err(RelayError::Rbac)?;
-                    rbac::can(a.role, Capability::AddMember)
-                }
-                None => false,
-            };
-        if !authorized {
-            return Err(RelayError::NotAuthorized);
-        }
+        self.authorize_membership_op(
+            group_id,
+            group_creator,
+            admin,
+            admin_assertion,
+            Capability::AddMember,
+            now_ms,
+        )?;
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) {
@@ -913,19 +935,14 @@ impl DeliveryService {
         }
         // RBAC: authorized iff the global owner, THIS group's creator (their own group),
         // or an owner-signed assertion whose role carries RemoveMember.
-        let authorized = admin == self.owner
-            || group_creator == Some(admin)
-            || match admin_assertion {
-                Some(a) => {
-                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
-                        .map_err(RelayError::Rbac)?;
-                    rbac::can(a.role, Capability::RemoveMember)
-                }
-                None => false,
-            };
-        if !authorized {
-            return Err(RelayError::NotAuthorized);
-        }
+        self.authorize_membership_op(
+            group_id,
+            group_creator,
+            admin,
+            admin_assertion,
+            Capability::RemoveMember,
+            now_ms,
+        )?;
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) || !state.members.contains(&removed) {
@@ -1774,13 +1791,14 @@ mod tests {
             "victim must NOT have entered the roster"
         );
 
-        // With an owner-signed Admin grant (Admin holds AddMember), Mallory CAN onboard.
+        // With an owner-signed Admin grant scoped to THIS group (Admin holds AddMember),
+        // Mallory CAN onboard. (An unscoped grant is refused — grants bind to a group.)
         let grant = rbac::sign_role_assertion(
             &owner,
             Role::Owner,
             mallory.address(),
             Role::Admin,
-            None,
+            Some(gid),
             None,
         )
         .unwrap();
