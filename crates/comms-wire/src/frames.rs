@@ -47,6 +47,13 @@ pub enum ClientFrame {
     GroupMembers {
         group_id: GroupId,
     },
+    /// A member's current grant generation in a group (`None` if not a member). An owner
+    /// signs a delegated grant for this generation (`rbac::sign_group_grant`); offboarding
+    /// advances it, which ends every grant issued before. Answered only to a member.
+    GrantGeneration {
+        group_id: GroupId,
+        member: WalletAddress,
+    },
     Offboard {
         group_id: GroupId,
         removed: WalletAddress,
@@ -148,6 +155,7 @@ pub enum ServerFrame {
     KeyPackage(Option<KeyPackagePublication>),
     RatchetTree(Option<Vec<u8>>),
     Members(Option<Vec<WalletAddress>>),
+    GrantGeneration(Option<u64>),
     Ack {
         seq: Option<u64>,
     },
