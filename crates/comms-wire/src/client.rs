@@ -293,6 +293,23 @@ impl RelayClient {
         }
     }
 
+    /// `member`'s current grant generation in `group_id` — the generation an owner signs a
+    /// delegated grant for (`rbac::sign_group_grant`). `None` if `member` is not a member.
+    pub async fn grant_generation(
+        &self,
+        group_id: GroupId,
+        member: WalletAddress,
+    ) -> Result<Option<u64>, WsError> {
+        match self
+            .request(ClientFrame::GrantGeneration { group_id, member })
+            .await?
+        {
+            ServerFrame::GrantGeneration(g) => Ok(g),
+            ServerFrame::Error { message } => Err(WsError::Server(message)),
+            _ => Err(WsError::Protocol("expected GrantGeneration")),
+        }
+    }
+
     /// INVITE-S2 (owner) — publish a single-use, group-bound invite. `group_info` is the
     /// owner's exported public `GroupInfo`; the relay stores it against `token_hash`.
     pub async fn publish_invite(
