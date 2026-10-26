@@ -16,10 +16,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-if ! command -v cargo-deny >/dev/null 2>&1; then
-  echo "cargo-deny not installed: cargo install cargo-deny" >&2
-  exit 127
-fi
+for tool in cargo-deny cargo-audit; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "$tool not installed: cargo install $tool" >&2
+    exit 127
+  fi
+done
 
 echo "== RUSTSEC-2026-0387 ignore guard (crypto-bigint < 0.7.6 only via elliptic-curve 0.13) =="
 python3 scripts/ci/check_crypto_bigint_users.py --self-test
@@ -27,6 +29,9 @@ python3 scripts/ci/check_crypto_bigint_users.py
 
 echo "== cargo deny check advisories (vulnerabilities deny; accepted = deny.toml ignore) =="
 cargo deny check advisories
+
+echo "== cargo audit (whole Cargo.lock; accepted = .cargo/audit.toml) =="
+cargo audit
 
 echo "== cargo deny check bans sources =="
 cargo deny check bans sources
