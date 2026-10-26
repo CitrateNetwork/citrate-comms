@@ -49,6 +49,18 @@ ignore = [
     "RUSTSEC-2026-0194",
     # RUSTSEC-2026-0195 — quick-xml: unbounded namespace-decl allocation (desktop)
     "RUSTSEC-2026-0195",
+    # ── crypto-bigint 0.5 timing advisory — time-boxed, EXPIRES 2027-01-31 ──
+    # RUSTSEC-2026-0387 — crypto-bigint < 0.7.6: some operations intended to be
+    # constant-time could branch on secret data depending on compiler and target.
+    # Library-level advisory; fixed only in 0.7.6, no 0.5.x backport. crypto-bigint
+    # 0.5.5 is pulled only by elliptic-curve 0.13 (k256 0.13 in comms-core; k256 /
+    # p256 / p384 0.13 via hpke-rs-rust-crypto and openmls_rust_crypto). No 0.13
+    # curve release accepts 0.7, and no published openmls_rust_crypto accepts the
+    # 0.14 curve line, so this is upstream-blocked; the upgrade is tracked.
+    # Enforced by scripts/ci/check-crypto-bigint-users.py (run by scripts/ci/audit.sh):
+    # fails if a crate other than elliptic-curve depends on an unpatched crypto-bigint,
+    # if this ignore goes stale, or after 2027-01-31 while it is still here.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via elliptic-curve 0.13 only; upstream-blocked; expires 2027-01-31" },
 ]
 
 [licenses]
