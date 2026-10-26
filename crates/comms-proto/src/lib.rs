@@ -152,7 +152,9 @@ pub enum Role {
 pub struct RoleAssertion {
     pub subject: WalletAddress,
     pub role: Role,
-    /// `None` == workspace-wide; `Some(group)` == channel-scoped.
+    /// `None` == workspace-wide; `Some(group)` == channel-scoped. Group-level
+    /// permission checks (e.g. the relay's membership-mutating ops) require
+    /// `Some(group)` equal to the group being acted on and refuse `None`.
     pub scope: Option<GroupId>,
     /// Unix milliseconds; `None` == no expiry.
     pub not_after: Option<u64>,

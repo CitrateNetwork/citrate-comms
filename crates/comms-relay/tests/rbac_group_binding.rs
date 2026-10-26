@@ -333,3 +333,78 @@ async fn revoked_grant_is_refused() {
     );
     assert!(!members(&w.owner_c, GID_A).await.contains(&joiner.address()));
 }
+
+// ───────────────────────────── tripwire ─────────────────────────────
+
+/// Grant-verification calls in relay production code that are NOT bound to a group.
+/// Every grant check must go through `verify_grant_for_group(…, group_id, …)`; the
+/// unbound `verify_grant_chain` / `verify_role_assertion` must not be called directly.
+fn unbound_grant_checks(file: &str, src: &str) -> Vec<String> {
+    // Production code only: everything before the file's `#[cfg(test)]` module.
+    let prod = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+    let mut out = Vec::new();
+    for banned in ["verify_grant_chain(", "verify_role_assertion("] {
+        if prod.contains(banned) {
+            out.push(format!("{file}: calls unbound `{banned}`"));
+        }
+    }
+    for (i, _) in prod.match_indices("verify_grant_for_group(") {
+        let rest = &prod[i + "verify_grant_for_group(".len()..];
+        let args = rest.split(')').next().unwrap_or("");
+        if !args.contains("group_id") {
+            out.push(format!(
+                "{file}: `verify_grant_for_group({args})` does not pass the group id"
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn tripwire_every_relay_grant_check_is_bound_to_its_group() {
+    let sources = [
+        ("lib.rs", include_str!("../src/lib.rs")),
+        ("ws.rs", include_str!("../src/ws.rs")),
+        ("admin.rs", include_str!("../src/admin.rs")),
+        ("main.rs", include_str!("../src/main.rs")),
+        ("keyvault.rs", include_str!("../src/keyvault.rs")),
+    ];
+    let violations: Vec<String> = sources
+        .iter()
+        .flat_map(|(f, s)| unbound_grant_checks(f, s))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "TRIPWIRE: relay grant checks must be bound to the group they act on: {violations:#?}"
+    );
+    // The membership ops must actually reach the bound check (not merely avoid the
+    // unbound one by skipping verification altogether).
+    let lib = include_str!("../src/lib.rs");
+    let prod = lib.split("\n#[cfg(test)]").next().unwrap();
+    assert!(
+        prod.contains("rbac::verify_grant_for_group(a, admin, self.owner, group_id, now_ms)"),
+        "TRIPWIRE: the membership RBAC gate must call the group-bound grant check"
+    );
+    assert_eq!(
+        prod.matches("self.authorize_membership_op(").count(),
+        2,
+        "TRIPWIRE: onboard and offboard must both go through `authorize_membership_op`"
+    );
+}
+
+/// Negative control: the scanner flags each regression shape it exists to catch.
+#[test]
+fn tripwire_negative_control() {
+    let unbound = "fn f() { rbac::verify_grant_chain(a, admin, self.owner, now_ms)?; }";
+    assert_eq!(unbound_grant_checks("x.rs", unbound).len(), 1);
+    let sig_only = "fn f() { rbac::verify_role_assertion(a, now_ms)?; }";
+    assert_eq!(unbound_grant_checks("x.rs", sig_only).len(), 1);
+    let wrong_arg =
+        "fn f() { rbac::verify_grant_for_group(a, admin, self.owner, other, now_ms)?; }";
+    assert_eq!(unbound_grant_checks("x.rs", wrong_arg).len(), 1);
+    let ok = "fn f() { rbac::verify_grant_for_group(a, admin, self.owner, group_id, now_ms)?; }";
+    assert!(unbound_grant_checks("x.rs", ok).is_empty());
+    // Test-module calls are out of scope.
+    let in_tests = "fn f() {}\n#[cfg(test)]\nmod t { fn g() { verify_grant_chain(x); } }";
+    assert!(unbound_grant_checks("x.rs", in_tests).is_empty());
+}
