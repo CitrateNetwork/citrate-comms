@@ -180,6 +180,26 @@ pub fn verify_grant_chain(
     Ok(())
 }
 
+/// [`verify_grant_chain`] **bound to one group**: the grant must also carry a signed
+/// `scope` equal to `group_id`, the group the caller is about to act in. Fails closed:
+/// a grant with no scope (`None`) or a scope naming any other group is refused. Every
+/// group-level permission check (the relay's membership-mutating ops) goes through
+/// this, so a grant issued for one group can never authorize an action in another.
+pub fn verify_grant_for_group(
+    a: &RoleAssertion,
+    subject: WalletAddress,
+    workspace_owner: WalletAddress,
+    group_id: GroupId,
+    now_ms: u64,
+) -> Result<(), RbacError> {
+    verify_grant_chain(a, subject, workspace_owner, now_ms)?;
+    match a.scope {
+        None => Err(RbacError::MissingScope),
+        Some(scope) if scope != group_id => Err(RbacError::ScopeMismatch),
+        Some(_) => Ok(()),
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RbacError {
     #[error("issuer role is not allowed to assign roles")]
@@ -194,6 +214,10 @@ pub enum RbacError {
     SubjectMismatch,
     #[error("assertion issuer is not the trusted workspace owner")]
     UntrustedIssuer,
+    #[error("assertion carries no group scope; a group-bound check requires one")]
+    MissingScope,
+    #[error("assertion scope does not match the group being acted on")]
+    ScopeMismatch,
     #[error("signature must be 65 bytes")]
     BadSignatureLength,
     #[error("canonical encode failed: {0}")]
@@ -285,6 +309,56 @@ mod tests {
             RbacError::Expired
         );
         verify_role_assertion(&a, 1_000).unwrap(); // still valid before expiry
+    }
+
+    #[test]
+    fn grant_is_bound_to_its_group() {
+        let owner = EthWallet::generate();
+        let alice = EthWallet::generate();
+        let (ga, gb) = (GroupId([1; 32]), GroupId([2; 32]));
+        let grant = |scope| {
+            sign_role_assertion(
+                &owner,
+                Role::Owner,
+                alice.address(),
+                Role::Admin,
+                scope,
+                None,
+            )
+            .unwrap()
+        };
+        let (o, s) = (owner.address(), alice.address());
+        // Same group: accepted.
+        verify_grant_for_group(&grant(Some(ga)), s, o, ga, 1_000).unwrap();
+        // Another group: refused.
+        assert_eq!(
+            verify_grant_for_group(&grant(Some(ga)), s, o, gb, 1_000).unwrap_err(),
+            RbacError::ScopeMismatch
+        );
+        // No group: refused (fail closed).
+        assert_eq!(
+            verify_grant_for_group(&grant(None), s, o, ga, 1_000).unwrap_err(),
+            RbacError::MissingScope
+        );
+        // Scope rewritten after signing to match the target group: the signature no
+        // longer covers it.
+        let mut edited = grant(Some(ga));
+        edited.scope = Some(gb);
+        assert_eq!(
+            verify_grant_for_group(&edited, s, o, gb, 1_000).unwrap_err(),
+            RbacError::SignerMismatch
+        );
+        // The chain checks still run first: expired and wrong-subject grants are refused.
+        let expiring =
+            sign_role_assertion(&owner, Role::Owner, s, Role::Admin, Some(ga), Some(500)).unwrap();
+        assert_eq!(
+            verify_grant_for_group(&expiring, s, o, ga, 1_000).unwrap_err(),
+            RbacError::Expired
+        );
+        assert_eq!(
+            verify_grant_for_group(&grant(Some(ga)), o, o, ga, 1_000).unwrap_err(),
+            RbacError::SubjectMismatch
+        );
     }
 
     #[test]
