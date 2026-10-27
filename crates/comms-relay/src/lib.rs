@@ -2536,6 +2536,57 @@ mod tests {
         );
     }
 
+    /// Only the minter learns whether an invite was used: a signed-in non-minter and a caller
+    /// with no session get the same refusal they would get for any invite, never the used answer.
+    #[test]
+    fn revoke_reporting_use_tells_only_the_minter_that_an_invite_was_used() {
+        let (mut relay, _owner, token_hash) = redeemed_invite(44);
+        let stranger = EthWallet::generate();
+        login(&mut relay, &stranger, 20);
+        let denied = relay
+            .revoke_invite(stranger.address(), token_hash, true)
+            .expect_err("a non-minter can't revoke");
+        assert!(
+            matches!(denied, RelayError::NotAuthorized),
+            "a signed-in non-minter must get NotAuthorized, got {denied:?}"
+        );
+        let anonymous = EthWallet::generate();
+        let unauth = relay
+            .revoke_invite(anonymous.address(), token_hash, true)
+            .expect_err("no session");
+        assert!(
+            matches!(unauth, RelayError::NotAuthenticated),
+            "a caller with no session must get NotAuthenticated, got {unauth:?}"
+        );
+        // The same answers as for an invite nobody used, so the refusal reveals nothing.
+        let (mut fresh, owner, _) = redeemed_invite(45);
+        let unused = *blake3::hash(b"never-redeemed").as_bytes();
+        fresh
+            .publish_invite(
+                owner.address(),
+                GroupId([45; 32]),
+                unused,
+                b"GI".to_vec(),
+                u64::MAX,
+            )
+            .unwrap();
+        login(&mut fresh, &stranger, 21);
+        assert_eq!(
+            fresh
+                .revoke_invite(stranger.address(), unused, true)
+                .expect_err("non-minter")
+                .to_string(),
+            denied.to_string()
+        );
+        assert_eq!(
+            fresh
+                .revoke_invite(anonymous.address(), unused, true)
+                .expect_err("no session")
+                .to_string(),
+            unauth.to_string()
+        );
+    }
+
     #[test]
     fn revoke_without_reporting_use_still_acknowledges_a_redeemed_invite() {
         // Clients that predate the flag keep the original answer.
