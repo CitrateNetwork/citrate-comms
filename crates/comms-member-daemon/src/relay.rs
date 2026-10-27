@@ -399,7 +399,11 @@ impl Relay for WsRelay {
             )
             .map_err(|e| e.to_string())
     }
-    fn revoke_invite(&mut self, _caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String> {
+    fn revoke_invite(
+        &mut self,
+        _caller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<(), String> {
         self.rt
             .block_on(self.client.revoke_invite(token_hash))
             .map_err(|e| e.to_string())

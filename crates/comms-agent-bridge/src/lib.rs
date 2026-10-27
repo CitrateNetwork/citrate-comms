@@ -44,7 +44,11 @@ pub fn wallet_keyring_account(did: &str) -> String {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AgentInbound {
     /// A decrypted application message the agent can read.
-    Message { group: String, sender: String, text: String },
+    Message {
+        group: String,
+        sender: String,
+        text: String,
+    },
     /// A channel system event surfaced to the agent.
     System { group: String, text: String },
 }
@@ -54,11 +58,20 @@ pub enum AgentInbound {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AgentOutbound {
     /// Post a message to a channel the agent is a member of (allowed).
-    Send { group: String, text: String },
+    Send {
+        group: String,
+        text: String,
+    },
     /// Membership-mutating actions — an agent must NOT do these. Present so the bridge
     /// can reject them explicitly (the role=agent guardrail).
-    AddMember { group: String, member: String },
-    RemoveMember { group: String, member: String },
+    AddMember {
+        group: String,
+        member: String,
+    },
+    RemoveMember {
+        group: String,
+        member: String,
+    },
 }
 
 /// An agent participating in a channel as a real MLS member.
@@ -155,7 +168,12 @@ impl AgentBridge {
     }
 
     /// SIWE-authenticate the agent's wallet to the relay (the connect handshake).
-    pub fn authenticate(&self, relay: &mut DeliveryService, domain: &str, now: u64) -> Result<(), BridgeError> {
+    pub fn authenticate(
+        &self,
+        relay: &mut DeliveryService,
+        domain: &str,
+        now: u64,
+    ) -> Result<(), BridgeError> {
         let nonce = relay.issue_challenge(now);
         let msg = SiweMessage {
             domain: domain.into(),
@@ -169,28 +187,51 @@ impl AgentBridge {
             expiration_ms: now + 600_000,
         };
         let sig = self.wallet.sign_siwe(&msg);
-        relay.authenticate(&msg, &sig, now).map(|_| ()).map_err(|e| BridgeError::Relay(e.to_string()))
+        relay
+            .authenticate(&msg, &sig, now)
+            .map(|_| ())
+            .map_err(|e| BridgeError::Relay(e.to_string()))
     }
 
     /// Publish the agent's KeyPackage (with its wallet binding attestation) so an admin
     /// can add it to a channel.
-    pub fn publish_key_package(&self, relay: &mut DeliveryService, domain: &str, now: u64) -> Result<(), BridgeError> {
+    pub fn publish_key_package(
+        &self,
+        relay: &mut DeliveryService,
+        domain: &str,
+        now: u64,
+    ) -> Result<(), BridgeError> {
         let sig_pub = self.mls.sig_pubkey();
         let nonce = relay.issue_challenge(now);
         let pubn = KeyPackagePublication {
             wallet: self.wallet.address(),
-            key_package: self.mls.fresh_key_package().map_err(|e| BridgeError::Mls(e.to_string()))?,
+            key_package: self
+                .mls
+                .fresh_key_package()
+                .map_err(|e| BridgeError::Mls(e.to_string()))?,
             mls_sig_pubkey: sig_pub.clone(),
             binding_attestation: self.wallet.sign_binding(&sig_pub, domain, &nonce).to_vec(),
             nonce,
             relay_domain: domain.into(),
         };
-        relay.publish_key_package(pubn, now).map(|_| ()).map_err(|e| BridgeError::Relay(e.to_string()))
+        relay
+            .publish_key_package(pubn, now)
+            .map(|_| ())
+            .map_err(|e| BridgeError::Relay(e.to_string()))
     }
 
     /// Join the channel from the Welcome an admin produced when adding the agent.
-    pub fn join(&mut self, welcome: &[u8], ratchet_tree: &[u8], gid: GroupId, members: Vec<WalletAddress>) -> Result<(), BridgeError> {
-        let group = self.mls.join(welcome, ratchet_tree).map_err(|e| BridgeError::Mls(e.to_string()))?;
+    pub fn join(
+        &mut self,
+        welcome: &[u8],
+        ratchet_tree: &[u8],
+        gid: GroupId,
+        members: Vec<WalletAddress>,
+    ) -> Result<(), BridgeError> {
+        let group = self
+            .mls
+            .join(welcome, ratchet_tree)
+            .map_err(|e| BridgeError::Mls(e.to_string()))?;
         self.epoch = group.epoch();
         self.group = Some(group);
         self.gid = Some(gid);
@@ -209,8 +250,12 @@ impl AgentBridge {
             if e.kind != EnvelopeKind::Application {
                 continue;
             }
-            let Ok(received) = group.receive(&self.mls, &e.ciphertext) else { continue };
-            let Ok(msg) = ChatMessage::decode(&received.plaintext) else { continue };
+            let Ok(received) = group.receive(&self.mls, &e.ciphertext) else {
+                continue;
+            };
+            let Ok(msg) = ChatMessage::decode(&received.plaintext) else {
+                continue;
+            };
             // Attribute from the authenticated MLS credential, never the
             // relay-controlled `e.sender` — otherwise a hostile relay could forge
             // authorship in the AI agent's view of the conversation (CM2-B-A002).
@@ -229,7 +274,12 @@ impl AgentBridge {
     /// Act on a command from the agent runtime. `Send` is allowed (post); any
     /// membership-mutating command is **refused** (role=agent guardrail). Returns the
     /// relay sequence number of the submitted message on success.
-    pub fn handle(&mut self, relay: &mut DeliveryService, cmd: AgentOutbound, now: u64) -> Result<u64, BridgeError> {
+    pub fn handle(
+        &mut self,
+        relay: &mut DeliveryService,
+        cmd: AgentOutbound,
+        now: u64,
+    ) -> Result<u64, BridgeError> {
         match cmd {
             AgentOutbound::Send { text, .. } => {
                 // Fail-closed: the agent may only act under a verified owner/admin sponsor.
@@ -264,13 +314,22 @@ impl AgentBridge {
                     thread_id: None,
                     parent_id: None,
                     body: text,
-                    sent: Lamport { counter: 0, actor: self.wallet.address() },
+                    sent: Lamport {
+                        counter: 0,
+                        actor: self.wallet.address(),
+                    },
                 }
                 .encode()
                 .map_err(|e| BridgeError::Codec(e.to_string()))?;
-                let ct = group.send(&self.mls, &payload).map_err(|e| BridgeError::Mls(e.to_string()))?;
-                let recipients: Vec<WalletAddress> =
-                    self.members.iter().copied().filter(|a| *a != self.wallet.address()).collect();
+                let ct = group
+                    .send(&self.mls, &payload)
+                    .map_err(|e| BridgeError::Mls(e.to_string()))?;
+                let recipients: Vec<WalletAddress> = self
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|a| *a != self.wallet.address())
+                    .collect();
                 relay
                     .submit_as(
                         // The bridge IS this agent's MLS client; bind the envelope sender
@@ -369,9 +428,15 @@ mod tests {
     fn login(relay: &mut DeliveryService, w: &EthWallet, now: u64) {
         let nonce = relay.issue_challenge(now);
         let msg = SiweMessage {
-            domain: DOMAIN.into(), address: w.address(), statement: "in".into(),
-            uri: format!("wss://{DOMAIN}"), version: "1".into(), chain_id: CITRATE_CHAIN_ID,
-            nonce, issued_at_ms: now, expiration_ms: now + 600_000,
+            domain: DOMAIN.into(),
+            address: w.address(),
+            statement: "in".into(),
+            uri: format!("wss://{DOMAIN}"),
+            version: "1".into(),
+            chain_id: CITRATE_CHAIN_ID,
+            nonce,
+            issued_at_ms: now,
+            expiration_ms: now + 600_000,
         };
         let sig = w.sign_siwe(&msg);
         relay.authenticate(&msg, &sig, now).unwrap();
@@ -407,19 +472,73 @@ mod tests {
         relay.register_group(gid, admin_w.address(), now).unwrap();
         let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
         let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
-        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
-        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
-        agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
+        relay
+            .submit_as(
+                admin_w.address(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Commit,
+                    sender: admin_w.address(),
+                    recipients: vec![],
+                    ciphertext: add.commit,
+                    group_seq: None,
+                },
+                now,
+            )
+            .unwrap();
+        relay
+            .onboard(
+                gid,
+                admin_w.address(),
+                None,
+                agent.wallet(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Welcome,
+                    sender: admin_w.address(),
+                    recipients: vec![agent.wallet()],
+                    ciphertext: add.welcome.clone(),
+                    group_seq: None,
+                },
+                add.ratchet_tree.clone(),
+                now,
+            )
+            .unwrap();
+        agent
+            .join(
+                &add.welcome,
+                &add.ratchet_tree,
+                gid,
+                vec![admin_w.address(), agent.wallet()],
+            )
+            .unwrap();
 
         // Sponsored for one minute.
         let expires_at = now + 60_000;
-        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(expires_at)).unwrap();
+        let grant = sign_role_assertion(
+            &admin_w,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            Some(gid),
+            Some(expires_at),
+        )
+        .unwrap();
         agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
 
         // Inside the window: allowed.
         assert!(
             agent
-                .handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "in window".into() }, now + 30_000)
+                .handle(
+                    &mut relay,
+                    AgentOutbound::Send {
+                        group: "deals".into(),
+                        text: "in window".into()
+                    },
+                    now + 30_000
+                )
                 .is_ok(),
             "an unexpired sponsorship must still permit posting"
         );
@@ -432,7 +551,10 @@ mod tests {
         assert_eq!(
             agent.handle(
                 &mut relay,
-                AgentOutbound::Send { group: "deals".into(), text: "exactly at expiry".into() },
+                AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "exactly at expiry".into()
+                },
                 expires_at,
             ),
             Err(BridgeError::SponsorExpired),
@@ -443,7 +565,10 @@ mod tests {
         assert_eq!(
             agent.handle(
                 &mut relay,
-                AgentOutbound::Send { group: "deals".into(), text: "after the grant lapsed".into() },
+                AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "after the grant lapsed".into()
+                },
                 expires_at + 1,
             ),
             Err(BridgeError::SponsorExpired),
@@ -454,7 +579,10 @@ mod tests {
         assert_eq!(
             agent.handle(
                 &mut relay,
-                AgentOutbound::Send { group: "deals".into(), text: "still trying".into() },
+                AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "still trying".into()
+                },
                 expires_at + 86_400_000,
             ),
             Err(BridgeError::SponsorExpired)
@@ -482,25 +610,103 @@ mod tests {
         relay.register_group(gid, admin_w.address(), now).unwrap();
         let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
         let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
-        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
-        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
-        agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
+        relay
+            .submit_as(
+                admin_w.address(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Commit,
+                    sender: admin_w.address(),
+                    recipients: vec![],
+                    ciphertext: add.commit,
+                    group_seq: None,
+                },
+                now,
+            )
+            .unwrap();
+        relay
+            .onboard(
+                gid,
+                admin_w.address(),
+                None,
+                agent.wallet(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Welcome,
+                    sender: admin_w.address(),
+                    recipients: vec![agent.wallet()],
+                    ciphertext: add.welcome.clone(),
+                    group_seq: None,
+                },
+                add.ratchet_tree.clone(),
+                now,
+            )
+            .unwrap();
+        agent
+            .join(
+                &add.welcome,
+                &add.ratchet_tree,
+                gid,
+                vec![admin_w.address(), agent.wallet()],
+            )
+            .unwrap();
         assert!(agent.is_member());
 
         // The admin (workspace owner) sponsors the agent: a signed role=agent grant scoped
         // to this channel. Until accepted, the bridge fails closed on any post.
         assert_eq!(
-            agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "early".into() }, now),
+            agent.handle(
+                &mut relay,
+                AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "early".into()
+                },
+                now
+            ),
             Err(BridgeError::Unsponsored)
         );
-        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
+        let grant = sign_role_assertion(
+            &admin_w,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            Some(gid),
+            Some(now + 86_400_000),
+        )
+        .unwrap();
         agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
         assert!(agent.is_sponsored());
 
         // Admin posts a message; the agent decrypts it as an IPC `message` event.
-        let payload = ChatMessage { thread_id: None, parent_id: None, body: "Can you summarize the Northwind thread?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
+        let payload = ChatMessage {
+            thread_id: None,
+            parent_id: None,
+            body: "Can you summarize the Northwind thread?".into(),
+            sent: Lamport {
+                counter: 1,
+                actor: admin_w.address(),
+            },
+        }
+        .encode()
+        .unwrap();
         let ct = admin_g.send(&admin_m, &payload).unwrap();
-        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
+        relay
+            .submit_as(
+                admin_w.address(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Application,
+                    sender: admin_w.address(),
+                    recipients: vec![agent.wallet()],
+                    ciphertext: ct,
+                    group_seq: None,
+                },
+                now,
+            )
+            .unwrap();
 
         let inbox = agent.poll(&mut relay);
         assert_eq!(inbox.len(), 1);
@@ -516,28 +722,84 @@ mod tests {
         let seq = agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "Summary: Northwind wants a self-hosted, air-gapped pilot; moved to Proposal.".into() }, now).unwrap();
         assert!(seq > 0);
         let admin_inbox = relay.fetch(&admin_w.address());
-        let app = admin_inbox.iter().find(|e| e.kind == EnvelopeKind::Application).unwrap();
-        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap().plaintext;
-        assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind wants a self-hosted"));
+        let app = admin_inbox
+            .iter()
+            .find(|e| e.kind == EnvelopeKind::Application)
+            .unwrap();
+        let pt = admin_g
+            .receive(&admin_m, &app.ciphertext)
+            .unwrap()
+            .plaintext;
+        assert!(ChatMessage::decode(&pt)
+            .unwrap()
+            .body
+            .contains("Northwind wants a self-hosted"));
 
         // The guardrail: the agent is refused any membership-mutating command.
-        assert_eq!(agent.handle(&mut relay, AgentOutbound::AddMember { group: "deals".into(), member: "0xabc".into() }, now), Err(BridgeError::Forbidden("add-member")));
-        assert_eq!(agent.handle(&mut relay, AgentOutbound::RemoveMember { group: "deals".into(), member: "0xabc".into() }, now), Err(BridgeError::Forbidden("remove-member")));
+        assert_eq!(
+            agent.handle(
+                &mut relay,
+                AgentOutbound::AddMember {
+                    group: "deals".into(),
+                    member: "0xabc".into()
+                },
+                now
+            ),
+            Err(BridgeError::Forbidden("add-member"))
+        );
+        assert_eq!(
+            agent.handle(
+                &mut relay,
+                AgentOutbound::RemoveMember {
+                    group: "deals".into(),
+                    member: "0xabc".into()
+                },
+                now
+            ),
+            Err(BridgeError::Forbidden("remove-member"))
+        );
 
         // CM2-B-B022: a grant scoped to a DIFFERENT group must not authorize a post to
         // this one — the scope field is now compared at action time, not just stored.
         let wrong_scope = GroupId([0xAB; 32]);
         assert_ne!(wrong_scope, gid);
-        let mis_grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(wrong_scope), Some(now + 86_400_000)).unwrap();
-        agent.accept_sponsor(mis_grant, admin_w.address(), now).unwrap();
+        let mis_grant = sign_role_assertion(
+            &admin_w,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            Some(wrong_scope),
+            Some(now + 86_400_000),
+        )
+        .unwrap();
+        agent
+            .accept_sponsor(mis_grant, admin_w.address(), now)
+            .unwrap();
         assert_eq!(
-            agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "out-of-scope".into() }, now),
+            agent.handle(
+                &mut relay,
+                AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "out-of-scope".into()
+                },
+                now
+            ),
             Err(BridgeError::Forbidden("scope")),
             "a grant scoped to another group must not authorize this post"
         );
         // Restore the correctly-scoped grant so the audit assertion below is unaffected.
-        let ok_grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
-        agent.accept_sponsor(ok_grant, admin_w.address(), now).unwrap();
+        let ok_grant = sign_role_assertion(
+            &admin_w,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            Some(gid),
+            Some(now + 86_400_000),
+        )
+        .unwrap();
+        agent
+            .accept_sponsor(ok_grant, admin_w.address(), now)
+            .unwrap();
 
         // The audit chain recorded the agent's envelope + the visible Add.
         relay.audit().verify_integrity().unwrap();
@@ -553,16 +815,27 @@ mod tests {
         let secret = [7u8; 32];
         let a = EthWallet::from_secret_key(&secret).unwrap();
         let b = EthWallet::from_secret_key(&secret).unwrap();
-        assert_eq!(a.address(), b.address(), "a fixed secret yields a fixed wallet");
+        assert_eq!(
+            a.address(),
+            b.address(),
+            "a fixed secret yields a fixed wallet"
+        );
         let c = EthWallet::from_secret_key(&[9u8; 32]).unwrap();
-        assert_ne!(a.address(), c.address(), "a different secret is a different agent");
+        assert_ne!(
+            a.address(),
+            c.address(),
+            "a different secret is a different agent"
+        );
 
         // provision() wires the keyring through to a valid, usable wallet identity.
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
         let agent = AgentBridge::provision("did:citrate:ops-agent", KEYRING_SERVICE).unwrap();
         assert_ne!(agent.wallet().0, [0u8; 20]);
         // Ephemeral provisioning (no keyring) is, by contrast, fresh each time.
-        assert_ne!(AgentBridge::new("did:x").unwrap().wallet(), AgentBridge::new("did:x").unwrap().wallet());
+        assert_ne!(
+            AgentBridge::new("did:x").unwrap().wallet(),
+            AgentBridge::new("did:x").unwrap().wallet()
+        );
     }
 
     /// The sponsor gate rejects grants that are not a valid, owner-signed role=agent
@@ -575,25 +848,74 @@ mod tests {
         let mut agent = AgentBridge::new("did:citrate:crm-agent").unwrap();
 
         // Wrong role: owner grants Admin, not Agent.
-        let admin_grant = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Admin, None, None).unwrap();
-        assert!(matches!(agent.accept_sponsor(admin_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+        let admin_grant =
+            sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Admin, None, None)
+                .unwrap();
+        assert!(matches!(
+            agent.accept_sponsor(admin_grant, owner.address(), now),
+            Err(BridgeError::BadSponsor(_))
+        ));
 
         // Wrong issuer: a non-owner "sponsors" the agent.
-        let imposter_grant = sign_role_assertion(&imposter, Role::Owner, agent.wallet(), Role::Agent, None, None).unwrap();
-        assert!(matches!(agent.accept_sponsor(imposter_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+        let imposter_grant = sign_role_assertion(
+            &imposter,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.accept_sponsor(imposter_grant, owner.address(), now),
+            Err(BridgeError::BadSponsor(_))
+        ));
 
         // Wrong subject: owner grants role=agent to someone else.
         let other = EthWallet::generate();
-        let other_grant = sign_role_assertion(&owner, Role::Owner, other.address(), Role::Agent, None, None).unwrap();
-        assert!(matches!(agent.accept_sponsor(other_grant, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+        let other_grant = sign_role_assertion(
+            &owner,
+            Role::Owner,
+            other.address(),
+            Role::Agent,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.accept_sponsor(other_grant, owner.address(), now),
+            Err(BridgeError::BadSponsor(_))
+        ));
 
         // Expired grant.
-        let expired = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Agent, None, Some(now - 1)).unwrap();
-        assert!(matches!(agent.accept_sponsor(expired, owner.address(), now), Err(BridgeError::BadSponsor(_))));
+        let expired = sign_role_assertion(
+            &owner,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            None,
+            Some(now - 1),
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.accept_sponsor(expired, owner.address(), now),
+            Err(BridgeError::BadSponsor(_))
+        ));
 
         // A valid grant is accepted.
-        let good = sign_role_assertion(&owner, Role::Owner, agent.wallet(), Role::Agent, None, Some(now + 1_000)).unwrap();
-        assert_eq!(agent.accept_sponsor(good, owner.address(), now).unwrap(), Role::Agent);
+        let good = sign_role_assertion(
+            &owner,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            None,
+            Some(now + 1_000),
+        )
+        .unwrap();
+        assert_eq!(
+            agent.accept_sponsor(good, owner.address(), now).unwrap(),
+            Role::Agent
+        );
         assert!(agent.is_sponsored());
     }
 
@@ -621,16 +943,87 @@ mod tests {
         relay.register_group(gid, admin_w.address(), now).unwrap();
         let agent_kp = relay.take_key_package(&agent.wallet()).unwrap();
         let add = admin_g.add(&admin_m, &agent_kp.key_package).unwrap();
-        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Commit, sender: admin_w.address(), recipients: vec![], ciphertext: add.commit, group_seq: None }, now).unwrap();
-        relay.onboard(gid, admin_w.address(), None, agent.wallet(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Welcome, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: add.welcome.clone(), group_seq: None }, add.ratchet_tree.clone(), now).unwrap();
-        agent.join(&add.welcome, &add.ratchet_tree, gid, vec![admin_w.address(), agent.wallet()]).unwrap();
-        let grant = sign_role_assertion(&admin_w, Role::Owner, agent.wallet(), Role::Agent, Some(gid), Some(now + 86_400_000)).unwrap();
+        relay
+            .submit_as(
+                admin_w.address(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Commit,
+                    sender: admin_w.address(),
+                    recipients: vec![],
+                    ciphertext: add.commit,
+                    group_seq: None,
+                },
+                now,
+            )
+            .unwrap();
+        relay
+            .onboard(
+                gid,
+                admin_w.address(),
+                None,
+                agent.wallet(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Welcome,
+                    sender: admin_w.address(),
+                    recipients: vec![agent.wallet()],
+                    ciphertext: add.welcome.clone(),
+                    group_seq: None,
+                },
+                add.ratchet_tree.clone(),
+                now,
+            )
+            .unwrap();
+        agent
+            .join(
+                &add.welcome,
+                &add.ratchet_tree,
+                gid,
+                vec![admin_w.address(), agent.wallet()],
+            )
+            .unwrap();
+        let grant = sign_role_assertion(
+            &admin_w,
+            Role::Owner,
+            agent.wallet(),
+            Role::Agent,
+            Some(gid),
+            Some(now + 86_400_000),
+        )
+        .unwrap();
         agent.accept_sponsor(grant, admin_w.address(), now).unwrap();
 
         // Admin posts a message into the channel.
-        let payload = ChatMessage { thread_id: None, parent_id: None, body: "What's the status of the Northwind deal?".into(), sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
+        let payload = ChatMessage {
+            thread_id: None,
+            parent_id: None,
+            body: "What's the status of the Northwind deal?".into(),
+            sent: Lamport {
+                counter: 1,
+                actor: admin_w.address(),
+            },
+        }
+        .encode()
+        .unwrap();
         let ct = admin_g.send(&admin_m, &payload).unwrap();
-        relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![agent.wallet()], ciphertext: ct, group_seq: None }, now).unwrap();
+        relay
+            .submit_as(
+                admin_w.address(),
+                Envelope {
+                    group_id: gid,
+                    epoch: EpochId(1),
+                    kind: EnvelopeKind::Application,
+                    sender: admin_w.address(),
+                    recipients: vec![agent.wallet()],
+                    ciphertext: ct,
+                    group_seq: None,
+                },
+                now,
+            )
+            .unwrap();
 
         // Bind the bearer-gated socket; accept + connect concurrently.
         let dir = tempfile::tempdir().unwrap();
@@ -645,13 +1038,27 @@ mod tests {
         let mut client = client.unwrap();
 
         // Drive the bridge's serve loop and the runtime script concurrently.
-        let serve = agent.serve(&mut sink, &mut source, &mut relay, Duration::from_millis(2), || now);
+        let serve = agent.serve(
+            &mut sink,
+            &mut source,
+            &mut relay,
+            Duration::from_millis(2),
+            || now,
+        );
         let runtime = async move {
             // The runtime receives the admin's decrypted message…
             let ev = client.recv_event().await.unwrap().unwrap();
-            assert!(matches!(ev, AgentInbound::Message { ref text, .. } if text.contains("Northwind")));
+            assert!(
+                matches!(ev, AgentInbound::Message { ref text, .. } if text.contains("Northwind"))
+            );
             // …and replies. The bridge encrypts + submits it.
-            client.send_command(&AgentOutbound::Send { group: "deals".into(), text: "Northwind is in Proposal; pilot is air-gapped.".into() }).await.unwrap();
+            client
+                .send_command(&AgentOutbound::Send {
+                    group: "deals".into(),
+                    text: "Northwind is in Proposal; pilot is air-gapped.".into(),
+                })
+                .await
+                .unwrap();
             // Give the bridge a beat to submit before we EOF the loop.
             tokio::time::sleep(Duration::from_millis(10)).await;
             drop(client); // clean EOF ends serve
@@ -661,9 +1068,18 @@ mod tests {
 
         // The admin decrypts the agent's reply off the relay.
         let admin_inbox = relay.fetch(&admin_w.address());
-        let app = admin_inbox.iter().find(|e| e.kind == EnvelopeKind::Application).expect("agent reply routed");
-        let pt = admin_g.receive(&admin_m, &app.ciphertext).unwrap().plaintext;
-        assert!(ChatMessage::decode(&pt).unwrap().body.contains("Northwind is in Proposal"));
+        let app = admin_inbox
+            .iter()
+            .find(|e| e.kind == EnvelopeKind::Application)
+            .expect("agent reply routed");
+        let pt = admin_g
+            .receive(&admin_m, &app.ciphertext)
+            .unwrap()
+            .plaintext;
+        assert!(ChatMessage::decode(&pt)
+            .unwrap()
+            .body
+            .contains("Northwind is in Proposal"));
         relay.audit().verify_integrity().unwrap();
     }
 
@@ -693,11 +1109,38 @@ mod tests {
 
             // Seal the canary inside a real MLS-encrypted ChatMessage.
             let body = String::from_utf8(CANARY.to_vec()).unwrap();
-            let payload = ChatMessage { thread_id: None, parent_id: None, body, sent: Lamport { counter: 1, actor: admin_w.address() } }.encode().unwrap();
+            let payload = ChatMessage {
+                thread_id: None,
+                parent_id: None,
+                body,
+                sent: Lamport {
+                    counter: 1,
+                    actor: admin_w.address(),
+                },
+            }
+            .encode()
+            .unwrap();
             let ct = admin_g.send(&admin_m, &payload).unwrap();
             // (a) The wire ciphertext is opaque — the canary is not in it.
-            assert!(!contains_subseq(&ct, CANARY), "MLS ciphertext leaked the plaintext");
-            relay.submit_as(admin_w.address(), Envelope { group_id: gid, epoch: EpochId(1), kind: EnvelopeKind::Application, sender: admin_w.address(), recipients: vec![], ciphertext: ct.clone(), group_seq: None }, now).unwrap();
+            assert!(
+                !contains_subseq(&ct, CANARY),
+                "MLS ciphertext leaked the plaintext"
+            );
+            relay
+                .submit_as(
+                    admin_w.address(),
+                    Envelope {
+                        group_id: gid,
+                        epoch: EpochId(1),
+                        kind: EnvelopeKind::Application,
+                        sender: admin_w.address(),
+                        recipients: vec![],
+                        ciphertext: ct.clone(),
+                        group_seq: None,
+                    },
+                    now,
+                )
+                .unwrap();
             ct
             // relay drops here → RocksDB flushes and closes.
         };
@@ -716,7 +1159,10 @@ mod tests {
                 path.display()
             );
         }
-        assert!(files_scanned > 0, "expected the relay to have written files");
+        assert!(
+            files_scanned > 0,
+            "expected the relay to have written files"
+        );
     }
 
     /// Naive substring search over bytes (test-only).
@@ -732,7 +1178,9 @@ mod tests {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() {

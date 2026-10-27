@@ -7,7 +7,7 @@ use comms_core::identity::EthWallet;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::Stream;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -20,7 +20,7 @@ fn pipe_name_matches_citrate_core_golden_vector() {
 
 /// Connect the client end using the same [`super::endpoint_name`] rule the server binds with, then
 /// wrap it in a [`BufReader`] whose `get_mut()` is the write side (the transport is half-duplex).
-fn connect_client(path: &PathBuf) -> BufReader<Stream> {
+fn connect_client(path: &Path) -> BufReader<Stream> {
     let path_str = path.to_str().expect("socket path is valid UTF-8");
     let name = super::endpoint_name(path_str).expect("endpoint name");
     let stream = Stream::connect(name).expect("connect");

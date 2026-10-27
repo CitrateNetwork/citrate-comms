@@ -49,6 +49,13 @@ ignore = [
     "RUSTSEC-2026-0194",
     # RUSTSEC-2026-0195 — quick-xml: unbounded namespace-decl allocation (desktop)
     "RUSTSEC-2026-0195",
+    # ── crypto-bigint < 0.7.6 (time-boxed) — EXPIRES 2026-11-09 ──
+    # RUSTSEC-2026-0387 — crypto-bigint < 0.7.6: multiple timing variability issues in
+    # operations intended to be constant-time. elliptic-curve 0.13 requires crypto-bigint
+    # ^0.5; the fix is in the 0.14 curve line, held back upstream (revm-precompile,
+    # openmls_rust_crypto and bip32 still require the 0.13 line).
+    # Guard: scripts/ci/check_crypto_bigint_users.py (run by scripts/ci/audit.sh).
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]
@@ -78,6 +85,16 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace path deps (`path = "../x"`, no version) are intra-repo, not registry
+# wildcards; registry and git wildcards stay denied.
+allow-wildcard-paths = true
+# Minimum-version floors for crates whose patched release is not (yet) in the
+# RustSec database, so `advisories` alone would not hold the line. Each entry is a
+# floor, not a pin: any version at or above it passes. Remove an entry once the
+# advisory DB covers it.
+deny = [
+    { crate = "openmls:<0.8.2", reason = "dependency update to the patched release; keep >= 0.8.2" },
+]
 
 [sources]
 unknown-registry = "deny"

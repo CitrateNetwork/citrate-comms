@@ -22,7 +22,11 @@ fn ui_harness_geometry_and_nav_interaction() {
         let win = app.window().size();
         assert_eq!((win.width, win.height), (1440, 900), "headless window size");
         app.set_relay_status("connecting…".into());
-        assert_eq!(app.get_relay_status().to_string(), "connecting…", "property round-trip");
+        assert_eq!(
+            app.get_relay_status().to_string(),
+            "connecting…",
+            "property round-trip"
+        );
 
         // ── 2. Mount the signed-in shell (force-shell, no live relay) + realize the tree. ──
         app.set_force_shell(true);
@@ -33,19 +37,37 @@ fn ui_harness_geometry_and_nav_interaction() {
         //       default; clicking the Ledger tab must swap to the ledger pane (proves the
         //       tab TouchArea isn't occluded / dead). ──
         let present = |label: &str, app: &AppWindow| {
-            st::ElementHandle::find_by_accessible_label(app, label).next().is_some()
+            st::ElementHandle::find_by_accessible_label(app, label)
+                .next()
+                .is_some()
         };
-        assert!(present("ledger-pane:info", &app), "ledger Info pane shows by default");
-        assert!(!present("ledger-pane:ledger", &app), "ledger pane hidden until its tab is clicked");
+        assert!(
+            present("ledger-pane:info", &app),
+            "ledger Info pane shows by default"
+        );
+        assert!(
+            !present("ledger-pane:ledger", &app),
+            "ledger pane hidden until its tab is clicked"
+        );
         let ledger_tab = st::ElementHandle::find_by_accessible_label(&app, "ledger-tab:Ledger")
             .next()
             .expect("'Ledger' tab");
         let ts = ledger_tab.size();
-        assert!(ts.height >= 30.0, "ledger tab hit area too short (was the bug): {ts:?}");
+        assert!(
+            ts.height >= 30.0,
+            "ledger tab hit area too short (was the bug): {ts:?}"
+        );
         ledger_tab.single_click(PointerEventButton::Left).await;
-        assert!(present("ledger-pane:ledger", &app), "clicking Ledger tab shows the ledger pane");
+        assert!(
+            present("ledger-pane:ledger", &app),
+            "clicking Ledger tab shows the ledger pane"
+        );
         // restore Info for the rest of the run
-        st::ElementHandle::find_by_accessible_label(&app, "ledger-tab:Info").next().unwrap().single_click(PointerEventButton::Left).await;
+        st::ElementHandle::find_by_accessible_label(&app, "ledger-tab:Info")
+            .next()
+            .unwrap()
+            .single_click(PointerEventButton::Left)
+            .await;
 
         // ── 3. Interaction + hit-target: for each section, find its nav control, assert a
         // real ≥24×24 hit area, synth-click it, and assert the route changes — proving the
@@ -63,35 +85,63 @@ fn ui_harness_geometry_and_nav_interaction() {
                 .next()
                 .unwrap_or_else(|| panic!("nav item '{label}' not found"));
             let s = item.size();
-            assert!(s.width >= 24.0 && s.height >= 24.0, "'{label}' hit area too small: {s:?}");
+            assert!(
+                s.width >= 24.0 && s.height >= 24.0,
+                "'{label}' hit area too small: {s:?}"
+            );
             item.single_click(PointerEventButton::Left).await;
-            assert_eq!(app.get_route().to_string(), route, "click '{label}' should route to '{route}'");
+            assert_eq!(
+                app.get_route().to_string(),
+                route,
+                "click '{label}' should route to '{route}'"
+            );
         }
 
         // ── 3b. Settings sub-nav tabs SWITCH the pane (S6.3). At route=settings (the last
         //       nav click), only the Identity pane is mounted; clicking Devices swaps it. ──
         let pane_mounted = |label: &str, app: &AppWindow| {
-            st::ElementHandle::find_by_accessible_label(app, label).next().is_some()
+            st::ElementHandle::find_by_accessible_label(app, label)
+                .next()
+                .is_some()
         };
-        assert!(pane_mounted("settings-pane:Identity", &app), "Identity pane shows by default");
-        assert!(!pane_mounted("settings-pane:Devices", &app), "Devices pane hidden until its tab is clicked");
+        assert!(
+            pane_mounted("settings-pane:Identity", &app),
+            "Identity pane shows by default"
+        );
+        assert!(
+            !pane_mounted("settings-pane:Devices", &app),
+            "Devices pane hidden until its tab is clicked"
+        );
         st::ElementHandle::find_by_accessible_label(&app, "settings-tab:Devices")
             .next()
             .expect("'Devices' settings tab")
             .single_click(PointerEventButton::Left)
             .await;
-        assert!(pane_mounted("settings-pane:Devices", &app), "clicking the Devices tab shows the Devices pane");
-        assert!(!pane_mounted("settings-pane:Identity", &app), "Identity pane hidden after switching to Devices");
+        assert!(
+            pane_mounted("settings-pane:Devices", &app),
+            "clicking the Devices tab shows the Devices pane"
+        );
+        assert!(
+            !pane_mounted("settings-pane:Identity", &app),
+            "Identity pane hidden after switching to Devices"
+        );
 
         // ── 4. Every button (nav rail + Btn) has an adequate hit area. ──
         let buttons = st::ElementQuery::from_root(&app)
             .match_descendants()
             .match_accessible_role(st::AccessibleRole::Button)
             .find_all();
-        assert!(buttons.len() >= 10, "expected nav + buttons, found {}", buttons.len());
+        assert!(
+            buttons.len() >= 10,
+            "expected nav + buttons, found {}",
+            buttons.len()
+        );
         for el in &buttons {
             let s = el.size();
-            assert!(s.width >= 24.0 && s.height >= 24.0, "button hit area too small: {s:?}");
+            assert!(
+                s.width >= 24.0 && s.height >= 24.0,
+                "button hit area too small: {s:?}"
+            );
         }
 
         // ── 5. Dialog flow: open Invite from Members, then Send — proving overlay triggers
@@ -112,14 +162,21 @@ fn ui_harness_geometry_and_nav_interaction() {
             .expect("'+ Invite' button")
             .single_click(PointerEventButton::Left)
             .await;
-        assert_eq!(app.get_overlay().to_string(), "invite", "'+ Invite' opens the invite dialog");
+        assert_eq!(
+            app.get_overlay().to_string(),
+            "invite",
+            "'+ Invite' opens the invite dialog"
+        );
         // The dialog's Send button is live and wires through to create-channel.
         st::ElementHandle::find_by_accessible_label(&app, "Send invite")
             .next()
             .expect("'Send invite' button")
             .single_click(PointerEventButton::Left)
             .await;
-        assert!(*fired.borrow(), "'Send invite' should fire the create-channel callback");
+        assert!(
+            *fired.borrow(),
+            "'Send invite' should fire the create-channel callback"
+        );
         app.set_overlay("".into());
 
         // ── 6. Every overlay + the command palette mount their content when triggered
@@ -133,7 +190,9 @@ fn ui_harness_geometry_and_nav_interaction() {
             app.set_overlay(state.into());
             st::mock_elapsed_time(std::time::Duration::from_millis(1));
             assert!(
-                st::ElementHandle::find_by_element_type_name(&app, component).next().is_some(),
+                st::ElementHandle::find_by_element_type_name(&app, component)
+                    .next()
+                    .is_some(),
                 "overlay '{state}' should mount {component}"
             );
             app.set_overlay("".into());
@@ -141,7 +200,9 @@ fn ui_harness_geometry_and_nav_interaction() {
         app.set_cmdk(true);
         st::mock_elapsed_time(std::time::Duration::from_millis(1));
         assert!(
-            st::ElementHandle::find_by_element_type_name(&app, "CommandPalette").next().is_some(),
+            st::ElementHandle::find_by_element_type_name(&app, "CommandPalette")
+                .next()
+                .is_some(),
             "⌘K should mount the CommandPalette"
         );
 

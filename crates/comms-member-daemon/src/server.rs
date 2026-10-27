@@ -115,7 +115,10 @@ pub fn serve(mut daemon: MemberDaemon, socket_path: &Path, bearer: &str) -> std:
     #[cfg(unix)]
     let _ = std::fs::remove_file(socket_path);
     let path_str = socket_path.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "socket path is not valid UTF-8")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket path is not valid UTF-8",
+        )
     })?;
     let listener = ListenerOptions::new()
         .name(endpoint_name(path_str)?)
@@ -149,9 +152,7 @@ fn handle_conn(daemon: &mut MemberDaemon, stream: Stream, bearer: &str) -> std::
         return Ok(()); // client closed before auth
     }
     let authed = match serde_json::from_str::<Handshake>(line.trim()) {
-        Ok(Handshake::Auth { token }) => {
-            token.as_bytes().ct_eq(bearer.as_bytes()).into()
-        }
+        Ok(Handshake::Auth { token }) => token.as_bytes().ct_eq(bearer.as_bytes()).into(),
         Err(_) => false,
     };
     if !authed {

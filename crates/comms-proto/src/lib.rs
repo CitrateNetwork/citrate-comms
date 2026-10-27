@@ -152,10 +152,17 @@ pub enum Role {
 pub struct RoleAssertion {
     pub subject: WalletAddress,
     pub role: Role,
-    /// `None` == workspace-wide; `Some(group)` == channel-scoped.
+    /// `None` == workspace-wide; `Some(group)` == channel-scoped. Group-level
+    /// permission checks (e.g. the relay's membership-mutating ops) require
+    /// `Some(group)` equal to the group being acted on and refuse `None`.
     pub scope: Option<GroupId>,
     /// Unix milliseconds; `None` == no expiry.
     pub not_after: Option<u64>,
+    /// The subject's grant generation in `scope` this grant was issued for. `None` is
+    /// generation 0 and is omitted from the encoding, so grants signed before this field
+    /// existed keep their exact bytes (and signatures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub issuer: WalletAddress,
     /// secp256k1 signature by `issuer` over the canonical encoding of the fields above.
     pub signature: Vec<u8>,

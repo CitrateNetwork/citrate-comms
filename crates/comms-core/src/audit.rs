@@ -21,8 +21,18 @@ struct LinkInput<'a> {
     event: &'a AuditEvent,
 }
 
-fn link_hash(seq: u64, ts: u64, prev: [u8; 32], event: &AuditEvent) -> Result<[u8; 32], AuditError> {
-    let input = LinkInput { sequence: seq, timestamp_ms: ts, previous_hash: prev, event };
+fn link_hash(
+    seq: u64,
+    ts: u64,
+    prev: [u8; 32],
+    event: &AuditEvent,
+) -> Result<[u8; 32], AuditError> {
+    let input = LinkInput {
+        sequence: seq,
+        timestamp_ms: ts,
+        previous_hash: prev,
+        event,
+    };
     let body = canonical::to_vec(&input).map_err(|e| AuditError::Encode(e.to_string()))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
@@ -48,7 +58,9 @@ impl AuditChain {
             event,
             record_hash,
         };
-        Ok(Self { records: vec![genesis] })
+        Ok(Self {
+            records: vec![genesis],
+        })
     }
 
     /// Rebuild a chain from persisted records (e.g. on relay restart) and verify it.
@@ -63,12 +75,22 @@ impl AuditChain {
     }
 
     /// Append an event, linking it to the current head. Returns the new record.
-    pub fn append(&mut self, event: AuditEvent, timestamp_ms: u64) -> Result<&AuditRecord, AuditError> {
+    pub fn append(
+        &mut self,
+        event: AuditEvent,
+        timestamp_ms: u64,
+    ) -> Result<&AuditRecord, AuditError> {
         let head = self.records.last().ok_or(AuditError::Empty)?;
         let sequence = head.sequence + 1;
         let previous_hash = head.record_hash;
         let record_hash = link_hash(sequence, timestamp_ms, previous_hash, &event)?;
-        self.records.push(AuditRecord { sequence, timestamp_ms, previous_hash, event, record_hash });
+        self.records.push(AuditRecord {
+            sequence,
+            timestamp_ms,
+            previous_hash,
+            event,
+            record_hash,
+        });
         Ok(self.records.last().expect("just pushed"))
     }
 
@@ -98,7 +120,11 @@ impl AuditChain {
         for (i, r) in self.records.iter().enumerate() {
             let expected_seq = i as u64;
             if r.sequence != expected_seq {
-                return Err(AuditError::SequenceBreak { at: i, expected: expected_seq, found: r.sequence });
+                return Err(AuditError::SequenceBreak {
+                    at: i,
+                    expected: expected_seq,
+                    found: r.sequence,
+                });
             }
             if i == 0 && r.previous_hash != ZERO {
                 return Err(AuditError::GenesisNotZero);
@@ -123,7 +149,11 @@ pub enum AuditError {
     #[error("canonical encode failed: {0}")]
     Encode(String),
     #[error("sequence break at index {at}: expected {expected}, found {found}")]
-    SequenceBreak { at: usize, expected: u64, found: u64 },
+    SequenceBreak {
+        at: usize,
+        expected: u64,
+        found: u64,
+    },
     #[error("genesis previous_hash is not zero")]
     GenesisNotZero,
     #[error("previous_hash mismatch at index {at}")]
@@ -135,18 +165,27 @@ pub enum AuditError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comms_proto::{EpochId, EnvelopeKind, GroupId, WalletAddress};
+    use comms_proto::{EnvelopeKind, EpochId, GroupId, WalletAddress};
 
     fn sample_chain() -> AuditChain {
         let mut c = AuditChain::new(1_000).unwrap();
         c.append(
-            AuditEvent::GroupCreated { group_id: GroupId([1; 32]), creator: WalletAddress([9; 20]) },
+            AuditEvent::GroupCreated {
+                group_id: GroupId([1; 32]),
+                creator: WalletAddress([9; 20]),
+            },
             1_001,
-        ).unwrap();
+        )
+        .unwrap();
         c.append(
-            AuditEvent::MemberAdded { group_id: GroupId([1; 32]), member: WalletAddress([8; 20]), epoch: EpochId(1) },
+            AuditEvent::MemberAdded {
+                group_id: GroupId([1; 32]),
+                member: WalletAddress([8; 20]),
+                epoch: EpochId(1),
+            },
             1_002,
-        ).unwrap();
+        )
+        .unwrap();
         c.append(
             AuditEvent::EnvelopeReceipt {
                 group_id: GroupId([1; 32]),
@@ -158,7 +197,8 @@ mod tests {
                 size: 128,
             },
             1_003,
-        ).unwrap();
+        )
+        .unwrap();
         c
     }
 
@@ -183,7 +223,10 @@ mod tests {
         if let AuditEvent::MemberAdded { member, .. } = &mut c.records[2].event {
             *member = WalletAddress([0xff; 20]);
         }
-        assert!(matches!(c.verify_integrity(), Err(AuditError::RecordHashMismatch { at: 2 })));
+        assert!(matches!(
+            c.verify_integrity(),
+            Err(AuditError::RecordHashMismatch { at: 2 })
+        ));
     }
 
     #[test]
@@ -191,14 +234,24 @@ mod tests {
         let mut c = sample_chain();
         c.records[2].previous_hash = [0x00; 32];
         let err = c.verify_integrity().unwrap_err();
-        assert!(matches!(err, AuditError::PrevHashMismatch { at: 2 } | AuditError::RecordHashMismatch { at: 2 }));
+        assert!(matches!(
+            err,
+            AuditError::PrevHashMismatch { at: 2 } | AuditError::RecordHashMismatch { at: 2 }
+        ));
     }
 
     #[test]
     fn head_hash_changes_on_append() {
         let mut c = AuditChain::new(0).unwrap();
         let h0 = c.head_hash();
-        c.append(AuditEvent::RoleRevoked { subject: WalletAddress([1; 20]), scope: None }, 1).unwrap();
+        c.append(
+            AuditEvent::RoleRevoked {
+                subject: WalletAddress([1; 20]),
+                scope: None,
+            },
+            1,
+        )
+        .unwrap();
         assert_ne!(h0, c.head_hash());
     }
 }

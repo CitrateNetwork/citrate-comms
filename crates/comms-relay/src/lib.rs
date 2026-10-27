@@ -33,7 +33,7 @@ pub mod endpoint {
     pub use comms_wire::endpoint::*;
 }
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 
 use comms_core::audit::{AuditChain, AuditError};
@@ -66,6 +66,11 @@ struct GroupState {
     /// (and any group whose creation predates the audit trail): those fall back to
     /// global-owner-only authorization, never an auth bypass.
     creator: Option<WalletAddress>,
+    /// Per-member grant generation in THIS group (absent == 0). Offboarding a member
+    /// advances theirs, which ends every grant they held here: a delegated grant must
+    /// carry the holder's current generation (`rbac::verify_grant_for_group`), and a
+    /// creator keeps creator authority only while at generation 0 (never offboarded).
+    grant_generations: BTreeMap<WalletAddress, u64>,
 }
 
 /// The serializable, on-disk projection of a group's metadata (everything but the
@@ -81,6 +86,10 @@ struct GroupSnapshot {
     /// deserialize to `None`, i.e. the global-owner-only fallback.
     #[serde(default)]
     creator: Option<WalletAddress>,
+    /// `#[serde(default)]` → snapshots written before this field load with every
+    /// member at generation 0.
+    #[serde(default)]
+    grant_generations: Vec<(WalletAddress, u64)>,
 }
 
 impl GroupState {
@@ -92,6 +101,11 @@ impl GroupState {
             accepted_commit: self.accepted_commit.iter().map(|(k, v)| (*k, *v)).collect(),
             ratchet_tree: self.ratchet_tree.clone(),
             creator: self.creator,
+            grant_generations: self
+                .grant_generations
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect(),
         }
     }
     fn from_snapshot(s: GroupSnapshot) -> Self {
@@ -103,8 +117,39 @@ impl GroupState {
             ratchet_tree: s.ratchet_tree,
             log: Vec::new(), // rebuilt from the envelopes CF
             creator: s.creator,
+            grant_generations: s.grant_generations.into_iter().collect(),
         }
     }
+
+    /// `member`'s current grant generation here (0 if never offboarded).
+    fn grant_generation(&self, member: &WalletAddress) -> u64 {
+        self.grant_generations.get(member).copied().unwrap_or(0)
+    }
+
+    /// End `member`'s membership: drop them from the roster AND advance their grant
+    /// generation, so no grant they held here (and no creator authority) survives into
+    /// a later membership. The one place a member leaves a roster.
+    fn end_membership(&mut self, member: &WalletAddress) {
+        self.members.remove(member);
+        let g = self.grant_generations.entry(*member).or_insert(0);
+        *g = g.saturating_add(1);
+    }
+}
+
+/// A membership op's envelope must belong to the op's group and be of the op's kind
+/// (Welcome for onboard, Commit for offboard). Checked before anything is mutated.
+fn require_op_envelope(
+    envelope: &Envelope,
+    group_id: GroupId,
+    kind: EnvelopeKind,
+) -> Result<(), RelayError> {
+    if envelope.group_id != group_id {
+        return Err(RelayError::EnvelopeGroupMismatch);
+    }
+    if envelope.kind != kind {
+        return Err(RelayError::UnexpectedEnvelopeKind);
+    }
+    Ok(())
 }
 
 /// INVITE-S2 — a single-use, group-bound, owner-TTL'd invite the relay stores against a
@@ -777,12 +822,46 @@ impl DeliveryService {
         if self.groups.contains_key(&group_id) {
             return Err(RelayError::GroupExists);
         }
-        let mut state = GroupState::default();
-        state.creator = Some(creator);
+        let mut state = GroupState {
+            creator: Some(creator),
+            ..Default::default()
+        };
         state.members.insert(creator);
         self.groups.insert(group_id, state);
         self.persist_group(&group_id)?;
         self.audit_append(AuditEvent::GroupCreated { group_id, creator }, now_ms)?;
+        Ok(())
+    }
+
+    /// The one RBAC gate for membership-mutating ops (onboard / offboard) in `group_id`.
+    /// Authorized iff the actor is the global workspace owner, THIS group's creator who
+    /// has never been offboarded from it, or presents an owner-signed grant **scoped to
+    /// `group_id` and issued for the actor's current grant generation there** whose role
+    /// carries `cap`. A grant for another group, with no group, or from before the actor
+    /// was last offboarded is refused (fail closed).
+    fn authorize_membership_op(
+        &self,
+        group_id: GroupId,
+        admin: WalletAddress,
+        admin_assertion: Option<&RoleAssertion>,
+        cap: Capability,
+        now_ms: u64,
+    ) -> Result<(), RelayError> {
+        // Look up THIS group's state, scoped strictly to `group_id` (never a global
+        // list) — the creator of group A must not gain any authority over group B.
+        let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
+        let generation = state.grant_generation(&admin);
+        if admin == self.owner || (state.creator == Some(admin) && generation == 0) {
+            return Ok(());
+        }
+        let Some(a) = admin_assertion else {
+            return Err(RelayError::NotAuthorized);
+        };
+        rbac::verify_grant_for_group(a, admin, self.owner, group_id, generation, now_ms)
+            .map_err(RelayError::Rbac)?;
+        if !rbac::can(a.role, cap) {
+            return Err(RelayError::NotAuthorized);
+        }
         Ok(())
     }
 
@@ -801,58 +880,51 @@ impl DeliveryService {
         now_ms: u64,
     ) -> Result<(), RelayError> {
         self.require_session(&admin)?;
-        // RBAC (FWA-C11-03): adding a member is a membership-mutating op. Mirror
-        // `offboard` — the owner is the trust anchor; anyone else must present an
-        // owner-signed assertion whose role carries `AddMember`. Without this any
-        // member could insert an arbitrary joiner into the routing roster and
-        // overwrite the stored public ratchet tree served to future joiners.
-        // Look up THIS group's creator, scoped strictly to `group_id` (never a global
-        // list) — the creator of group A must not gain any authority over group B.
-        let group_creator = self
-            .groups
-            .get(&group_id)
-            .ok_or(RelayError::GroupUnknown)?
-            .creator;
         // RBAC (FWA-C11-03): adding a member is a membership-mutating op. Authorized iff
         // the actor is the global workspace owner, THIS group's creator (their own group),
         // or presents an owner-signed assertion whose role carries `AddMember`. A plain
         // member with none of these is rejected — otherwise any member could insert an
         // arbitrary joiner into the routing roster and overwrite the stored ratchet tree.
-        let authorized = admin == self.owner
-            || group_creator == Some(admin)
-            || match admin_assertion {
-                Some(a) => {
-                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
-                        .map_err(RelayError::Rbac)?;
-                    rbac::can(a.role, Capability::AddMember)
-                }
-                None => false,
-            };
-        if !authorized {
-            return Err(RelayError::NotAuthorized);
-        }
+        self.authorize_membership_op(
+            group_id,
+            admin,
+            admin_assertion,
+            Capability::AddMember,
+            now_ms,
+        )?;
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) {
                 return Err(RelayError::NotAMember);
             }
         }
-        debug_assert_eq!(welcome.kind, EnvelopeKind::Welcome);
+        // The Welcome must be a Welcome for THIS group: the authorization above is for
+        // `group_id`, so a Welcome for any other group would land in a log the actor was
+        // never authorized to onboard into.
+        require_op_envelope(&welcome, group_id, EnvelopeKind::Welcome)?;
         // Add the joiner to the routing roster FIRST, so the Welcome (whose sole
         // recipient is the joiner) satisfies the `recipients ⊆ roster` check the
         // ordered path now enforces (CM2-B-A005). Onboarding is exactly the moment a
         // wallet legitimately becomes a routing member, so this is where it belongs.
-        {
-            let state = self
-                .groups
-                .get_mut(&group_id)
-                .ok_or(RelayError::GroupUnknown)?;
-            state.members.insert(joiner);
-        }
+        let newly_added = self
+            .groups
+            .get_mut(&group_id)
+            .ok_or(RelayError::GroupUnknown)?
+            .members
+            .insert(joiner);
         // Deliver the Welcome on the durable ordered path (stored + audited + fanned
         // to the joiner's mailbox). Bind its sender to the authenticated admin so an
         // admin cannot post a Welcome attributed to another member (FWA-C11-01).
-        self.submit_as(admin, welcome, now_ms)?;
+        // If the Welcome is refused, undo the roster add: the op is all-or-nothing, and
+        // a half-applied add would otherwise reach disk with the group's next write.
+        if let Err(e) = self.submit_as(admin, welcome, now_ms) {
+            if newly_added {
+                if let Some(state) = self.groups.get_mut(&group_id) {
+                    state.members.retain(|m| *m != joiner);
+                }
+            }
+            return Err(e);
+        }
         // Stash the public ratchet tree, persist, and audit the membership change.
         let epoch = {
             let state = self
@@ -895,14 +967,6 @@ impl DeliveryService {
             ratchet_tree,
         } = req;
         self.require_session(&admin)?;
-        // RBAC: owner is the trust anchor; anyone else must present an owner-signed
-        // assertion whose role carries RemoveMember.
-        // Look up THIS group's creator, scoped strictly to `group_id`.
-        let group_creator = self
-            .groups
-            .get(&group_id)
-            .ok_or(RelayError::GroupUnknown)?
-            .creator;
         // Guardrail: only the global workspace owner may offboard the global owner. A
         // per-group creator (or a delegated assertion-holder) must never be able to
         // remove the trust anchor, even from a group they created.
@@ -911,26 +975,22 @@ impl DeliveryService {
         }
         // RBAC: authorized iff the global owner, THIS group's creator (their own group),
         // or an owner-signed assertion whose role carries RemoveMember.
-        let authorized = admin == self.owner
-            || group_creator == Some(admin)
-            || match admin_assertion {
-                Some(a) => {
-                    rbac::verify_grant_chain(a, admin, self.owner, now_ms)
-                        .map_err(RelayError::Rbac)?;
-                    rbac::can(a.role, Capability::RemoveMember)
-                }
-                None => false,
-            };
-        if !authorized {
-            return Err(RelayError::NotAuthorized);
-        }
+        self.authorize_membership_op(
+            group_id,
+            admin,
+            admin_assertion,
+            Capability::RemoveMember,
+            now_ms,
+        )?;
         {
             let state = self.groups.get(&group_id).ok_or(RelayError::GroupUnknown)?;
             if !state.members.contains(&admin) || !state.members.contains(&removed) {
                 return Err(RelayError::NotAMember);
             }
         }
-        debug_assert_eq!(remove_commit.kind, EnvelopeKind::Commit);
+        // The Remove must be a Commit for THIS group, or the roster drop below (in
+        // `group_id`) and the epoch advance (in the envelope's group) would diverge.
+        require_op_envelope(&remove_commit, group_id, EnvelopeKind::Commit)?;
         // Apply the Remove commit on the ordered path (first-writer-wins, receipt
         // audit, fan-out to the REMAINING members). Bind its sender to the
         // authenticated admin (FWA-C11-01).
@@ -942,7 +1002,8 @@ impl DeliveryService {
                 .groups
                 .get_mut(&group_id)
                 .ok_or(RelayError::GroupUnknown)?;
-            state.members.remove(&removed);
+            // Drop from the roster and end every grant the member held here.
+            state.end_membership(&removed);
             state.ratchet_tree = ratchet_tree;
             state.current_epoch
         };
@@ -1140,6 +1201,15 @@ impl DeliveryService {
             .map(|g| g.members.iter().copied().collect())
     }
 
+    /// `member`'s current grant generation in `group_id` (`None` if not a member). A
+    /// delegated grant must be issued for this generation to authorize anything there.
+    pub fn grant_generation(&self, group_id: &GroupId, member: &WalletAddress) -> Option<u64> {
+        let g = self.groups.get(group_id)?;
+        g.members
+            .contains(member)
+            .then(|| g.grant_generation(member))
+    }
+
     /// Number of registered groups (for the admin health snapshot).
     pub fn group_count(&self) -> usize {
         self.groups.len()
@@ -1172,6 +1242,10 @@ pub enum RelayError {
     NotAMember,
     #[error("envelope sender does not match the authenticated session principal")]
     SenderMismatch,
+    #[error("envelope belongs to another group than the requested operation")]
+    EnvelopeGroupMismatch,
+    #[error("envelope kind does not match the requested operation")]
+    UnexpectedEnvelopeKind,
     #[error("epoch {epoch} already has a different accepted commit (first-writer-wins)")]
     EpochAlreadyCommitted { epoch: u64 },
     #[error("non-contiguous commit epoch: expected {expected}, got {got}")]
@@ -1322,13 +1396,25 @@ mod tests {
         let th = [9u8; 32];
         let genuine = b"GENUINE-CONNECT-REQUEST".to_vec();
         relay
-            .submit_claim(&owner.address(), ClaimSubmission { token_hash: th, ciphertext: genuine.clone() })
+            .submit_claim(
+                &owner.address(),
+                ClaimSubmission {
+                    token_hash: th,
+                    ciphertext: genuine.clone(),
+                },
+            )
             .unwrap();
         // Flood with distinct junk well past the cap.
         for i in 0..40u16 {
             let ct = vec![(i & 0xff) as u8; 8 + i as usize];
             relay
-                .submit_claim(&attacker.address(), ClaimSubmission { token_hash: th, ciphertext: ct })
+                .submit_claim(
+                    &attacker.address(),
+                    ClaimSubmission {
+                        token_hash: th,
+                        ciphertext: ct,
+                    },
+                )
                 .unwrap();
         }
         let got = relay.poll_claims(&owner.address(), &th).unwrap();
@@ -1348,13 +1434,22 @@ mod tests {
         login(&mut relay, &owner, 10);
         assert!(relay.has_session(&owner.address()));
         relay
-            .submit_claim(&owner.address(), ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![1] })
+            .submit_claim(
+                &owner.address(),
+                ClaimSubmission {
+                    token_hash: [3u8; 32],
+                    ciphertext: vec![1],
+                },
+            )
             .unwrap();
         relay.end_session(&owner.address());
         assert!(!relay.has_session(&owner.address()));
         let after = relay.submit_claim(
             &owner.address(),
-            ClaimSubmission { token_hash: [3u8; 32], ciphertext: vec![2] },
+            ClaimSubmission {
+                token_hash: [3u8; 32],
+                ciphertext: vec![2],
+            },
         );
         assert!(matches!(after, Err(RelayError::NotAuthenticated)));
     }
@@ -1751,13 +1846,14 @@ mod tests {
             "victim must NOT have entered the roster"
         );
 
-        // With an owner-signed Admin grant (Admin holds AddMember), Mallory CAN onboard.
+        // With an owner-signed Admin grant scoped to THIS group (Admin holds AddMember),
+        // Mallory CAN onboard. (An unscoped grant is refused — grants bind to a group.)
         let grant = rbac::sign_role_assertion(
             &owner,
             Role::Owner,
             mallory.address(),
             Role::Admin,
-            None,
+            Some(gid),
             None,
         )
         .unwrap();
@@ -1821,7 +1917,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            relay.group_members(&gid).unwrap().contains(&member.address()),
+            relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&member.address()),
             "the group creator must be able to onboard into their own group"
         );
 
@@ -1848,7 +1947,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !relay.group_members(&gid).unwrap().contains(&member.address()),
+            !relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&member.address()),
             "the group creator must be able to offboard from their own group"
         );
     }
@@ -1912,7 +2014,10 @@ mod tests {
             "creator of A must not be authorized in B, got {err:?}"
         );
         assert!(
-            !relay.group_members(&gid_b).unwrap().contains(&victim.address()),
+            !relay
+                .group_members(&gid_b)
+                .unwrap()
+                .contains(&victim.address()),
             "victim must NOT have entered group B's roster"
         );
     }
@@ -2076,7 +2181,10 @@ mod tests {
                 6,
             )
             .unwrap();
-        assert!(relay.group_members(&gid).unwrap().contains(&victim.address()));
+        assert!(relay
+            .group_members(&gid)
+            .unwrap()
+            .contains(&victim.address()));
     }
 
     /// CM2-B-A003 red→green — commit epochs MUST be contiguous. A member cannot
@@ -2277,7 +2385,13 @@ mod tests {
         let token_hash = *blake3::hash(&token).as_bytes();
         let group_info = b"PUBLIC-GROUP-INFO-BLOB".to_vec();
         relay
-            .publish_invite(owner.address(), gid, token_hash, group_info.clone(), u64::MAX)
+            .publish_invite(
+                owner.address(),
+                gid,
+                token_hash,
+                group_info.clone(),
+                u64::MAX,
+            )
             .unwrap();
 
         // First redeem: succeeds, returns the stored GroupInfo, adds the joiner to the roster.
@@ -2286,7 +2400,10 @@ mod tests {
             .expect("first redeem succeeds");
         assert_eq!(gi, group_info, "redeem returns the stored public GroupInfo");
         assert!(
-            relay.group_members(&gid).unwrap().contains(&invitee.address()),
+            relay
+                .group_members(&gid)
+                .unwrap()
+                .contains(&invitee.address()),
             "redeemer joins the routing roster"
         );
         // Attribution recorded: inviter -> 1 distinct joiner.
@@ -2301,7 +2418,11 @@ mod tests {
             matches!(err, RelayError::InviteRedeem(RedeemError::Consumed)),
             "second redeem must fail closed as consumed, got {err:?}"
         );
-        assert_eq!(relay.referral_count(), 1, "a refused redeem records no referral");
+        assert_eq!(
+            relay.referral_count(),
+            1,
+            "a refused redeem records no referral"
+        );
     }
 
     #[test]
@@ -2344,8 +2465,13 @@ mod tests {
             .unwrap();
 
         // A non-minter cannot revoke.
-        let denied = relay.revoke_invite(invitee.address(), token_hash).unwrap_err();
-        assert!(matches!(denied, RelayError::NotAuthorized), "got {denied:?}");
+        let denied = relay
+            .revoke_invite(invitee.address(), token_hash)
+            .unwrap_err();
+        assert!(
+            matches!(denied, RelayError::NotAuthorized),
+            "got {denied:?}"
+        );
 
         // The minter revokes → redeem then fails closed.
         relay.revoke_invite(owner.address(), token_hash).unwrap();
@@ -2379,7 +2505,10 @@ mod tests {
         let unknown = relay
             .redeem_invite(invitee.address(), gid, b"never-minted", b"KP", 100)
             .unwrap_err();
-        assert!(matches!(unknown, RelayError::InviteRedeem(RedeemError::UnknownToken)));
+        assert!(matches!(
+            unknown,
+            RelayError::InviteRedeem(RedeemError::UnknownToken)
+        ));
 
         // Known token, WRONG group (group-bound) → UnknownToken (fail closed).
         let wrong_group = relay
@@ -2438,7 +2567,13 @@ mod tests {
             login(&mut relay, &invitee, 11);
             relay.register_group(gid, owner.address(), 12).unwrap();
             relay
-                .publish_invite(owner.address(), gid, token_hash, b"GI-DURABLE".to_vec(), u64::MAX)
+                .publish_invite(
+                    owner.address(),
+                    gid,
+                    token_hash,
+                    b"GI-DURABLE".to_vec(),
+                    u64::MAX,
+                )
                 .unwrap();
             relay
                 .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
@@ -2454,16 +2589,24 @@ mod tests {
             assert_eq!(relay.referral_count(), 1, "referral survived restart");
             assert_eq!(relay.referral_tally(), vec![(owner.address(), 1)]);
             assert!(
-                relay.group_members(&gid).unwrap().contains(&invitee.address()),
+                relay
+                    .group_members(&gid)
+                    .unwrap()
+                    .contains(&invitee.address()),
                 "the redeemer's roster membership survived restart"
             );
         }
 
         // A redeem AFTER restart must still see the invite as consumed (no single-use replay).
         {
-            let mut relay =
-                DeliveryService::open(dir.path(), "relay.citrate.ai", owner.address(), master, 1000)
-                    .unwrap();
+            let mut relay = DeliveryService::open(
+                dir.path(),
+                "relay.citrate.ai",
+                owner.address(),
+                master,
+                1000,
+            )
+            .unwrap();
             login(&mut relay, &invitee, 1001);
             let err = relay
                 .redeem_invite(invitee.address(), gid, &token, b"KP", 1002)

@@ -40,7 +40,14 @@ async fn login(client: &RelayClient, nonce: String, wallet: &EthWallet) -> Walle
     client.authenticate(msg, sig).await.unwrap()
 }
 
-fn env(gid: GroupId, sender: WalletAddress, kind: EnvelopeKind, epoch: u64, ct: &[u8], to: &[WalletAddress]) -> Envelope {
+fn env(
+    gid: GroupId,
+    sender: WalletAddress,
+    kind: EnvelopeKind,
+    epoch: u64,
+    ct: &[u8],
+    to: &[WalletAddress],
+) -> Envelope {
     Envelope {
         group_id: gid,
         epoch: EpochId(epoch),
@@ -73,14 +80,28 @@ async fn submit_fans_out_notify_to_connected_recipients_not_the_sender() {
             gid,
             bob.address(),
             None, // alice is the owner / trust anchor
-            env(gid, alice.address(), EnvelopeKind::Welcome, 1, b"welcome", &[bob.address()]),
+            env(
+                gid,
+                alice.address(),
+                EnvelopeKind::Welcome,
+                1,
+                b"welcome",
+                &[bob.address()],
+            ),
             b"rt".to_vec(),
         )
         .await
         .unwrap();
 
     let seq = alice_c
-        .submit(env(gid, alice.address(), EnvelopeKind::Application, 1, b"CIPHERTEXT", &[bob.address()]))
+        .submit(env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Application,
+            1,
+            b"CIPHERTEXT",
+            &[bob.address()],
+        ))
         .await
         .unwrap();
 
@@ -109,5 +130,8 @@ async fn submit_fans_out_notify_to_connected_recipients_not_the_sender() {
 
     // The SENDER never receives a Notify about their own message.
     let sender_ping = tokio::time::timeout(Duration::from_millis(300), alice_c.next_notify()).await;
-    assert!(sender_ping.is_err(), "sender must not be pinged about their own submit");
+    assert!(
+        sender_ping.is_err(),
+        "sender must not be pinged about their own submit"
+    );
 }

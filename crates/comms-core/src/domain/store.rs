@@ -76,7 +76,10 @@ impl DomainStore {
         let rec = self
             .records
             .entry((e.entity_type, e.entity_id))
-            .or_insert_with(|| EntityRecord { space_id: e.space_id, ..Default::default() });
+            .or_insert_with(|| EntityRecord {
+                space_id: e.space_id,
+                ..Default::default()
+            });
         match &e.op {
             Op::Upsert { fields } => {
                 for (name, value) in fields {
@@ -137,7 +140,12 @@ impl DomainStore {
             .into_iter()
             .filter_map(|id| {
                 let r = self.live(EntityType::Thread, id)?;
-                Some(Thread { id, space_id: r.space_id, title: r.text(f::TITLE), author: r.wallet(f::AUTHOR) })
+                Some(Thread {
+                    id,
+                    space_id: r.space_id,
+                    title: r.text(f::TITLE),
+                    author: r.wallet(f::AUTHOR),
+                })
             })
             .collect()
     }
@@ -158,12 +166,21 @@ impl DomainStore {
     }
 
     pub fn contacts_in(&self, space: SpaceId) -> Vec<Contact> {
-        self.ids_in(EntityType::Contact, space).into_iter().filter_map(|id| self.contact(id)).collect()
+        self.ids_in(EntityType::Contact, space)
+            .into_iter()
+            .filter_map(|id| self.contact(id))
+            .collect()
     }
 
     pub fn account(&self, id: EntityId) -> Option<Account> {
         let r = self.live(EntityType::Account, id)?;
-        Some(Account { id, space_id: r.space_id, name: r.text(f::NAME), domain: r.text(f::ACCOUNT_DOMAIN), owner: r.wallet(f::OWNER) })
+        Some(Account {
+            id,
+            space_id: r.space_id,
+            name: r.text(f::NAME),
+            domain: r.text(f::ACCOUNT_DOMAIN),
+            owner: r.wallet(f::OWNER),
+        })
     }
 
     pub fn deal(&self, id: EntityId) -> Option<Deal> {
@@ -182,7 +199,10 @@ impl DomainStore {
     }
 
     pub fn deals_in(&self, space: SpaceId) -> Vec<Deal> {
-        self.ids_in(EntityType::Deal, space).into_iter().filter_map(|id| self.deal(id)).collect()
+        self.ids_in(EntityType::Deal, space)
+            .into_iter()
+            .filter_map(|id| self.deal(id))
+            .collect()
     }
 
     /// The deal pipeline grouped by stage, in canonical stage order.
@@ -190,7 +210,16 @@ impl DomainStore {
         let deals = self.deals_in(space);
         DealStage::ALL
             .iter()
-            .map(|stage| (*stage, deals.iter().filter(|d| d.stage == *stage).cloned().collect()))
+            .map(|stage| {
+                (
+                    *stage,
+                    deals
+                        .iter()
+                        .filter(|d| d.stage == *stage)
+                        .cloned()
+                        .collect(),
+                )
+            })
             .collect()
     }
 
@@ -198,11 +227,19 @@ impl DomainStore {
 
     pub fn project(&self, id: EntityId) -> Option<Project> {
         let r = self.live(EntityType::Project, id)?;
-        Some(Project { id, space_id: r.space_id, name: r.text(f::NAME), status: r.tag(f::STATUS).unwrap_or_else(|| "active".into()) })
+        Some(Project {
+            id,
+            space_id: r.space_id,
+            name: r.text(f::NAME),
+            status: r.tag(f::STATUS).unwrap_or_else(|| "active".into()),
+        })
     }
 
     pub fn projects_in(&self, space: SpaceId) -> Vec<Project> {
-        self.ids_in(EntityType::Project, space).into_iter().filter_map(|id| self.project(id)).collect()
+        self.ids_in(EntityType::Project, space)
+            .into_iter()
+            .filter_map(|id| self.project(id))
+            .collect()
     }
 
     pub fn task(&self, id: EntityId) -> Option<Task> {
@@ -248,11 +285,20 @@ impl DomainStore {
                 if cr.ref_(f::BOARD) != Some(id) {
                     return None;
                 }
-                Some(BoardColumn { id: *cid, name: cr.text(f::NAME), order: cr.money_or_int(f::ORDER) })
+                Some(BoardColumn {
+                    id: *cid,
+                    name: cr.text(f::NAME),
+                    order: cr.money_or_int(f::ORDER),
+                })
             })
             .collect();
         columns.sort_by(|a, b| a.order.cmp(&b.order).then(a.id.cmp(&b.id)));
-        Some(Board { id, space_id: r.space_id, name: r.text(f::NAME), columns })
+        Some(Board {
+            id,
+            space_id: r.space_id,
+            name: r.text(f::NAME),
+            columns,
+        })
     }
 
     // ─────────────────────────── state-sync snapshot ───────────────────────────
@@ -261,7 +307,11 @@ impl DomainStore {
     /// doesn't have to replay history from epoch 0 (`PLANSET/02` §5.3).
     pub fn snapshot(&self) -> DomainSnapshot {
         DomainSnapshot {
-            entries: self.records.iter().map(|((t, id), r)| (*t, *id, r.clone())).collect(),
+            entries: self
+                .records
+                .iter()
+                .map(|((t, id), r)| (*t, *id, r.clone()))
+                .collect(),
         }
     }
 
@@ -339,8 +389,13 @@ pub enum DealStage {
 }
 
 impl DealStage {
-    pub const ALL: [DealStage; 5] =
-        [DealStage::Lead, DealStage::Qualified, DealStage::Proposal, DealStage::Won, DealStage::Lost];
+    pub const ALL: [DealStage; 5] = [
+        DealStage::Lead,
+        DealStage::Qualified,
+        DealStage::Proposal,
+        DealStage::Won,
+        DealStage::Lost,
+    ];
     pub fn as_str(&self) -> &'static str {
         match self {
             DealStage::Lead => "Lead",

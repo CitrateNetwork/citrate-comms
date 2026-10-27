@@ -45,7 +45,10 @@ fn run() -> Result<String, String> {
 
     if verify {
         let vk = manifest.verify().map_err(|e| e.to_string())?;
-        return Ok(format!("signature OK — signed by {}", hex::encode(vk.to_bytes())));
+        return Ok(format!(
+            "signature OK — signed by {}",
+            hex::encode(vk.to_bytes())
+        ));
     }
 
     let key_hex = std::env::var("RELEASE_SIGNING_KEY_HEX")
@@ -58,9 +61,15 @@ fn run() -> Result<String, String> {
     let key = SigningKey::from_bytes(&seed);
     manifest.sign(&key).map_err(|e| e.to_string())?;
     // Sanity: the signature we just wrote verifies.
-    manifest.verify().map_err(|e| format!("self-verify failed: {e}"))?;
+    manifest
+        .verify()
+        .map_err(|e| format!("self-verify failed: {e}"))?;
 
     let out = out.unwrap_or(input);
-    std::fs::write(&out, manifest.to_toml().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(format!("signed {out} with {}", hex::encode(key.verifying_key().to_bytes())))
+    std::fs::write(&out, manifest.to_toml().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "signed {out} with {}",
+        hex::encode(key.verifying_key().to_bytes())
+    ))
 }

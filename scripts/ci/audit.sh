@@ -4,11 +4,12 @@
 # The release workflow's `cargo audit` step is tag-triggered AND the org's GitHub
 # Actions have been failing at startup, so the advisory gate has never actually run
 # — which is how the libcrux advisories under the MLS crypto provider accumulated
-# unseen. Run this LOCALLY (and wire it into any working PR gate / pre-push hook) so
-# the check fires before code lands, not only on a release tag that never builds.
+# unseen. It now runs on every PR, on push to main and weekly
+# (.github/workflows/rust-deps-audit.yml); run it locally before pushing too.
 #
 # Accepted advisories live as reviewed `[advisories] ignore` entries in deny.toml
-# (the audit trail). A NEW advisory that is not ignored fails this gate.
+# (the audit trail). A NEW advisory that is not ignored fails this gate. Minimum
+# versions the advisory DB does not cover yet are `[bans] deny` floors in deny.toml.
 #
 #   scripts/ci/audit.sh
 #
@@ -19,6 +20,10 @@ if ! command -v cargo-deny >/dev/null 2>&1; then
   echo "cargo-deny not installed: cargo install cargo-deny" >&2
   exit 127
 fi
+
+echo "== RUSTSEC-2026-0387 ignore guard (crypto-bigint < 0.7.6 only via elliptic-curve 0.13) =="
+python3 scripts/ci/check_crypto_bigint_users.py --self-test
+python3 scripts/ci/check_crypto_bigint_users.py
 
 echo "== cargo deny check advisories (vulnerabilities deny; accepted = deny.toml ignore) =="
 cargo deny check advisories

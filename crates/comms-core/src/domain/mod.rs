@@ -24,8 +24,8 @@ use std::fmt;
 
 pub use event::{fields, DomainEvent, EntityType, FieldValue, Op};
 pub use store::{
-    Account, Board, BoardColumn, Contact, Conversation, Deal, DealStage, DomainSnapshot, DomainStore,
-    Project, Task, TaskStatus, Thread,
+    Account, Board, BoardColumn, Contact, Conversation, Deal, DealStage, DomainSnapshot,
+    DomainStore, Project, Task, TaskStatus, Thread,
 };
 
 /// A space is an MLS group; CRM/PM records + conversations live inside one.
@@ -75,7 +75,10 @@ impl LamportClock {
     /// Advance and return the next timestamp (for an event this actor emits).
     pub fn tick(&mut self) -> Lamport {
         self.counter += 1;
-        Lamport { counter: self.counter, actor: self.actor }
+        Lamport {
+            counter: self.counter,
+            actor: self.actor,
+        }
     }
     /// Observe a remote timestamp, keeping the clock ahead (causal consistency).
     pub fn observe(&mut self, other: Lamport) {
