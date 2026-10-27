@@ -447,11 +447,19 @@ impl RelayServer {
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
             }
-            ClientFrame::RevokeInvite { token_hash } => {
+            ClientFrame::RevokeInvite {
+                token_hash,
+                report_used,
+            } => {
                 let Some(addr) = *authed else {
                     return send_err(out_tx, "not authenticated");
                 };
-                let r = { self.service.lock().await.revoke_invite(addr, token_hash) };
+                let r = {
+                    self.service
+                        .lock()
+                        .await
+                        .revoke_invite(addr, token_hash, report_used)
+                };
                 match r {
                     Ok(_) => ack(out_tx, None),
                     Err(e) => send_err(out_tx, &e.to_string()),

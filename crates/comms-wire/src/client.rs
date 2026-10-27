@@ -329,11 +329,20 @@ impl RelayClient {
         .map(|_| ())
     }
 
-    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone).
-    pub async fn revoke_invite(&self, token_hash: [u8; 32]) -> Result<(), WsError> {
-        self.expect_ack(ClientFrame::RevokeInvite { token_hash })
-            .await
-            .map(|_| ())
+    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone). With
+    /// `report_used`, an invite that was already redeemed is refused with
+    /// [`crate::frames::INVITE_ALREADY_USED`] (a relay that predates it acknowledges).
+    pub async fn revoke_invite(
+        &self,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::RevokeInvite {
+            token_hash,
+            report_used,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// INVITE-S2 (joiner) — redeem an invite by its raw token. Returns the relay's typed
