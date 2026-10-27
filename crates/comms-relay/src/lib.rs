@@ -712,7 +712,9 @@ impl DeliveryService {
         if record.inviter != caller {
             return Err(RelayError::NotAuthorized);
         }
-        let _ = report_used;
+        if report_used && record.consumed {
+            return Err(RelayError::InviteAlreadyUsed);
+        }
         record.revoked = true;
         self.persist_invite(&token_hash)?;
         Ok(())
