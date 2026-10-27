@@ -45,7 +45,7 @@
     "vega-embed": "^7.1.0",
     "vega-lite": "^6.4.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
