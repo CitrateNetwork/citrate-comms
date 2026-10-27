@@ -6,6 +6,8 @@
 #
 # `cargo audit` BLOCKS the release (no soft-fail); accepted advisories are explicit,
 # reviewed `[advisories] ignore` entries here — never a continue-on-error step.
+# .cargo/audit.toml mirrors this list for cargo audit (plus lockfile-only crates that
+# are never compiled); scripts/ci/check_audit_ignores.py keeps the two in step.
 
 [advisories]
 version = 2
@@ -19,13 +21,17 @@ unmaintained = "workspace"
 ignore = [
     # ── CM2-B-A006 (HELD) — libcrux advisories under the MLS crypto provider ──
     # The MLS transport is openmls 0.8 → openmls_rust_crypto 0.5.1 → hpke-rs 0.6.1,
-    # whose `hpke-rs-libcrux 0.6.1` pins the vulnerable `libcrux-* 0.0.x` line
-    # (`libcrux-aead = "^0.0.7"`, etc). The fixed libcrux versions are UNREACHABLE
-    # without bumping hpke-rs / openmls_rust_crypto — a crypto-provider MAJOR bump
-    # that carries an OpenMLS API migration and MUST NOT be rushed into a fix pass.
-    # Tracked as a HELD dependency; remove each entry as the provider bump lands.
-    # (Verified 2026-09-06: `cargo update -p <crate> --precise <fixed>` is refused,
-    #  "required by package hpke-rs v0.6.1".)
+    # which depends on libcrux-sha3 0.0.8 (→ libcrux-secrets 0.0.5) directly. The
+    # fixed versions need hpke-rs >= 0.7, which openmls_rust_crypto 0.5 does not accept:
+    # a crypto-provider MAJOR bump that carries an OpenMLS API migration and MUST NOT be
+    # rushed into a fix pass. Remove each entry as the provider bump lands.
+    #
+    # hpke-rs's optional libcrux backend (hpke-rs-libcrux → libcrux-kem / -aead /
+    # -aesgcm / -chacha20poly1305) is NOT compiled: openmls_rust_crypto uses the
+    # RustCrypto backend. Cargo.lock still lists it, so `cargo audit` reports
+    # RUSTSEC-2026-0124/0209/0211/0330/0331; those are accepted in .cargo/audit.toml
+    # only and deliberately NOT ignored here, so this gate fails if that backend is
+    # ever compiled (scripts/ci/check_audit_ignores.py).
     #
     # RUSTSEC-2026-0207 — libcrux-sha3: incorrect incremental SHAKE (fix >=0.0.10, blocked)
     "RUSTSEC-2026-0207",
@@ -33,14 +39,6 @@ ignore = [
     "RUSTSEC-2026-0208",
     # RUSTSEC-2026-0212 — libcrux-secrets: incorrect aarch64 ct-swap/select (fix >=0.0.6, blocked)
     "RUSTSEC-2026-0212",
-    # RUSTSEC-2026-0124 — libcrux-chacha20poly1305: panic on overlong ct (fix >=0.0.8, blocked)
-    "RUSTSEC-2026-0124",
-    # RUSTSEC-2026-0211 — libcrux-aesgcm: non-constant-time AES-GCM tag check. NO FIX
-    #   available upstream. Reachable on the live AEAD path; the residual timing oracle
-    #   is accepted only until the provider bump / a RustCrypto AEAD backend swap.
-    "RUSTSEC-2026-0211",
-    # RUSTSEC-2026-0209 — libcrux-aesgcm: AAD length not bounded. NO FIX available.
-    "RUSTSEC-2026-0209",
     # ── Desktop-client (Slint) surface — NOT the crypto core; tracked, out of A006 ──
     # quick-xml reaches the tree ONLY via Slint's wayland/zbus stack (desktop client),
     # not the relay or crypto core. No semver-compatible fix is reachable (Slint pins

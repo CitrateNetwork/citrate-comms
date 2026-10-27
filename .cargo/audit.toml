@@ -1,0 +1,35 @@
+# cargo-audit config: accepted advisories for `cargo audit` (scripts/ci/audit.sh and
+# the release workflow's blocking audit step).
+#
+# cargo audit scans every package in Cargo.lock. cargo deny (deny.toml) checks only
+# the feature-resolved graph that is actually compiled. Two sets live here:
+#
+# 1. Every `[advisories] ignore` entry in deny.toml, copied verbatim. deny.toml is
+#    where each acceptance is reasoned; read the reason there.
+# 2. Lockfile-only advisories: crates that Cargo.lock lists but no build compiles.
+#    Cargo records optional dependencies that a weak feature (`dep?/feature`) names
+#    even when nothing enables them; here hpke-rs 0.6.1 names hpke-rs-libcrux that
+#    way, and openmls_rust_crypto uses the RustCrypto backend. These are kept OUT of
+#    deny.toml on purpose, so cargo deny fails if one of them becomes compiled.
+#
+# scripts/ci/check_audit_ignores.py enforces both rules (run by scripts/ci/audit.sh).
+
+[advisories]
+ignore = [
+    # ── 1. mirrored from deny.toml ──
+    "RUSTSEC-2026-0207",
+    "RUSTSEC-2026-0208",
+    "RUSTSEC-2026-0212",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0387",
+    # ── 2. lockfile-only (hpke-rs-libcrux 0.6.1, not compiled) ──
+    # libcrux-kem 0.0.7: hybrid KEM seed / key length handling (fix 0.0.10; needs hpke-rs 0.8)
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
+    # libcrux-chacha20poly1305 0.0.7 (fix 0.0.8; needs hpke-rs 0.7)
+    "RUSTSEC-2026-0124",
+    # libcrux-aesgcm 0.0.7 (no fixed release)
+    "RUSTSEC-2026-0209",
+    "RUSTSEC-2026-0211",
+]
