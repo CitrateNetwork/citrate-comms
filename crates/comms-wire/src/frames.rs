@@ -84,6 +84,13 @@ pub enum ClientFrame {
     /// relay then fails every redeem of it closed).
     RevokeInvite {
         token_hash: [u8; 32],
+        /// When set, revoking an invite that was already redeemed is refused with
+        /// [`INVITE_ALREADY_USED`] instead of acknowledged, so the minter can tell a closed
+        /// unused invite from a spent one. Omitted from the encoding when unset (the frame is
+        /// byte-identical to the original); a relay that predates the field ignores it and
+        /// acknowledges as before.
+        #[serde(default, skip_serializing_if = "is_false")]
+        report_used: bool,
     },
     /// INVITE-S2 — a token-holder self-admits: presents the RAW token (the relay hashes
     /// it to find the invite) plus its own fresh KeyPackage. On success the relay
@@ -98,6 +105,14 @@ pub enum ClientFrame {
         /// the resulting external commit — the relay is server-blind and never parses MLS).
         key_package: Vec<u8>,
     },
+}
+
+/// The relay's error message when [`ClientFrame::RevokeInvite`] with `report_used` names an
+/// invite that was already redeemed. Stable: the member daemon and the app match on it.
+pub const INVITE_ALREADY_USED: &str = "invite already used";
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// INVITE-S2 — the fail-closed reason a [`ClientFrame::RedeemInvite`] was refused.
@@ -184,4 +199,67 @@ pub enum ServerFrame {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod revoke_compat_tests {
+    //! `RevokeInvite` gained an optional `report_used` field. Old and new peers must keep
+    //! understanding each other in both directions.
+    use super::ClientFrame;
+    use comms_proto::canonical;
+    use serde::{Deserialize, Serialize};
+
+    /// The frame as peers that predate `report_used` define it.
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    enum OldClientFrame {
+        RevokeInvite { token_hash: [u8; 32] },
+    }
+
+    #[test]
+    fn a_revoke_without_report_used_encodes_exactly_as_before() {
+        let new = canonical::to_vec(&ClientFrame::RevokeInvite {
+            token_hash: [7; 32],
+            report_used: false,
+        })
+        .expect("encode");
+        let old = canonical::to_vec(&OldClientFrame::RevokeInvite {
+            token_hash: [7; 32],
+        })
+        .expect("encode");
+        assert_eq!(new, old);
+    }
+
+    #[test]
+    fn an_old_peer_decodes_a_revoke_that_reports_use() {
+        let bytes = canonical::to_vec(&ClientFrame::RevokeInvite {
+            token_hash: [8; 32],
+            report_used: true,
+        })
+        .expect("encode");
+        let old: OldClientFrame = canonical::from_slice(&bytes).expect("old relay decodes it");
+        assert_eq!(
+            old,
+            OldClientFrame::RevokeInvite {
+                token_hash: [8; 32]
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_relay_reads_an_old_revoke_as_not_reporting_use() {
+        let bytes = canonical::to_vec(&OldClientFrame::RevokeInvite {
+            token_hash: [9; 32],
+        })
+        .expect("encode");
+        match canonical::from_slice::<ClientFrame>(&bytes).expect("decode") {
+            ClientFrame::RevokeInvite {
+                token_hash,
+                report_used,
+            } => {
+                assert_eq!(token_hash, [9; 32]);
+                assert!(!report_used);
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+    }
 }

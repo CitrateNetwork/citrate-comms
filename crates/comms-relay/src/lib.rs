@@ -693,10 +693,16 @@ impl DeliveryService {
     /// **INVITE-S2 (owner revokes).** Tombstone a previously-minted invite so every later
     /// redeem of it fails closed. Only the wallet that minted it may revoke it (bound to
     /// the authenticated session by the WS layer).
+    ///
+    /// With `report_used`, an invite that was already redeemed is refused with
+    /// [`RelayError::InviteAlreadyUsed`] (nothing changes: it can't be redeemed again), so a
+    /// minter that is approving a claim on it can tell it was spent. Without it the revoke is
+    /// acknowledged as before, for clients that predate the flag.
     pub fn revoke_invite(
         &mut self,
         caller: WalletAddress,
         token_hash: [u8; 32],
+        report_used: bool,
     ) -> Result<(), RelayError> {
         self.require_session(&caller)?;
         let record = self
@@ -705,6 +711,9 @@ impl DeliveryService {
             .ok_or(RelayError::InviteUnknown)?;
         if record.inviter != caller {
             return Err(RelayError::NotAuthorized);
+        }
+        if report_used && record.consumed {
+            return Err(RelayError::InviteAlreadyUsed);
         }
         record.revoked = true;
         self.persist_invite(&token_hash)?;
@@ -1262,6 +1271,10 @@ pub enum RelayError {
     KeyPackageQuotaExceeded { max: usize },
     #[error("no such invite")]
     InviteUnknown,
+    /// A revoke that asked to hear about it named an invite that was already redeemed.
+    /// The message is `comms_wire::frames::INVITE_ALREADY_USED`.
+    #[error("invite already used")]
+    InviteAlreadyUsed,
     #[error("invite quota exceeded (max {max})")]
     InviteQuotaExceeded { max: usize },
     #[error("invite redeem refused: {}", .0.as_str())]
@@ -2466,7 +2479,7 @@ mod tests {
 
         // A non-minter cannot revoke.
         let denied = relay
-            .revoke_invite(invitee.address(), token_hash)
+            .revoke_invite(invitee.address(), token_hash, false)
             .unwrap_err();
         assert!(
             matches!(denied, RelayError::NotAuthorized),
@@ -2474,13 +2487,162 @@ mod tests {
         );
 
         // The minter revokes → redeem then fails closed.
-        relay.revoke_invite(owner.address(), token_hash).unwrap();
+        relay
+            .revoke_invite(owner.address(), token_hash, false)
+            .unwrap();
         let err = relay
             .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
             .unwrap_err();
         assert!(
             matches!(err, RelayError::InviteRedeem(RedeemError::Revoked)),
             "revoked token must be refused, got {err:?}"
+        );
+    }
+
+    /// A redeemed invite set up for the revoke tests: (relay, owner, token_hash).
+    fn redeemed_invite(tag: u8) -> (DeliveryService, EthWallet, [u8; 32]) {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([tag; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        let token = vec![tag; 16];
+        let token_hash = *blake3::hash(&token).as_bytes();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, b"GI".to_vec(), u64::MAX)
+            .unwrap();
+        relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
+            .unwrap();
+        (relay, owner, token_hash)
+    }
+
+    #[test]
+    fn revoke_reporting_use_refuses_an_already_redeemed_invite() {
+        let (mut relay, owner, token_hash) = redeemed_invite(41);
+        let err = relay
+            .revoke_invite(owner.address(), token_hash, true)
+            .expect_err("a redeemed invite must be reported as used");
+        assert!(matches!(err, RelayError::InviteAlreadyUsed), "got {err:?}");
+        // Asking again gives the same answer (nothing was tombstoned over the use).
+        let again = relay
+            .revoke_invite(owner.address(), token_hash, true)
+            .expect_err("still used");
+        assert!(
+            matches!(again, RelayError::InviteAlreadyUsed),
+            "got {again:?}"
+        );
+    }
+
+    /// Only the minter learns whether an invite was used: a signed-in non-minter and a caller
+    /// with no session get the same refusal they would get for any invite, never the used answer.
+    #[test]
+    fn revoke_reporting_use_tells_only_the_minter_that_an_invite_was_used() {
+        let (mut relay, _owner, token_hash) = redeemed_invite(44);
+        let stranger = EthWallet::generate();
+        login(&mut relay, &stranger, 20);
+        let denied = relay
+            .revoke_invite(stranger.address(), token_hash, true)
+            .expect_err("a non-minter can't revoke");
+        assert!(
+            matches!(denied, RelayError::NotAuthorized),
+            "a signed-in non-minter must get NotAuthorized, got {denied:?}"
+        );
+        let anonymous = EthWallet::generate();
+        let unauth = relay
+            .revoke_invite(anonymous.address(), token_hash, true)
+            .expect_err("no session");
+        assert!(
+            matches!(unauth, RelayError::NotAuthenticated),
+            "a caller with no session must get NotAuthenticated, got {unauth:?}"
+        );
+        // The same answers as for an invite nobody used, so the refusal reveals nothing.
+        let (mut fresh, owner, _) = redeemed_invite(45);
+        let unused = *blake3::hash(b"never-redeemed").as_bytes();
+        fresh
+            .publish_invite(
+                owner.address(),
+                GroupId([45; 32]),
+                unused,
+                b"GI".to_vec(),
+                u64::MAX,
+            )
+            .unwrap();
+        login(&mut fresh, &stranger, 21);
+        assert_eq!(
+            fresh
+                .revoke_invite(stranger.address(), unused, true)
+                .expect_err("non-minter")
+                .to_string(),
+            denied.to_string()
+        );
+        assert_eq!(
+            fresh
+                .revoke_invite(anonymous.address(), unused, true)
+                .expect_err("no session")
+                .to_string(),
+            unauth.to_string()
+        );
+    }
+
+    #[test]
+    fn revoke_without_reporting_use_still_acknowledges_a_redeemed_invite() {
+        // Clients that predate the flag keep the original answer.
+        let (mut relay, owner, token_hash) = redeemed_invite(42);
+        relay
+            .revoke_invite(owner.address(), token_hash, false)
+            .expect("legacy revoke of a redeemed invite is acknowledged as before");
+    }
+
+    #[test]
+    fn revoke_reporting_use_closes_an_unused_invite() {
+        let owner = EthWallet::generate();
+        let invitee = EthWallet::generate();
+        let mut relay = DeliveryService::new("relay.citrate.ai", owner.address(), 0).unwrap();
+        login(&mut relay, &owner, 10);
+        login(&mut relay, &invitee, 11);
+        let gid = GroupId([43; 32]);
+        owner_group(&mut relay, &owner, gid, 12);
+        let token = b"unused-token".to_vec();
+        let token_hash = *blake3::hash(&token).as_bytes();
+        relay
+            .publish_invite(owner.address(), gid, token_hash, b"GI".to_vec(), u64::MAX)
+            .unwrap();
+        // Only the minter, even when asking about use.
+        let denied = relay
+            .revoke_invite(invitee.address(), token_hash, true)
+            .expect_err("non-minter");
+        assert!(
+            matches!(denied, RelayError::NotAuthorized),
+            "got {denied:?}"
+        );
+        relay
+            .revoke_invite(owner.address(), token_hash, true)
+            .expect("an unused invite is closed");
+        let err = relay
+            .redeem_invite(invitee.address(), gid, &token, b"KP", 100)
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayError::InviteRedeem(RedeemError::Revoked)),
+            "a closed invite can't be redeemed, got {err:?}"
+        );
+        // Unknown token: still "no such invite", which callers treat as nothing to redeem.
+        let unknown = relay
+            .revoke_invite(owner.address(), [0xEE; 32], true)
+            .expect_err("unknown");
+        assert!(
+            matches!(unknown, RelayError::InviteUnknown),
+            "got {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn invite_already_used_message_is_the_wire_constant() {
+        assert_eq!(
+            RelayError::InviteAlreadyUsed.to_string(),
+            comms_wire::frames::INVITE_ALREADY_USED
         );
     }
 

@@ -53,9 +53,13 @@ pub enum Request {
         token_hash: String,
         expires_at: u64,
     },
-    /// INVITE-S2 — owner revokes an invite by its token hash (32-byte hex).
+    /// INVITE-S2 — owner revokes an invite by its token hash (32-byte hex). With
+    /// `report_used` (default false, so older apps are unchanged), revoking an invite that was
+    /// already redeemed answers `Error` with the relay's "invite already used" message.
     RevokeInvite {
         token_hash: String,
+        #[serde(default)]
+        report_used: bool,
     },
     /// INVITE-S2 — invitee self-admits by external commit using the RAW invite `token` (hex).
     RedeemInvite {
@@ -363,12 +367,15 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 },
             }
         }
-        Request::RevokeInvite { token_hash } => {
+        Request::RevokeInvite {
+            token_hash,
+            report_used,
+        } => {
             let th = match parse_token_hash(&token_hash) {
                 Ok(t) => t,
                 Err(m) => return Response::Error { message: m },
             };
-            match daemon.revoke_invite(th) {
+            match daemon.revoke_invite(th, report_used) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),
