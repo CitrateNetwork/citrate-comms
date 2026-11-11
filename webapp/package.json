@@ -31,8 +31,8 @@
     "jose": "^6.2.3",
     "mammoth": "^1.12.0",
     "mermaid": "^11.16.1",
-    "next": "16.3.8",
-    "nodemailer": "^10.0.9",
+    "next": "16.4.1",
+    "nodemailer": "^10.1.4",
     "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
@@ -45,7 +45,7 @@
     "vega-embed": "^7.1.0",
     "vega-lite": "^6.4.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -57,7 +57,7 @@
     "@vitest/coverage-v8": "^4.1.7",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
-    "eslint-config-next": "16.3.8",
+    "eslint-config-next": "16.4.1",
     "fast-check": "^3.23.1",
     "globals": "^17.7.0",
     "tsx": "^4.22.3",
@@ -75,9 +75,11 @@
     "overrides": {
       "@xmldom/xmldom": "^0.8.15",
       "browserslist": "^4.28.7",
-      "undici@6": ">=6.28.1 <7",
+      "undici@6": ">=6.29.1 <7",
       "source-map-js": ">=1.2.2",
-      "sharp": ">=0.35.5"
+      "sharp": ">=0.35.5",
+      "dompurify": ">=3.4.17",
+      "zod@4": ">=4.6.6 <5"
     }
   }
 }
