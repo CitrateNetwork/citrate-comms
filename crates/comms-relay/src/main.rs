@@ -133,9 +133,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    let service = DeliveryService::open(&data, domain.clone(), owner, *master, now_ms())?;
+    let mut service = DeliveryService::open(&data, domain.clone(), owner, *master, now_ms())?;
+    // comms#4: mailboxes are durable now; drop anything past the 30-day TTL on start,
+    // then sweep hourly so a wallet that never reconnects does not hold rows forever.
+    let expired = service.expire_mailboxes(now_ms())?;
     let server = RelayServer::new(service);
     let (addr, accept) = server.clone().bind(&bind).await?;
+    {
+        let server = server.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tick.tick().await; // the first tick fires at once; the start-up sweep ran
+            loop {
+                tick.tick().await;
+                if let Err(e) = server.expire_mailboxes(now_ms()).await {
+                    eprintln!("relay: mailbox expiry sweep failed, will retry: {e}");
+                }
+            }
+        });
+    }
 
     // Bearer-gated, loopback-only admin surface.
     let admin_bind =
@@ -150,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  owner (RBAC anchor): {}", owner.to_hex());
     eprintln!("  store: {data} (RocksDB + AES-256-GCM at rest)");
     eprintln!("  master key: {key_source}");
+    eprintln!("  mailboxes: durable, 30-day TTL ({expired} expired entries dropped at start)");
     eprintln!("  server-blind: stores ciphertext + routing metadata only; never reads plaintext");
     eprintln!(
         "  admin: http://{admin_addr} (loopback-only)  GET /health|/status  POST /pause|/resume"

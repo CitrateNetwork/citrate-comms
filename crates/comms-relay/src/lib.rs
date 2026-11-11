@@ -197,6 +197,24 @@ pub struct OffboardRequest<'a> {
     pub ratchet_tree: Vec<u8>,
 }
 
+/// One queued delivery in a recipient's mailbox (comms#4). The envelope itself is the
+/// copy already held in the group's durable log; the row persisted in `CF_MAILBOX` is
+/// only a [`MailboxRef`] to it.
+struct MailboxItem {
+    /// Relay-wide arrival counter: the mailbox key suffix, and the delivery order.
+    arrival: u64,
+    enqueued_ms: u64,
+    envelope: Envelope,
+}
+
+/// The on-disk mailbox row: which logged envelope is waiting, and since when.
+#[derive(Serialize, Deserialize)]
+struct MailboxRef {
+    group_id: GroupId,
+    group_seq: u64,
+    enqueued_ms: u64,
+}
+
 /// The server-blind relay.
 pub struct DeliveryService {
     domain: String,
@@ -216,8 +234,11 @@ pub struct DeliveryService {
     /// `CF_REFERRALS`; the row index is the vector position (never deleted).
     referrals: Vec<ReferralRecord>,
     groups: HashMap<GroupId, GroupState>,
-    /// Per-wallet delivery mailboxes (the fan-out target).
-    mailboxes: HashMap<WalletAddress, Vec<Envelope>>,
+    /// Per-wallet delivery mailboxes (the fan-out target). Durable in `CF_MAILBOX`
+    /// (comms#4), so a recipient offline across a relay restart still gets them.
+    mailboxes: HashMap<WalletAddress, Vec<MailboxItem>>,
+    /// Next relay-wide mailbox arrival number (one past the largest on disk).
+    next_arrival: u64,
     /// Authenticated sessions (wallet proved control via SIWE).
     sessions: BTreeSet<WalletAddress>,
     audit: AuditChain,
@@ -242,6 +263,7 @@ impl DeliveryService {
             referrals: Vec::new(),
             groups: HashMap::new(),
             mailboxes: HashMap::new(),
+            next_arrival: 0,
             sessions: BTreeSet::new(),
             audit: AuditChain::new(genesis_ts_ms)?,
             store: None,
@@ -359,6 +381,37 @@ impl DeliveryService {
         referral_rows.sort_by_key(|(seq, _)| *seq);
         let referrals: Vec<ReferralRecord> = referral_rows.into_iter().map(|(_, r)| r).collect();
 
+        // comms#4 — rebuild the delivery mailboxes. Each row points into a group's
+        // replayed log; a row whose envelope is missing means the store is damaged, so
+        // the relay refuses to start rather than silently dropping a delivery.
+        let mut mailboxes: HashMap<WalletAddress, Vec<MailboxItem>> = HashMap::new();
+        let mut next_arrival = 0u64;
+        for (k, v) in store.scan(store::CF_MAILBOX)? {
+            if k.len() != 28 {
+                return Err(RelayError::CorruptKey);
+            }
+            let wallet = WalletAddress(k[..20].try_into().map_err(|_| RelayError::CorruptKey)?);
+            let arrival =
+                u64::from_be_bytes(k[20..].try_into().map_err(|_| RelayError::CorruptKey)?);
+            let r: MailboxRef = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            let envelope = groups
+                .get(&r.group_id)
+                .and_then(|g| g.log.iter().find(|e| e.group_seq == Some(r.group_seq)))
+                .cloned()
+                .ok_or(RelayError::CorruptKey)?;
+            next_arrival = next_arrival.max(arrival.saturating_add(1));
+            mailboxes.entry(wallet).or_default().push(MailboxItem {
+                arrival,
+                enqueued_ms: r.enqueued_ms,
+                envelope,
+            });
+        }
+        // `scan` is in key order (wallet ‖ arrival BE), so each mailbox is already in
+        // arrival order; sort anyway so the order never depends on the scan.
+        for items in mailboxes.values_mut() {
+            items.sort_by_key(|i| i.arrival);
+        }
+
         Ok(Self {
             domain: domain.into(),
             owner,
@@ -368,7 +421,8 @@ impl DeliveryService {
             invites,
             referrals,
             groups,
-            mailboxes: HashMap::new(),
+            mailboxes,
+            next_arrival,
             sessions: BTreeSet::new(),
             audit,
             store: Some(store),
@@ -415,6 +469,31 @@ impl DeliveryService {
                 store::CF_ENVELOPES,
                 &store::seq_key(&gid.0, seq),
                 &canonical::to_vec(env).map_err(RelayError::Decode)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Persist one mailbox row (comms#4): a reference to the logged envelope
+    /// `gid`/`seq`, keyed `wallet ‖ arrival`.
+    fn persist_mailbox_ref(
+        &self,
+        wallet: &WalletAddress,
+        arrival: u64,
+        gid: &GroupId,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<(), RelayError> {
+        if let Some(s) = &self.store {
+            let r = MailboxRef {
+                group_id: *gid,
+                group_seq: seq,
+                enqueued_ms: now_ms,
+            };
+            s.put(
+                store::CF_MAILBOX,
+                &store::seq_key(&wallet.0, arrival),
+                &canonical::to_vec(&r).map_err(RelayError::Decode)?,
             )?;
         }
         Ok(())
@@ -1169,9 +1248,18 @@ impl DeliveryService {
         self.persist_envelope(&gid, seq, &envelope)?;
         self.persist_group(&gid)?;
 
-        // Fan out to the named recipients (the relay's unavoidable metadata — R4).
+        // Fan out to the named recipients (the relay's unavoidable metadata — R4). The
+        // mailbox row is written before the in-memory entry, so whatever a recipient can
+        // be handed is also on disk and survives a restart (comms#4).
         for r in &envelope.recipients {
-            self.mailboxes.entry(*r).or_default().push(envelope.clone());
+            let arrival = self.next_arrival;
+            self.next_arrival += 1;
+            self.persist_mailbox_ref(r, arrival, &gid, seq, now_ms)?;
+            self.mailboxes.entry(*r).or_default().push(MailboxItem {
+                arrival,
+                enqueued_ms: now_ms,
+                envelope: envelope.clone(),
+            });
         }
 
         self.audit_append(
@@ -1193,18 +1281,57 @@ impl DeliveryService {
     /// 2026-11-07-v060 §5). The ciphertext log itself is not affected.
     pub const MAILBOX_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
-    /// RED (GC-1): not implemented yet; mailboxes are still RAM-only.
-    pub fn expire_mailboxes(&mut self, _now_ms: u64) -> Result<usize, RelayError> {
-        Ok(0)
+    /// Drop every mailbox entry older than [`MAILBOX_TTL_MS`](Self::MAILBOX_TTL_MS)
+    /// at `now_ms` (an entry exactly at the TTL is kept). Returns how many entries
+    /// were dropped. Durable: the rows are deleted from the store first, in one batch,
+    /// and memory changes only after that succeeds. The ciphertext log is untouched.
+    pub fn expire_mailboxes(&mut self, now_ms: u64) -> Result<usize, RelayError> {
+        let expired = |i: &MailboxItem| now_ms.saturating_sub(i.enqueued_ms) > Self::MAILBOX_TTL_MS;
+        let keys: Vec<Vec<u8>> = self
+            .mailboxes
+            .iter()
+            .flat_map(|(w, items)| {
+                items
+                    .iter()
+                    .filter(|i| expired(i))
+                    .map(|i| store::seq_key(&w.0, i.arrival))
+            })
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        if let Some(s) = &self.store {
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
+        for items in self.mailboxes.values_mut() {
+            items.retain(|i| !expired(i));
+        }
+        self.mailboxes.retain(|_, items| !items.is_empty());
+        Ok(keys.len())
     }
 
-    /// Drain a wallet's mailbox (the client's poll). In-order by arrival.
+    /// Drain a wallet's mailbox (the client's poll), in arrival order. The rows are
+    /// deleted from the store (one atomic batch) BEFORE the mailbox is emptied, so on
+    /// a store error nothing is handed out and nothing is lost: the mailbox is intact
+    /// and the next fetch retries.
     pub fn fetch(&mut self, wallet: &WalletAddress) -> Result<Vec<Envelope>, RelayError> {
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Ok(Vec::new());
+        };
+        if let Some(s) = &self.store {
+            let keys: Vec<Vec<u8>> = items
+                .iter()
+                .map(|i| store::seq_key(&wallet.0, i.arrival))
+                .collect();
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
         Ok(self
             .mailboxes
-            .get_mut(wallet)
-            .map(std::mem::take)
-            .unwrap_or_default())
+            .remove(wallet)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.envelope)
+            .collect())
     }
 
     // ─────────────────────── introspection / audit ───────────────────────

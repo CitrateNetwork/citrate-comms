@@ -105,6 +105,12 @@ impl RelayServer {
         self.service.lock().await.domain().to_string()
     }
 
+    /// Drop mailbox entries older than the TTL (see
+    /// [`DeliveryService::expire_mailboxes`]). Returns how many were dropped.
+    pub async fn expire_mailboxes(&self, now_ms: u64) -> Result<usize, crate::RelayError> {
+        self.service.lock().await.expire_mailboxes(now_ms)
+    }
+
     /// `(group_count, audit_record_count)` — for the admin health snapshot.
     pub async fn snapshot(&self) -> (usize, usize) {
         let svc = self.service.lock().await;
@@ -254,6 +260,10 @@ impl RelayServer {
                         self.registry.lock().await.insert(addr, out_tx.clone());
                         *authed = Some(addr);
                         let _ = out_tx.send(ServerFrame::Authenticated { address: addr });
+                        // comms#4: hand over whatever waited while this wallet was away,
+                        // including across a relay restart, without waiting for the next
+                        // submit to trigger a delivery pass.
+                        self.deliver_pending().await;
                     }
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
