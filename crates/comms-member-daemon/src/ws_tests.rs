@@ -394,3 +394,55 @@ fn a_core_minted_invite_link_redeems_through_the_ipc() {
     bot.send(gid, "[RECOVERED] chain tip advancing").expect("bot send");
     assert!(await_body(&mut owner, gid, "[RECOVERED] chain tip advancing"));
 }
+
+// Revoking through the IPC with `report_used` against a real relay: a redeemed invite comes back
+// as "invite already used" (the app refuses a claim approval on it); an unused invite closes; a
+// request without the field (an older app) keeps the original acknowledgement.
+#[test]
+fn ipc_revoke_reports_an_already_redeemed_invite() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let gid = owner.create_group("ops").expect("create");
+    let used = b"fxsec-used-token-0001".to_vec();
+    let unused = b"fxsec-unused-token-0002".to_vec();
+    for t in [&used, &unused] {
+        owner
+            .publish_invite(gid, *blake3::hash(t).as_bytes(), wall_ms() + 600_000)
+            .expect("mint");
+    }
+    let mut bob = ws_member(&url, EthWallet::generate());
+    bob.redeem_invite(gid, used.clone(), "ops")
+        .expect("bob redeems the first invite");
+
+    let revoke = |d: &mut MemberDaemon, token: &[u8], report: Option<bool>| {
+        let mut req = serde_json::json!({
+            "op": "revokeInvite",
+            "token_hash": hex::encode(blake3::hash(token).as_bytes()),
+        });
+        if let Some(r) = report {
+            req["report_used"] = serde_json::Value::Bool(r);
+        }
+        crate::ipc::handle_request(d, serde_json::from_value(req).expect("request"))
+    };
+
+    match revoke(&mut owner, &used, Some(true)) {
+        crate::ipc::Response::Error { message } => assert!(
+            message.contains(comms_wire::frames::INVITE_ALREADY_USED),
+            "unexpected message: {message}"
+        ),
+        other => panic!("a redeemed invite must not revoke as OK when asked: {other:?}"),
+    }
+    // An older app (no field) gets the original answer.
+    assert_eq!(revoke(&mut owner, &used, None), crate::ipc::Response::Ok);
+    // An unused invite closes, and can no longer be redeemed.
+    assert_eq!(
+        revoke(&mut owner, &unused, Some(true)),
+        crate::ipc::Response::Ok
+    );
+    let mut carol = ws_member(&url, EthWallet::generate());
+    assert!(
+        carol.redeem_invite(gid, unused, "ops").is_err(),
+        "a closed invite can't be redeemed"
+    );
+}

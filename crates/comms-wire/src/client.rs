@@ -293,6 +293,23 @@ impl RelayClient {
         }
     }
 
+    /// `member`'s current grant generation in `group_id` — the generation an owner signs a
+    /// delegated grant for (`rbac::sign_group_grant`). `None` if `member` is not a member.
+    pub async fn grant_generation(
+        &self,
+        group_id: GroupId,
+        member: WalletAddress,
+    ) -> Result<Option<u64>, WsError> {
+        match self
+            .request(ClientFrame::GrantGeneration { group_id, member })
+            .await?
+        {
+            ServerFrame::GrantGeneration(g) => Ok(g),
+            ServerFrame::Error { message } => Err(WsError::Server(message)),
+            _ => Err(WsError::Protocol("expected GrantGeneration")),
+        }
+    }
+
     /// INVITE-S2 (owner) — publish a single-use, group-bound invite. `group_info` is the
     /// owner's exported public `GroupInfo`; the relay stores it against `token_hash`.
     pub async fn publish_invite(
@@ -312,11 +329,20 @@ impl RelayClient {
         .map(|_| ())
     }
 
-    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone).
-    pub async fn revoke_invite(&self, token_hash: [u8; 32]) -> Result<(), WsError> {
-        self.expect_ack(ClientFrame::RevokeInvite { token_hash })
-            .await
-            .map(|_| ())
+    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone). With
+    /// `report_used`, an invite that was already redeemed is refused with
+    /// [`crate::frames::INVITE_ALREADY_USED`] (a relay that predates it acknowledges).
+    pub async fn revoke_invite(
+        &self,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), WsError> {
+        self.expect_ack(ClientFrame::RevokeInvite {
+            token_hash,
+            report_used,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// INVITE-S2 (joiner) — redeem an invite by its raw token. Returns the relay's typed

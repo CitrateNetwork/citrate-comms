@@ -61,8 +61,15 @@ pub trait Relay: Send {
         group_info: Vec<u8>,
         expires_at: u64,
     ) -> Result<(), String>;
-    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone).
-    fn revoke_invite(&mut self, caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String>;
+    /// INVITE-S2 (owner) — revoke a previously-published invite (tombstone). With
+    /// `report_used`, an already-redeemed invite comes back as the relay's
+    /// `INVITE_ALREADY_USED` error, passed through unchanged.
+    fn revoke_invite(
+        &mut self,
+        caller: WalletAddress,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), String>;
     /// INVITE-S2 (joiner) — redeem an invite by its raw token. Returns
     /// `(group_info, mint_epoch)` on success; a fail-closed reason string otherwise.
     fn redeem_invite(
@@ -191,9 +198,14 @@ impl Relay for InProcessRelay {
             .publish_invite(inviter, gid, token_hash, group_info, expires_at)
             .map_err(|e| e.to_string())
     }
-    fn revoke_invite(&mut self, caller: WalletAddress, token_hash: [u8; 32]) -> Result<(), String> {
+    fn revoke_invite(
+        &mut self,
+        caller: WalletAddress,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), String> {
         self.0
-            .revoke_invite(caller, token_hash)
+            .revoke_invite(caller, token_hash, report_used)
             .map_err(|e| e.to_string())
     }
     fn redeem_invite(
@@ -403,9 +415,10 @@ impl Relay for WsRelay {
         &mut self,
         _caller: WalletAddress,
         token_hash: [u8; 32],
+        report_used: bool,
     ) -> Result<(), String> {
         self.rt
-            .block_on(self.client.revoke_invite(token_hash))
+            .block_on(self.client.revoke_invite(token_hash, report_used))
             .map_err(|e| e.to_string())
     }
     fn redeem_invite(

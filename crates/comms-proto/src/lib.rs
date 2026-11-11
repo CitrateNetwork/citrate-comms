@@ -158,6 +158,11 @@ pub struct RoleAssertion {
     pub scope: Option<GroupId>,
     /// Unix milliseconds; `None` == no expiry.
     pub not_after: Option<u64>,
+    /// The subject's grant generation in `scope` this grant was issued for. `None` is
+    /// generation 0 and is omitted from the encoding, so grants signed before this field
+    /// existed keep their exact bytes (and signatures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub issuer: WalletAddress,
     /// secp256k1 signature by `issuer` over the canonical encoding of the fields above.
     pub signature: Vec<u8>,

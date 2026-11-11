@@ -411,6 +411,19 @@ impl RelayServer {
                     _ => send_err(out_tx, "not a member of this group"),
                 }
             }
+            ClientFrame::GrantGeneration { group_id, member } => {
+                // Membership metadata: answered only to an authenticated member of the group.
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let svc = self.service.lock().await;
+                if svc.grant_generation(&group_id, &addr).is_none() {
+                    return send_err(out_tx, "not a member of this group");
+                }
+                let g = svc.grant_generation(&group_id, &member);
+                drop(svc);
+                let _ = out_tx.send(ServerFrame::GrantGeneration(g));
+            }
             ClientFrame::PublishInvite {
                 group_id,
                 token_hash,
@@ -434,11 +447,19 @@ impl RelayServer {
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
             }
-            ClientFrame::RevokeInvite { token_hash } => {
+            ClientFrame::RevokeInvite {
+                token_hash,
+                report_used,
+            } => {
                 let Some(addr) = *authed else {
                     return send_err(out_tx, "not authenticated");
                 };
-                let r = { self.service.lock().await.revoke_invite(addr, token_hash) };
+                let r = {
+                    self.service
+                        .lock()
+                        .await
+                        .revoke_invite(addr, token_hash, report_used)
+                };
                 match r {
                     Ok(_) => ack(out_tx, None),
                     Err(e) => send_err(out_tx, &e.to_string()),
@@ -642,6 +663,7 @@ mod tests {
             "ClientFrame::Submit(",
             "ClientFrame::RatchetTree",
             "ClientFrame::GroupMembers",
+            "ClientFrame::GrantGeneration",
             "ClientFrame::Offboard",
         ] {
             // Use the LAST occurrence (the match arm, never the earlier `matches!`

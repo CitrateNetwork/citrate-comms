@@ -545,11 +545,17 @@ impl MemberDaemon {
     }
 
     /// **INVITE-S2 (owner revokes).** Tombstone a previously-minted invite so every later
-    /// redeem of it fails closed.
-    pub fn revoke_invite(&mut self, token_hash: [u8; 32]) -> Result<(), DaemonError> {
+    /// redeem of it fails closed. With `report_used`, an invite that was already redeemed is
+    /// refused with the relay's `INVITE_ALREADY_USED` message (passed through as
+    /// [`DaemonError::Relay`]).
+    pub fn revoke_invite(
+        &mut self,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), DaemonError> {
         let caller = self.wallet.address();
         self.relay
-            .revoke_invite(caller, token_hash)
+            .revoke_invite(caller, token_hash, report_used)
             .map_err(DaemonError::Relay)
     }
 

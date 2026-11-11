@@ -382,7 +382,9 @@ fn tripwire_every_relay_grant_check_is_bound_to_its_group() {
     let lib = include_str!("../src/lib.rs");
     let prod = lib.split("\n#[cfg(test)]").next().unwrap();
     assert!(
-        prod.contains("rbac::verify_grant_for_group(a, admin, self.owner, group_id, now_ms)"),
+        prod.contains(
+            "rbac::verify_grant_for_group(a, admin, self.owner, group_id, generation, now_ms)"
+        ),
         "TRIPWIRE: the membership RBAC gate must call the group-bound grant check"
     );
     assert_eq!(
