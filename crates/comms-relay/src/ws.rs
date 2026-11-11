@@ -541,8 +541,15 @@ impl RelayServer {
         };
         let mut svc = self.service.lock().await;
         for (wallet, tx) in targets {
-            for env in svc.fetch(&wallet) {
-                let _ = tx.send(ServerFrame::Deliver(env));
+            match svc.fetch(&wallet) {
+                Ok(envs) => {
+                    for env in envs {
+                        let _ = tx.send(ServerFrame::Deliver(env));
+                    }
+                }
+                // The mailbox is left intact on a store error, so nothing is lost: the
+                // next delivery pass retries it.
+                Err(e) => eprintln!("relay: mailbox fetch failed, will retry: {e}"),
             }
         }
     }

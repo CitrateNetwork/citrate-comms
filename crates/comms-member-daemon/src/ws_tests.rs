@@ -446,3 +446,121 @@ fn ipc_revoke_reports_an_already_redeemed_invite() {
         "a closed invite can't be redeemed"
     );
 }
+
+// ── GC-1 / comms#3 close: a persistent member restarted mid-conversation ──
+
+fn ws_persistent(url: &str, seed: &[u8; 32], dir: &std::path::Path) -> MemberDaemon {
+    let w = EthWallet::from_secret_key(seed).expect("wallet from seed");
+    let ws = WsRelay::connect_insecure(url).expect("ws connect");
+    MemberDaemon::new_with_relay_persistent(
+        w,
+        Box::new(ws),
+        "relay.test",
+        wall_ms(),
+        dir.to_path_buf(),
+        seed,
+    )
+    .expect("persistent daemon")
+}
+
+// The acceptance for comms#3 beyond "list_groups survives": after a full restart the restored MLS
+// state is USABLE in both directions over the same relay. If the epoch secrets, the sender ratchet
+// or the leaf were restored wrongly, one of the two plaintexts would not come back.
+#[test]
+fn a_restarted_persistent_member_keeps_talking_in_both_directions() {
+    let owner_w = EthWallet::generate();
+    let seed = owner_w.secret_bytes();
+    let url = spawn_ws_relay(owner_w.address());
+    let tmp = tempfile::tempdir().expect("tmp");
+    let state = tmp.path().join("state");
+
+    let mut owner = ws_persistent(&url, &seed, &state);
+    let gid = owner.create_group("deals").expect("create");
+    let bob_w = EthWallet::generate();
+    let bob_addr = bob_w.address();
+    let mut bob = ws_member(&url, bob_w);
+    owner.add_member(gid, bob_addr).expect("add bob");
+    let mut joined = Vec::new();
+    for _ in 0..60 {
+        joined = bob.join_pending().expect("join");
+        if !joined.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(joined, vec![gid]);
+    owner.send(gid, "before restart").expect("send 1");
+    assert!(await_body(&mut bob, gid, "before restart"));
+    bob.send(gid, "ack 1").expect("bob send 1");
+    assert!(await_body(&mut owner, gid, "ack 1"));
+
+    drop(owner); // full shutdown: process gone, socket closed
+    let mut owner = ws_persistent(&url, &seed, &state);
+    assert_eq!(owner.list_groups().len(), 1);
+
+    owner.send(gid, "after restart").expect("send 2");
+    assert!(
+        await_body(&mut bob, gid, "after restart"),
+        "the peer must decrypt what the restored member sends"
+    );
+    bob.send(gid, "welcome back").expect("bob send 2");
+    assert!(
+        await_body(&mut owner, gid, "welcome back"),
+        "the restored member must decrypt what the peer sends"
+    );
+}
+
+// Red→green: `fetch` drains the relay, so mail for group A that a poll of group B fetched lives
+// only in the daemon's inbox. It must survive a daemon restart, or it is lost for good (the relay
+// already handed it over).
+#[test]
+fn mail_fetched_for_another_group_survives_a_daemon_restart() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let ga = owner.create_group("a").expect("ga");
+    let gb = owner.create_group("b").expect("gb");
+
+    let bob_w = EthWallet::generate();
+    let bob_addr = bob_w.address();
+    let seed = bob_w.secret_bytes();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let state = tmp.path().join("state");
+    let mut bob = ws_persistent(&url, &seed, &state);
+
+    owner.add_member(ga, bob_addr).expect("add to a");
+    let mut joined = Vec::new();
+    for _ in 0..60 {
+        joined = bob.join_pending().expect("join a");
+        if !joined.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(joined, vec![ga]);
+    let token = b"restart-two-groups".to_vec();
+    owner
+        .publish_invite(gb, *blake3::hash(&token).as_bytes(), wall_ms() + 600_000)
+        .expect("mint");
+    bob.redeem_invite(gb, token, "b").expect("redeem b");
+    for _ in 0..40 {
+        let _ = owner.poll_messages(gb);
+        if owner.roster(gb).map(|r| r.len()).unwrap_or(0) == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    owner.send(ga, "for group a").expect("send a");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Polling B fetches A's message from the relay and keeps it in the inbox.
+    let in_b = bob.poll_messages(gb).expect("poll b");
+    assert!(in_b.iter().all(|m| m.body != "for group a"));
+
+    drop(bob); // restart before group A is polled
+    let mut bob = ws_persistent(&url, &seed, &state);
+    assert!(
+        await_body(&mut bob, ga, "for group a"),
+        "group a's fetched message must survive the daemon restart"
+    );
+}

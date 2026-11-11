@@ -135,7 +135,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
         .unwrap();
 
     // ── 5. Bob joins from his Welcome + the relay's public ratchet tree. ──
-    let inbox = relay.fetch(&bob_wallet.address());
+    let inbox = relay.fetch(&bob_wallet.address()).unwrap();
     let welcome = inbox
         .iter()
         .find(|e| e.kind == EnvelopeKind::Welcome)
@@ -167,7 +167,7 @@ fn two_members_exchange_a_message_through_a_blind_relay() {
     );
 
     // Bob fetches and decrypts.
-    let inbox = relay.fetch(&bob_wallet.address());
+    let inbox = relay.fetch(&bob_wallet.address()).unwrap();
     let app = inbox
         .iter()
         .find(|e| e.kind == EnvelopeKind::Application)
@@ -291,7 +291,7 @@ fn offboard_atomically_revokes_role_and_future_access() {
             15,
         )
         .unwrap();
-    let inbox = relay.fetch(&bob_wallet.address());
+    let inbox = relay.fetch(&bob_wallet.address()).unwrap();
     let welcome = inbox
         .iter()
         .find(|e| e.kind == EnvelopeKind::Welcome)
@@ -446,7 +446,7 @@ fn domain_record_replicates_e2e_over_relay() {
             15,
         )
         .unwrap();
-    let inbox = relay.fetch(&bob_wallet.address());
+    let inbox = relay.fetch(&bob_wallet.address()).unwrap();
     let w = inbox
         .iter()
         .find(|e| e.kind == EnvelopeKind::Welcome)
@@ -493,7 +493,7 @@ fn domain_record_replicates_e2e_over_relay() {
     alice_store.apply(&ev);
 
     // ── Bob receives, decrypts, decodes, and folds — converging on the same Deal. ──
-    let inbox = relay.fetch(&bob_wallet.address());
+    let inbox = relay.fetch(&bob_wallet.address()).unwrap();
     let app = inbox
         .iter()
         .find(|e| e.kind == EnvelopeKind::Application)

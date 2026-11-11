@@ -184,7 +184,12 @@ impl Relay for InProcessRelay {
             .map_err(|e| e.to_string())
     }
     fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
-        self.0.fetch(wallet)
+        // On a store error the relay leaves the mailbox intact, so the next poll retries
+        // and nothing is lost; this poll simply returns nothing.
+        self.0.fetch(wallet).unwrap_or_else(|e| {
+            eprintln!("member-daemon: relay fetch failed, will retry: {e}");
+            Vec::new()
+        })
     }
     fn publish_invite(
         &mut self,

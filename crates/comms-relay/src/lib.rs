@@ -1189,12 +1189,22 @@ impl DeliveryService {
         Ok(seq)
     }
 
+    /// How long an undelivered envelope waits in a mailbox: 30 days (planset
+    /// 2026-11-07-v060 §5). The ciphertext log itself is not affected.
+    pub const MAILBOX_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+    /// RED (GC-1): not implemented yet; mailboxes are still RAM-only.
+    pub fn expire_mailboxes(&mut self, _now_ms: u64) -> Result<usize, RelayError> {
+        Ok(0)
+    }
+
     /// Drain a wallet's mailbox (the client's poll). In-order by arrival.
-    pub fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
-        self.mailboxes
+    pub fn fetch(&mut self, wallet: &WalletAddress) -> Result<Vec<Envelope>, RelayError> {
+        Ok(self
+            .mailboxes
             .get_mut(wallet)
             .map(std::mem::take)
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     // ─────────────────────── introspection / audit ───────────────────────
@@ -1296,6 +1306,7 @@ mod tests {
     use super::*;
     use comms_core::identity::EthWallet;
     use comms_proto::{EpochId, CITRATE_CHAIN_ID};
+    use std::path::Path;
 
     fn login(relay: &mut DeliveryService, wallet: &EthWallet, now: u64) {
         let nonce = relay.issue_challenge(now);
@@ -1525,7 +1536,7 @@ mod tests {
             .iter()
             .any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == ct));
         // Bob receives the fanned-out envelope.
-        let inbox = relay.fetch(&bob.address());
+        let inbox = relay.fetch(&bob.address()).unwrap();
         assert_eq!(
             inbox
                 .iter()
@@ -1677,6 +1688,227 @@ mod tests {
             relay.audit().verify_integrity().unwrap();
             assert!(relay.audit().len() >= 4);
         }
+    }
+
+    // ───────── GC-1 (comms#4): the delivery mailbox survives a relay restart ─────────
+
+    /// A durable relay with Alice (owner) and Bob onboarded into `gid`. Bob's Welcome
+    /// is drained so each test starts from an empty mailbox.
+    fn durable_pair(dir: &Path, master: [u8; 32], gid: GroupId) -> (EthWallet, EthWallet) {
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let mut relay =
+            DeliveryService::open(dir, "relay.citrate.ai", alice.address(), master, 0).unwrap();
+        login(&mut relay, &alice, 10);
+        login(&mut relay, &bob, 11);
+        relay.register_group(gid, alice.address(), 12).unwrap();
+        relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                bob.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"welcome-ct",
+                    &[bob.address()],
+                ),
+                b"ratchet-tree".to_vec(),
+                13,
+            )
+            .unwrap();
+        let welcome = relay.fetch(&bob.address()).unwrap();
+        assert_eq!(welcome.len(), 1);
+        (alice, bob)
+    }
+
+    fn send_app(
+        relay: &mut DeliveryService,
+        from: &EthWallet,
+        to: &EthWallet,
+        gid: GroupId,
+        ct: &[u8],
+        now: u64,
+    ) {
+        relay
+            .submit_as(
+                from.address(),
+                envelope(
+                    gid,
+                    from.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    ct,
+                    &[to.address()],
+                ),
+                now,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn messages_survive_relay_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [7u8; 32];
+        let gid = GroupId([0x41; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+
+        // Bob is offline; Alice sends three messages.
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            for (i, ct) in [b"m-one".as_slice(), b"m-two", b"m-three"]
+                .iter()
+                .enumerate()
+            {
+                send_app(&mut relay, &alice, &bob, gid, ct, 22 + i as u64);
+            }
+        } // relay process ends here
+
+        // The relay restarts; Bob comes online and drains his mailbox.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .unwrap();
+        login(&mut relay, &bob, 31);
+        let got = relay.fetch(&bob.address()).unwrap();
+        let cts: Vec<&[u8]> = got.iter().map(|e| e.ciphertext.as_slice()).collect();
+        assert_eq!(
+            cts,
+            vec![b"m-one".as_slice(), b"m-two", b"m-three"],
+            "all three, in order"
+        );
+        let seqs: Vec<Option<u64>> = got.iter().map(|e| e.group_seq).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "relay order kept: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn fetched_envelopes_are_not_redelivered_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [8u8; 32];
+        let gid = GroupId([0x42; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            send_app(&mut relay, &alice, &bob, gid, b"once", 22);
+            send_app(&mut relay, &alice, &bob, gid, b"twice", 23);
+        }
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                    .unwrap();
+            let got = relay.fetch(&bob.address()).unwrap();
+            assert_eq!(got.len(), 2, "delivered once after the first restart");
+        }
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 40)
+                .unwrap();
+        assert!(
+            relay.fetch(&bob.address()).unwrap().is_empty(),
+            "a drained envelope must not come back after a second restart"
+        );
+        // The durable log itself is untouched by draining the mailbox.
+        assert_eq!(relay.group_log(&gid).unwrap().len(), 3); // welcome + 2
+    }
+
+    #[test]
+    fn mailbox_entries_expire_after_the_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [9u8; 32];
+        let gid = GroupId([0x43; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        let t0 = 1_000_000u64;
+        let ttl = DeliveryService::MAILBOX_TTL_MS;
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                    .unwrap();
+            login(&mut relay, &alice, t0);
+            send_app(&mut relay, &alice, &bob, gid, b"old", t0);
+            send_app(&mut relay, &alice, &bob, gid, b"fresh", t0 + ttl);
+        }
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                .unwrap();
+        // Exactly at the TTL an entry is still kept; one millisecond later it is dropped.
+        assert_eq!(relay.expire_mailboxes(t0 + ttl).unwrap(), 0);
+        assert_eq!(relay.expire_mailboxes(t0 + ttl + 1).unwrap(), 1);
+        let got = relay.fetch(&bob.address()).unwrap();
+        let cts: Vec<&[u8]> = got.iter().map(|e| e.ciphertext.as_slice()).collect();
+        assert_eq!(
+            cts,
+            vec![b"fresh".as_slice()],
+            "the 30-day-old entry is dropped"
+        );
+    }
+
+    #[test]
+    fn expire_mailboxes_sweeps_wallets_that_never_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [10u8; 32];
+        let gid = GroupId([0x44; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        let t0 = 5_000u64;
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                    .unwrap();
+            login(&mut relay, &alice, t0);
+            send_app(&mut relay, &alice, &bob, gid, b"stale", t0);
+            let later = t0 + DeliveryService::MAILBOX_TTL_MS + 1;
+            assert_eq!(relay.expire_mailboxes(later).unwrap(), 1);
+            assert_eq!(relay.expire_mailboxes(later).unwrap(), 0, "idempotent");
+        }
+        // The sweep is durable: the expired entry is gone after a restart too.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                .unwrap();
+        assert!(relay.fetch(&bob.address()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mailbox_on_disk_holds_ciphertext_only() {
+        // The mailbox CF stores references into the ciphertext log, never a payload
+        // the relay could read. A canary in the (already opaque) ciphertext must not
+        // appear in plaintext anywhere under the store directory.
+        let dir = tempfile::tempdir().unwrap();
+        let master = [11u8; 32];
+        let gid = GroupId([0x45; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            send_app(&mut relay, &alice, &bob, gid, b"CANARY-MAILBOX-7f3a", 22);
+        }
+        let canary = b"CANARY-MAILBOX-7f3a";
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes.windows(canary.len()).any(|w| w == canary),
+                    "canary found in {}",
+                    path.display()
+                );
+            }
+        }
+        // And it is still deliverable after the restart.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .unwrap();
+        assert_eq!(relay.fetch(&bob.address()).unwrap().len(), 1);
     }
 
     #[test]

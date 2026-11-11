@@ -396,7 +396,7 @@ impl Workspace {
             &by_wallet,
             &mut store,
             &mut messages,
-        );
+        )?;
 
         // system marker (UI only)
         messages.push(UiMessage { system: true, text: "Priya added @crm-agent to the channel — it can read this channel and post. Everyone here can see it joined.".into(), ..Default::default() });
@@ -443,7 +443,7 @@ impl Workspace {
             &by_wallet,
             &mut store,
             &mut messages,
-        );
+        )?;
         // attach the deal link to the agent's just-recorded message
         if let Some(last) = messages.last_mut() {
             last.has_link = true;
@@ -670,8 +670,8 @@ fn drain(
     by_wallet: &HashMap<WalletAddress, Meta>,
     store: &mut DomainStore,
     messages: &mut Vec<UiMessage>,
-) {
-    for e in relay.fetch(&me_w.address()) {
+) -> Result<(), String> {
+    for e in relay.fetch(&me_w.address()).map_err(|e| e.to_string())? {
         if e.kind != EnvelopeKind::Application {
             continue;
         }
@@ -707,6 +707,7 @@ fn drain(
             }),
         }
     }
+    Ok(())
 }
 
 fn seed_domain(store: &mut DomainStore, clock: &mut LamportClock, gid: GroupId) {
