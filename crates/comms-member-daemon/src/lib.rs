@@ -130,10 +130,50 @@ pub struct MemberDaemon {
     /// handed these over and deleted its copy, so a daemon restart must not lose them. Bounded by
     /// [`INBOX_CAP`].
     inbox: Vec<Envelope>,
-    /// comms #51 item 1: per group, the highest relay `group_seq` this member has consumed
-    /// (processed, even if processing failed, or joined from). The relay resends what it never
-    /// saw acknowledged, so anything at or below the mark is a copy and is dropped. Persisted.
-    consumed: std::collections::BTreeMap<GroupId, u64>,
+    /// comms #51 item 1 / #55 review: per group, a window of the most recently consumed
+    /// envelopes (processed, even if processing failed, or joined from) as
+    /// `group_seq -> BLAKE3(ciphertext)`. The relay resends what it never saw acknowledged; only
+    /// an EXACT copy (same seq and same ciphertext) is dropped. New mail under a reused number
+    /// (a relay store reset or move) differs in ciphertext, is delivered, and resets the window.
+    /// Persisted on every change.
+    consumed: std::collections::BTreeMap<GroupId, ConsumedWindow>,
+    /// Envelopes dropped on receipt, by reason.
+    drops: DeliveryDrops,
+}
+
+/// Per-group window of consumed envelopes: `group_seq -> BLAKE3(ciphertext)` (comms #55).
+type ConsumedWindow = std::collections::BTreeMap<u64, [u8; 32]>;
+
+/// How many consumed envelopes a group's window keeps. Resends are of recent, unacknowledged
+/// deliveries, so a copy older than this is not expected; one would be processed again (and
+/// counted unreadable by MLS), never silently dropped.
+const CONSUMED_WINDOW: usize = 1024;
+
+fn ct_hash(e: &Envelope) -> [u8; 32] {
+    *blake3::hash(&e.ciphertext).as_bytes()
+}
+
+/// Is `e` an exact copy of something in `w`?
+fn is_copy(w: Option<&ConsumedWindow>, e: &Envelope) -> bool {
+    match (w, e.group_seq) {
+        (Some(w), Some(s)) => w.get(&s) == Some(&ct_hash(e)),
+        _ => false,
+    }
+}
+
+/// Record `e` as consumed in `w`. A different ciphertext under a number already in the window
+/// means the relay renumbered (store reset or move): the old window no longer describes this log
+/// and is cleared.
+fn record_consumed(w: &mut ConsumedWindow, e: &Envelope) {
+    let Some(s) = e.group_seq else { return };
+    let h = ct_hash(e);
+    if w.get(&s).is_some_and(|old| *old != h) {
+        w.clear();
+    }
+    w.insert(s, h);
+    while w.len() > CONSUMED_WINDOW {
+        w.pop_first();
+    }
 }
 
 /// Envelopes dropped on receipt, by reason (comms #55 review).
@@ -151,7 +191,7 @@ type Rehydrated = (
     MlsMember,
     Vec<GroupState>,
     Vec<Envelope>,
-    std::collections::BTreeMap<GroupId, u64>,
+    std::collections::BTreeMap<GroupId, ConsumedWindow>,
 );
 
 /// Upper bound on [`MemberDaemon::grant_log`].
@@ -354,6 +394,7 @@ impl MemberDaemon {
             grant_log: Vec::new(),
             inbox,
             consumed,
+            drops: DeliveryDrops::default(),
         };
         daemon.persist_state()?;
         Ok(daemon)
@@ -364,7 +405,11 @@ impl MemberDaemon {
     /// `MlsGroup::load` — no re-create, no new epoch.
     fn rehydrate(state: persist::StateFile) -> Result<Rehydrated, DaemonError> {
         let inbox = state.inbox;
-        let consumed = state.consumed.into_iter().collect();
+        let consumed = state
+            .consumed
+            .into_iter()
+            .map(|(g, w)| (g, w.into_iter().collect()))
+            .collect();
         let mls = MlsMember::restore(&state.identity, &state.sig_pubkey, &state.mls_snapshot)
             .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let mut groups = Vec::with_capacity(state.groups.len());
@@ -428,7 +473,11 @@ impl MemberDaemon {
             groups,
         );
         state.inbox = self.inbox.clone();
-        state.consumed = self.consumed.iter().map(|(g, s)| (*g, *s)).collect();
+        state.consumed = self
+            .consumed
+            .iter()
+            .map(|(g, w)| (*g, w.iter().map(|(s, h)| (*s, *h)).collect()))
+            .collect();
         persist::write_state(&ctx.dir, &ctx.key, &state)
             .map_err(|e| DaemonError::Persist(e.to_string()))
     }
@@ -556,7 +605,7 @@ impl MemberDaemon {
     /// GC-2: why recent incoming role grants were refused (newest last, bounded).
     /// comms #55 review: envelopes dropped on receipt, by reason (counters since start).
     pub fn delivery_drops(&self) -> DeliveryDrops {
-        DeliveryDrops::default()
+        self.drops
     }
 
     pub fn grant_rejections(&self) -> Vec<String> {
@@ -702,11 +751,8 @@ impl MemberDaemon {
 
     /// Record that `e` was consumed (comms #51 item 1), and persist the mark.
     fn mark_consumed(&mut self, e: &Envelope) {
-        if let Some(s) = e.group_seq {
-            let m = self.consumed.entry(e.group_id).or_insert(s);
-            if *m < s {
-                *m = s;
-            }
+        if e.group_seq.is_some() {
+            record_consumed(self.consumed.entry(e.group_id).or_default(), e);
             if let Err(err) = self.persist_state() {
                 eprintln!("member-daemon: could not persist the consumed mark, will retry: {err}");
             }
@@ -773,18 +819,24 @@ impl MemberDaemon {
         // comms #51 item 1: drop copies the relay resent (no ack reached it): already consumed,
         // already in the inbox, or twice in this batch. The ack below still covers them.
         let acked_copies = !fresh.is_empty();
-        let mut seen: std::collections::BTreeSet<(GroupId, u64)> = self
+        let mut seen: std::collections::BTreeSet<(GroupId, u64, [u8; 32])> = self
             .inbox
             .iter()
-            .filter_map(|e| e.group_seq.map(|s| (e.group_id, s)))
+            .filter_map(|e| e.group_seq.map(|s| (e.group_id, s, ct_hash(e))))
             .collect();
+        let before = fresh.len();
         fresh.retain(|e| match e.group_seq {
             Some(s) => {
-                let consumed = self.consumed.get(&e.group_id).is_some_and(|m| s <= *m);
-                !consumed && seen.insert((e.group_id, s))
+                !is_copy(self.consumed.get(&e.group_id), e)
+                    && seen.insert((e.group_id, s, ct_hash(e)))
             }
             None => true,
         });
+        let copies = (before - fresh.len()) as u64;
+        if copies > 0 {
+            self.drops.copies += copies;
+            eprintln!("member-daemon: dropped {copies} resent cop(ies) of consumed or held mail");
+        }
         if fresh.is_empty() && acked_copies {
             if let Err(e) = self.relay.ack_delivered() {
                 eprintln!("member-daemon: relay ack failed, it will resend: {e}");
@@ -1077,7 +1129,8 @@ impl MemberDaemon {
         // instead of being dropped: `fetch` drained them from the relay session.
         let mut keep = Vec::new();
         let mut failure = None;
-        let mut mark = self.consumed.get(&gid).copied();
+        let mut window = self.consumed.get(&gid).cloned().unwrap_or_default();
+        let mut window_changed = false;
         {
             let mls = &self.mls;
             let g = self
@@ -1091,12 +1144,15 @@ impl MemberDaemon {
                     keep.push(e);
                     continue;
                 }
-                // comms #51 item 1: a copy of something already consumed is dropped unread.
-                if let Some(s) = e.group_seq {
-                    if mark.is_some_and(|m| s <= m) {
-                        continue;
-                    }
-                    mark = Some(s);
+                // comms #51 item 1 / #55: an exact copy of something already consumed is
+                // dropped unread; anything else is recorded as consumed before processing.
+                if is_copy(Some(&window), &e) {
+                    self.drops.copies += 1;
+                    continue;
+                }
+                if e.group_seq.is_some() {
+                    record_consumed(&mut window, &e);
+                    window_changed = true;
                 }
                 match e.kind {
                     EnvelopeKind::Commit => {
@@ -1171,9 +1227,15 @@ impl MemberDaemon {
             // after it are kept for the next poll.
             keep.extend(iter);
         }
-        if let Some(m) = mark {
-            self.consumed.insert(gid, m);
+        if !window.is_empty() {
+            self.consumed.insert(gid, window);
         }
+        if failure.is_some() {
+            // Dropped as unreadable (distinct from a copy): the poll reports it.
+            self.drops.unreadable += 1;
+        }
+        // Persist the consumed window on every advance (#55 review).
+        changed |= window_changed;
         self.stash(keep);
         for why in rejected {
             eprintln!("member-daemon: {why}");
