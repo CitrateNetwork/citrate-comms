@@ -73,6 +73,20 @@ pub enum Request {
         group: String,
         assertion: RoleAssertion,
     },
+    /// GC-2: sign a role grant with this member's comms key and send it to the group. Every
+    /// member verifies it against the group owner (group context) and its roster.
+    GrantRole {
+        group: String,
+        member: String,
+        role: Role,
+        #[serde(default)]
+        not_after: Option<u64>,
+    },
+    /// GC-2: hand the group to another member. Owner only; an MLS commit.
+    TransferOwnership {
+        group: String,
+        member: String,
+    },
     /// Revoke/demote a subject's role via an owner/admin-signed assertion the daemon verifies.
     RevokeRole {
         group: String,
@@ -408,6 +422,43 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 Err(m) => return Response::Error { message: m },
             };
             match daemon.assign_role(gid, &assertion) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::GrantRole {
+            group,
+            member,
+            role,
+            not_after,
+        } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let addr = match parse_addr(&member) {
+                Ok(a) => a,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.grant_role(gid, addr, role, not_after) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::TransferOwnership { group, member } => {
+            let gid = match parse_gid(&group) {
+                Ok(g) => g,
+                Err(m) => return Response::Error { message: m },
+            };
+            let addr = match parse_addr(&member) {
+                Ok(a) => a,
+                Err(m) => return Response::Error { message: m },
+            };
+            match daemon.transfer_ownership(gid, addr) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     message: e.to_string(),

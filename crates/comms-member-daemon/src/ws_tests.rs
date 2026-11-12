@@ -564,3 +564,139 @@ fn mail_fetched_for_another_group_survives_a_daemon_restart() {
         "group a's fetched message must survive the daemon restart"
     );
 }
+
+// ── GC-2: signed role grants, chained from the owner in the group context ──
+
+use comms_core::rbac;
+use comms_proto::Role;
+
+/// Owner + bob + carol in one group over a real WS relay, everyone joined and caught up.
+fn trio() -> (MemberDaemon, MemberDaemon, MemberDaemon, GroupId) {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let gid = owner.create_group("lab").expect("create");
+    let bob_w = EthWallet::generate();
+    let carol_w = EthWallet::generate();
+    let (bob_a, carol_a) = (bob_w.address(), carol_w.address());
+    let mut bob = ws_member(&url, bob_w);
+    let mut carol = ws_member(&url, carol_w);
+    owner.add_member(gid, bob_a).expect("add bob");
+    join_until(&mut bob, gid);
+    owner.add_member(gid, carol_a).expect("add carol");
+    join_until(&mut carol, gid);
+    // Bob merges the commit that added carol.
+    settle(&mut [&mut bob, &mut carol], gid);
+    (owner, bob, carol, gid)
+}
+
+fn join_until(d: &mut MemberDaemon, gid: GroupId) {
+    for _ in 0..60 {
+        if d.join_pending().expect("join").contains(&gid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("did not join");
+}
+
+/// Poll each daemon a few times so pending commits and grants are applied.
+fn settle(ds: &mut [&mut MemberDaemon], gid: GroupId) {
+    for _ in 0..6 {
+        for d in ds.iter_mut() {
+            let _ = d.poll_messages(gid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+}
+
+fn role_of(d: &MemberDaemon, gid: GroupId, who: WalletAddress) -> Option<Role> {
+    d.roster(gid).ok()?.into_iter().find(|(w, _)| *w == who).map(|(_, r)| r)
+}
+
+#[test]
+fn every_member_sees_the_owner_from_the_group_context() {
+    let (owner, bob, carol, gid) = trio();
+    let o = owner.owner();
+    assert_eq!(owner.group_owner(gid), Some(o));
+    assert_eq!(bob.group_owner(gid), Some(o));
+    assert_eq!(carol.group_owner(gid), Some(o));
+}
+
+#[test]
+fn an_owner_grant_is_verified_and_applied_by_every_member() {
+    let (mut owner, mut bob, mut carol, gid) = trio();
+    let b = bob.owner();
+    owner.grant_role(gid, b, Role::Admin, None).expect("owner grants admin");
+    assert_eq!(role_of(&owner, gid, b), Some(Role::Admin));
+    settle(&mut [&mut bob, &mut carol], gid);
+    assert_eq!(role_of(&bob, gid, b), Some(Role::Admin), "bob sees himself as admin");
+    assert_eq!(role_of(&carol, gid, b), Some(Role::Admin), "carol sees bob as admin");
+    // The grant is not shown as a chat message.
+    owner.send(gid, "plain text still flows").expect("send");
+    assert!(await_body(&mut carol, gid, "plain text still flows"));
+
+    // The chain: an admin may grant member-level roles, not admin.
+    let c = carol.owner();
+    bob.grant_role(gid, c, Role::Guest, None).expect("admin grants guest");
+    settle(&mut [&mut owner, &mut carol], gid);
+    assert_eq!(role_of(&owner, gid, c), Some(Role::Guest));
+    assert_eq!(role_of(&carol, gid, c), Some(Role::Guest));
+    let err = bob.grant_role(gid, c, Role::Admin, None).expect_err("anti-escalation");
+    assert!(err.to_string().contains("cannot grant"), "{err}");
+}
+
+#[test]
+fn forged_role_grant_rejected() {
+    // Bob is a plain member. He signs a grant making himself admin and sends it as an
+    // ordinary group message, bypassing his own daemon's check.
+    let (mut owner, mut bob, mut carol, gid) = trio();
+    let b = bob.owner();
+    let forged = crate::grants::encode_grant_message(
+        &rbac::sign_role_assertion(&bob.wallet, Role::Owner, b, Role::Admin, Some(gid), None)
+            .expect("bob can produce a signature"),
+    );
+    bob.send(gid, &forged).expect("send the forged grant");
+    settle(&mut [&mut owner, &mut carol], gid);
+    assert_eq!(role_of(&owner, gid, b), Some(Role::Member), "owner keeps bob as member");
+    assert_eq!(role_of(&carol, gid, b), Some(Role::Member), "carol keeps bob as member");
+    assert!(
+        owner.grant_rejections().iter().any(|r| r.contains("role grant from non-admin")),
+        "{:?}",
+        owner.grant_rejections()
+    );
+}
+
+#[test]
+fn a_grant_relayed_by_someone_other_than_its_issuer_is_refused() {
+    // The owner's genuine grant, re-sent by bob, must not be applied: a grant is accepted
+    // only from its issuer's own MLS credential.
+    let (owner, mut bob, mut carol, gid) = trio();
+    let c = carol.owner();
+    let genuine = rbac::sign_role_assertion(&owner.wallet, Role::Owner, c, Role::Admin, Some(gid), None)
+        .expect("owner signature");
+    bob.send(gid, &crate::grants::encode_grant_message(&genuine)).expect("relay it");
+    settle(&mut [&mut carol], gid);
+    assert_eq!(role_of(&carol, gid, c), Some(Role::Member));
+    assert!(carol.grant_rejections().iter().any(|r| r.contains("not sent by its issuer")));
+}
+
+#[test]
+fn ownership_transfers_by_the_owner_only() {
+    let (mut owner, mut bob, mut carol, gid) = trio();
+    let (o, b) = (owner.owner(), bob.owner());
+    let err = bob.transfer_ownership(gid, b).expect_err("a member cannot take the group");
+    assert!(err.to_string().contains("owner"), "{err}");
+    owner.transfer_ownership(gid, b).expect("owner hands over");
+    settle(&mut [&mut bob, &mut carol], gid);
+    for d in [&owner, &bob, &carol] {
+        assert_eq!(d.group_owner(gid), Some(b), "everyone follows the transfer");
+    }
+    assert_eq!(role_of(&carol, gid, b), Some(Role::Owner));
+    assert_eq!(role_of(&carol, gid, o), Some(Role::Admin), "the old owner stays as admin");
+    // The new owner's grants are now the anchor.
+    let c = carol.owner();
+    bob.grant_role(gid, c, Role::Admin, None).expect("new owner grants admin");
+    settle(&mut [&mut owner, &mut carol], gid);
+    assert_eq!(role_of(&owner, gid, c), Some(Role::Admin));
+}

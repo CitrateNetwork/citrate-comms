@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 pub mod client;
+pub mod grants;
 pub mod ipc;
 pub mod persist;
 pub mod relay;
@@ -329,6 +330,52 @@ impl MemberDaemon {
             .map_err(|e| DaemonError::Persist(e.to_string()))
     }
 
+    /// GC-2: sign a role grant for `member` in `gid` with this member's comms key and send it
+    /// to the group as an MLS application message. Every member verifies it against the
+    /// group owner (the authenticated group-context extension) and its own roster before
+    /// applying it.
+    pub fn grant_role(
+        &mut self,
+        gid: GroupId,
+        member: WalletAddress,
+        role: Role,
+        not_after: Option<u64>,
+    ) -> Result<(), DaemonError> {
+        let _ = (gid, member, role, not_after);
+        Err(DaemonError::Rbac("RED: not implemented".into()))
+    }
+
+    /// GC-2: hand `gid` to `new_owner` (a current member). Only the current owner can.
+    pub fn transfer_ownership(
+        &mut self,
+        gid: GroupId,
+        new_owner: WalletAddress,
+    ) -> Result<(), DaemonError> {
+        let _ = (gid, new_owner);
+        Err(DaemonError::Rbac("RED: not implemented".into()))
+    }
+
+    /// Tests only: a group made the pre-0.6.0 way (no owner extension).
+    #[cfg(test)]
+    pub(crate) fn create_group_without_owner_for_test(
+        &mut self,
+        name: &str,
+    ) -> Result<GroupId, DaemonError> {
+        self.create_group_inner(name.to_string(), false)
+    }
+
+    /// GC-2: the group's owner as the authenticated group context names it (`None` for a
+    /// group created before 0.6.0, where role grants are not available).
+    pub fn group_owner(&self, gid: GroupId) -> Option<WalletAddress> {
+        let _ = gid;
+        None
+    }
+
+    /// GC-2: why recent incoming role grants were refused (newest last, bounded).
+    pub fn grant_rejections(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The owner's wallet address.
     pub fn owner(&self) -> WalletAddress {
         self.wallet.address()
@@ -341,10 +388,18 @@ impl MemberDaemon {
 
     /// Create a group owned by this member. Returns its stable [`GroupId`].
     pub fn create_group(&mut self, name: impl Into<String>) -> Result<GroupId, DaemonError> {
-        let handle = self
-            .mls
-            .create_group()
-            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        self.create_group_inner(name.into(), true)
+    }
+
+    /// `owned`: name this member as owner in the group context (GC-2). Always true outside
+    /// tests; `false` reproduces a group made before 0.6.0.
+    fn create_group_inner(&mut self, name: String, owned: bool) -> Result<GroupId, DaemonError> {
+        let handle = if owned {
+            self.mls.create_group_owned(self.wallet.address().0)
+        } else {
+            self.mls.create_group()
+        }
+        .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let gid = GroupId(*blake3::hash(&handle.group_id()).as_bytes());
         let now = self.tick();
         self.relay
@@ -352,7 +407,7 @@ impl MemberDaemon {
             .map_err(|e| DaemonError::Relay(e.to_string()))?;
         self.groups.push(GroupState {
             id: gid,
-            name: name.into(),
+            name,
             handle,
             epoch: 0,
             members: vec![MemberInfo {
