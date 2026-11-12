@@ -130,7 +130,20 @@ pub struct MemberDaemon {
     /// handed these over and deleted its copy, so a daemon restart must not lose them. Bounded by
     /// [`INBOX_CAP`].
     inbox: Vec<Envelope>,
+    /// comms #51 item 1: per group, the highest relay `group_seq` this member has consumed
+    /// (processed, even if processing failed, or joined from). The relay resends what it never
+    /// saw acknowledged, so anything at or below the mark is a copy and is dropped. Persisted.
+    consumed: std::collections::BTreeMap<GroupId, u64>,
 }
+
+/// What [`MemberDaemon::rehydrate`] rebuilds from a state file: the MLS member, the groups, the
+/// inbox and the per-group consumed marks.
+type Rehydrated = (
+    MlsMember,
+    Vec<GroupState>,
+    Vec<Envelope>,
+    std::collections::BTreeMap<GroupId, u64>,
+);
 
 /// Upper bound on [`MemberDaemon::grant_log`].
 const GRANT_LOG_CAP: usize = 64;
@@ -303,12 +316,13 @@ impl MemberDaemon {
             None => None,
         };
 
-        let (mls, groups, inbox) = match restored {
+        let (mls, groups, inbox, consumed) = match restored {
             Some(mg) => mg,
             None => (
                 MlsMember::new(&identity).map_err(|e| DaemonError::Mls(e.to_string()))?,
                 Vec::new(),
                 Vec::new(),
+                std::collections::BTreeMap::new(),
             ),
         };
 
@@ -330,6 +344,7 @@ impl MemberDaemon {
             persist,
             grant_log: Vec::new(),
             inbox,
+            consumed,
         };
         daemon.persist_state()?;
         Ok(daemon)
@@ -338,10 +353,9 @@ impl MemberDaemon {
     /// Rebuild the MLS member + group registry from a decrypted, identity-verified
     /// [`persist::StateFile`]. Each group is reloaded from the rehydrated keystore via
     /// `MlsGroup::load` — no re-create, no new epoch.
-    fn rehydrate(
-        state: persist::StateFile,
-    ) -> Result<(MlsMember, Vec<GroupState>, Vec<Envelope>), DaemonError> {
+    fn rehydrate(state: persist::StateFile) -> Result<Rehydrated, DaemonError> {
         let inbox = state.inbox;
+        let consumed = state.consumed.into_iter().collect();
         let mls = MlsMember::restore(&state.identity, &state.sig_pubkey, &state.mls_snapshot)
             .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let mut groups = Vec::with_capacity(state.groups.len());
@@ -365,7 +379,7 @@ impl MemberDaemon {
                     .collect(),
             });
         }
-        Ok((mls, groups, inbox))
+        Ok((mls, groups, inbox, consumed))
     }
 
     /// Snapshot MLS secrets + the group registry to the encrypted state file. No-op
@@ -405,6 +419,7 @@ impl MemberDaemon {
             groups,
         );
         state.inbox = self.inbox.clone();
+        state.consumed = self.consumed.iter().map(|(g, s)| (*g, *s)).collect();
         persist::write_state(&ctx.dir, &ctx.key, &state)
             .map_err(|e| DaemonError::Persist(e.to_string()))
     }
@@ -618,7 +633,10 @@ impl MemberDaemon {
         // Everything else that was fetched stays buffered for the op that consumes it.
         self.stash(all);
         match self.join_with_welcome(gid, &welcome.ciphertext, name.into()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.mark_consumed(&welcome);
+                Ok(())
+            }
             Err(e) => {
                 // Keep the Welcome so a retry (e.g. after a transient relay error fetching the
                 // tree) can still use it.
@@ -650,7 +668,10 @@ impl MemberDaemon {
                 continue;
             }
             match self.join_with_welcome(e.group_id, &e.ciphertext, String::new()) {
-                Ok(()) => joined.push(e.group_id),
+                Ok(()) => {
+                    self.mark_consumed(&e);
+                    joined.push(e.group_id)
+                }
                 // A Welcome we cannot process is not retried forever; surface the first failure
                 // if nothing at all could be joined.
                 Err(err) => {
@@ -662,6 +683,19 @@ impl MemberDaemon {
         match (joined.is_empty(), first_err) {
             (true, Some(err)) => Err(err),
             _ => Ok(joined),
+        }
+    }
+
+    /// Record that `e` was consumed (comms #51 item 1), and persist the mark.
+    fn mark_consumed(&mut self, e: &Envelope) {
+        if let Some(s) = e.group_seq {
+            let m = self.consumed.entry(e.group_id).or_insert(s);
+            if *m < s {
+                *m = s;
+            }
+            if let Err(err) = self.persist_state() {
+                eprintln!("member-daemon: could not persist the consumed mark, will retry: {err}");
+            }
         }
     }
 
@@ -721,7 +755,27 @@ impl MemberDaemon {
     /// leaves the relay's copy in place and it is sent again.
     fn take_inbox(&mut self) -> Vec<Envelope> {
         let me = self.wallet.address();
-        let fresh = self.relay.fetch(&me);
+        let mut fresh = self.relay.fetch(&me);
+        // comms #51 item 1: drop copies the relay resent (no ack reached it): already consumed,
+        // already in the inbox, or twice in this batch. The ack below still covers them.
+        let acked_copies = !fresh.is_empty();
+        let mut seen: std::collections::BTreeSet<(GroupId, u64)> = self
+            .inbox
+            .iter()
+            .filter_map(|e| e.group_seq.map(|s| (e.group_id, s)))
+            .collect();
+        fresh.retain(|e| match e.group_seq {
+            Some(s) => {
+                let consumed = self.consumed.get(&e.group_id).is_some_and(|m| s <= *m);
+                !consumed && seen.insert((e.group_id, s))
+            }
+            None => true,
+        });
+        if fresh.is_empty() && acked_copies {
+            if let Err(e) = self.relay.ack_delivered() {
+                eprintln!("member-daemon: relay ack failed, it will resend: {e}");
+            }
+        }
         if !fresh.is_empty() {
             self.inbox.extend(fresh);
             match self.persist_state() {
@@ -1009,6 +1063,7 @@ impl MemberDaemon {
         // instead of being dropped: `fetch` drained them from the relay session.
         let mut keep = Vec::new();
         let mut failure = None;
+        let mut mark = self.consumed.get(&gid).copied();
         {
             let mls = &self.mls;
             let g = self
@@ -1021,6 +1076,13 @@ impl MemberDaemon {
                 if e.group_id != gid {
                     keep.push(e);
                     continue;
+                }
+                // comms #51 item 1: a copy of something already consumed is dropped unread.
+                if let Some(s) = e.group_seq {
+                    if mark.is_some_and(|m| s <= m) {
+                        continue;
+                    }
+                    mark = Some(s);
                 }
                 match e.kind {
                     EnvelopeKind::Commit => {
@@ -1094,6 +1156,9 @@ impl MemberDaemon {
             // On failure the failing envelope is consumed (retrying it cannot succeed); the ones
             // after it are kept for the next poll.
             keep.extend(iter);
+        }
+        if let Some(m) = mark {
+            self.consumed.insert(gid, m);
         }
         self.stash(keep);
         for why in rejected {
