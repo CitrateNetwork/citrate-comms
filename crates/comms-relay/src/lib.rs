@@ -241,7 +241,10 @@ pub struct DeliveryService {
     next_arrival: u64,
     /// Tracked deliveries handed to a session and not yet acknowledged, by wallet. In memory:
     /// a relay restart or a new session sends them again.
-    in_flight: HashMap<WalletAddress, BTreeSet<u64>>,
+    in_flight: HashMap<WalletAddress, (u64, BTreeSet<u64>)>,
+    /// Wallet → the session id (WS connection) that owns its authenticated session, so a
+    /// stale connection's teardown never ends a newer session (comms #52).
+    session_ids: HashMap<WalletAddress, u64>,
     /// Authenticated sessions (wallet proved control via SIWE).
     sessions: BTreeSet<WalletAddress>,
     audit: AuditChain,
@@ -268,6 +271,7 @@ impl DeliveryService {
             mailboxes: HashMap::new(),
             next_arrival: 0,
             in_flight: HashMap::new(),
+            session_ids: HashMap::new(),
             sessions: BTreeSet::new(),
             audit: AuditChain::new(genesis_ts_ms)?,
             store: None,
@@ -432,6 +436,7 @@ impl DeliveryService {
             mailboxes,
             next_arrival,
             in_flight: HashMap::new(),
+            session_ids: HashMap::new(),
             sessions: BTreeSet::new(),
             audit,
             store: Some(store),
@@ -588,6 +593,7 @@ impl DeliveryService {
     /// session no longer outlives its purpose (CM2-B-A011 / CM2-B-B019).
     pub fn end_session(&mut self, wallet: &WalletAddress) {
         self.sessions.remove(wallet);
+        self.session_ids.remove(wallet);
     }
 
     /// Whether a wallet currently holds an authenticated session (test/introspection).
@@ -1348,10 +1354,23 @@ impl DeliveryService {
     /// rows stay on disk until [`ack`](Self::ack); [`release_in_flight`](Self::release_in_flight)
     /// (a new session, a disconnect) makes them deliverable again.
     pub fn take_for_ack(&mut self, wallet: &WalletAddress) -> Vec<(u64, Envelope)> {
+        self.take_for_ack_for(wallet, 0)
+    }
+
+    /// [`take_for_ack`](Self::take_for_ack) for session `sid`: in-flight marks belong to one
+    /// session; a different session starts with none, so it is sent everything unacked.
+    pub fn take_for_ack_for(&mut self, wallet: &WalletAddress, sid: u64) -> Vec<(u64, Envelope)> {
         let Some(items) = self.mailboxes.get(wallet) else {
             return Vec::new();
         };
-        let sent = self.in_flight.entry(*wallet).or_default();
+        let entry = self
+            .in_flight
+            .entry(*wallet)
+            .or_insert((sid, BTreeSet::new()));
+        if entry.0 != sid {
+            *entry = (sid, BTreeSet::new());
+        }
+        let sent = &mut entry.1;
         let mut out = Vec::new();
         for i in items {
             if sent.insert(i.arrival) {
@@ -1364,6 +1383,27 @@ impl DeliveryService {
     /// Forget which of `wallet`'s deliveries are in flight, so they are sent again.
     pub fn release_in_flight(&mut self, wallet: &WalletAddress) {
         self.in_flight.remove(wallet);
+    }
+
+    /// [`release_in_flight`](Self::release_in_flight), only if session `sid` owns the marks.
+    pub fn release_in_flight_for(&mut self, wallet: &WalletAddress, sid: u64) {
+        if self.in_flight.get(wallet).is_some_and(|(s, _)| *s == sid) {
+            self.in_flight.remove(wallet);
+        }
+    }
+
+    /// Record that session `sid` (a WS connection) owns `wallet`'s authenticated session.
+    pub fn bind_session(&mut self, wallet: &WalletAddress, sid: u64) {
+        self.session_ids.insert(*wallet, sid);
+    }
+
+    /// End `wallet`'s session only if session `sid` still owns it (comms #52): a stale
+    /// connection's teardown never ends a newer session.
+    pub fn end_session_for(&mut self, wallet: &WalletAddress, sid: u64) {
+        if self.session_ids.get(wallet) == Some(&sid) {
+            self.session_ids.remove(wallet);
+            self.sessions.remove(wallet);
+        }
     }
 
     /// Delete `wallet`'s mailbox rows for `arrivals` (store first, one batch), after the
@@ -1391,7 +1431,7 @@ impl DeliveryService {
                 self.mailboxes.remove(wallet);
             }
         }
-        if let Some(sent) = self.in_flight.get_mut(wallet) {
+        if let Some((_, sent)) = self.in_flight.get_mut(wallet) {
             sent.retain(|a| !wanted.contains(a));
         }
         Ok(keys.len())

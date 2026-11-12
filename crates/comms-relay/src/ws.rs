@@ -62,19 +62,36 @@ pub use comms_wire::frames::{ClientFrame, RedeemInviteResult, ServerFrame};
 
 // ─────────────────────────── server ───────────────────────────
 
-type Registry = Arc<Mutex<HashMap<WalletAddress, mpsc::UnboundedSender<ServerFrame>>>>;
+/// One live, authenticated connection: its session id, its outbound channel, and a signal
+/// that closes it when a newer session of the same wallet supersedes it (comms #52).
+#[derive(Clone)]
+struct Conn {
+    sid: u64,
+    tx: mpsc::UnboundedSender<ServerFrame>,
+    close: Arc<tokio::sync::Notify>,
+}
+
+/// Wallet → its current (newest) session. One live session per wallet.
+type Registry = Arc<Mutex<HashMap<WalletAddress, Conn>>>;
 
 /// A server-blind relay served over WebSocket.
 pub struct RelayServer {
     service: Arc<Mutex<DeliveryService>>,
     registry: Registry,
-    /// Wallets whose current session asked for tracked delivery (GC-1 review P2).
-    ack_mode: Arc<Mutex<std::collections::HashSet<WalletAddress>>>,
+    /// Wallet → the session id that asked for tracked delivery (GC-1 review P2). Tracking
+    /// applies only while that session is the wallet's current one.
+    ack_mode: Arc<Mutex<HashMap<WalletAddress, u64>>>,
+    /// Source of per-connection session ids (comms #52).
+    next_sid: Arc<std::sync::atomic::AtomicU64>,
     /// When set (via the admin surface), the relay rejects new mutating operations
     /// (submit/onboard/offboard/register/publish) but keeps serving reads.
     paused: Arc<AtomicBool>,
     /// CM2-B-B009: live connection count, capped at [`MAX_CONNECTIONS`].
     conns: Arc<AtomicUsize>,
+    /// Tests only: pause a connection's teardown right after its ownership check, to drive
+    /// the close-versus-sign-in race deterministically (`reached`, then wait for `resume`).
+    #[cfg(test)]
+    teardown_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl RelayServer {
@@ -82,9 +99,12 @@ impl RelayServer {
         Arc::new(Self {
             service: Arc::new(Mutex::new(service)),
             registry: Arc::new(Mutex::new(HashMap::new())),
-            ack_mode: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            ack_mode: Arc::new(Mutex::new(HashMap::new())),
+            next_sid: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             paused: Arc::new(AtomicBool::new(false)),
             conns: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            teardown_pause: Mutex::new(None),
         })
     }
 
@@ -96,6 +116,12 @@ impl RelayServer {
     /// Pause/resume new mutating operations (driven by the admin surface).
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Whether `wallet`'s current session gets tracked delivery (introspection/tests).
+    pub async fn is_tracked(&self, wallet: &WalletAddress) -> bool {
+        let current = self.registry.lock().await.get(wallet).map(|c| c.sid);
+        current.is_some() && self.ack_mode.lock().await.get(wallet).copied() == current
     }
 
     /// Number of currently-connected, authenticated wallets.
@@ -182,9 +208,22 @@ impl RelayServer {
         // GC-1 review P2: set by EnableDeliveryAcks, which a client sends before it
         // authenticates, so even the sign-in delivery pass is tracked.
         let mut wants_acks = false;
+        // comms #52: this connection's session id, and the signal that closes it when a newer
+        // session of the same wallet signs in.
+        let conn = Conn {
+            sid: self.next_sid.fetch_add(1, Ordering::Relaxed),
+            tx: out_tx.clone(),
+            close: Arc::new(tokio::sync::Notify::new()),
+        };
         // CM2-B-B009: the auto-issued challenge above counts as the first.
         let mut challenge_count: u32 = 1;
-        while let Some(msg) = read.next().await {
+        loop {
+            let msg = tokio::select! {
+                m = read.next() => m,
+                // Superseded by a newer session of the same wallet (comms #52 review P3).
+                _ = conn.close.notified() => break,
+            };
+            let Some(msg) = msg else { break };
             let bytes = match msg {
                 Ok(Message::Binary(b)) => b,
                 Ok(Message::Close(_)) | Err(_) => break,
@@ -203,7 +242,7 @@ impl RelayServer {
                             continue;
                         }
                     }
-                    self.dispatch(frame, &out_tx, &mut authed, &mut wants_acks)
+                    self.dispatch(frame, &conn, &mut authed, &mut wants_acks)
                         .await
                 }
                 Err(_) => {
@@ -215,13 +254,42 @@ impl RelayServer {
         }
 
         if let Some(w) = authed {
-            self.registry.lock().await.remove(&w);
-            // Unacknowledged tracked deliveries go out again on the next session.
-            self.ack_mode.lock().await.remove(&w);
-            self.service.lock().await.release_in_flight(&w);
-            // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
-            // not persist for the process lifetime (no revocation + unbounded growth).
-            self.service.lock().await.end_session(&w);
+            // One live session per wallet: the newest sign-in owns the wallet's registration,
+            // ack tracking and authenticated session (comms #51). Tear them down only if this
+            // connection still owns them; an older session closing after a newer one signed in
+            // leaves the newer one working.
+            //
+            // Every step below is keyed by this connection's session id and checks it under
+            // its own lock, so a newer session that signs in at any point during this
+            // teardown is never touched (comms #52 review P2).
+            {
+                let mut reg = self.registry.lock().await;
+                if reg.get(&w).is_some_and(|c| c.sid == conn.sid) {
+                    reg.remove(&w);
+                }
+            }
+            #[cfg(test)]
+            {
+                let pause = self.teardown_pause.lock().await.take();
+                if let Some((reached, resume)) = pause {
+                    reached.notify_one();
+                    resume.notified().await;
+                }
+            }
+            {
+                let mut am = self.ack_mode.lock().await;
+                if am.get(&w) == Some(&conn.sid) {
+                    am.remove(&w);
+                }
+            }
+            {
+                let mut svc = self.service.lock().await;
+                // Unacknowledged tracked deliveries go out again on the next session.
+                svc.release_in_flight_for(&w, conn.sid);
+                // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
+                // not persist for the process lifetime (no revocation + unbounded growth).
+                svc.end_session_for(&w, conn.sid);
+            }
         }
         writer.abort();
         Ok(())
@@ -230,10 +298,11 @@ impl RelayServer {
     async fn dispatch(
         &self,
         frame: ClientFrame,
-        out_tx: &mpsc::UnboundedSender<ServerFrame>,
+        conn: &Conn,
         authed: &mut Option<WalletAddress>,
         wants_acks: &mut bool,
     ) {
+        let out_tx = &conn.tx;
         let now = now_ms();
         // Pause gate: while paused, reject new mutating operations (reads still work).
         let mutating = matches!(
@@ -264,18 +333,25 @@ impl RelayServer {
                 };
                 let result = {
                     let mut svc = self.service.lock().await;
-                    svc.authenticate(&message, &sig, now)
+                    svc.authenticate(&message, &sig, now).inspect(|addr| {
+                        // This connection now owns the wallet's service session.
+                        svc.bind_session(addr, conn.sid);
+                    })
                 };
                 match result {
                     Ok(addr) => {
-                        self.registry.lock().await.insert(addr, out_tx.clone());
+                        let superseded = self.registry.lock().await.insert(addr, conn.clone());
                         if *wants_acks {
-                            self.ack_mode.lock().await.insert(addr);
+                            self.ack_mode.lock().await.insert(addr, conn.sid);
                         } else {
                             self.ack_mode.lock().await.remove(&addr);
                         }
-                        // A new session: whatever an earlier one left unacknowledged goes out again.
-                        self.service.lock().await.release_in_flight(&addr);
+                        // One live session per wallet: close the one this replaces, instead of
+                        // leaving it half-working (comms #52 review P3). Its teardown is keyed
+                        // by its own session id, so it cannot touch this one.
+                        if let Some(old) = superseded.filter(|o| o.sid != conn.sid) {
+                            old.close.notify_one();
+                        }
                         *authed = Some(addr);
                         let _ = out_tx.send(ServerFrame::Authenticated { address: addr });
                         // comms#4: hand over whatever waited while this wallet was away,
@@ -292,8 +368,11 @@ impl RelayServer {
                 *wants_acks = true;
                 ack(out_tx, None);
                 if let Some(addr) = *authed {
-                    self.ack_mode.lock().await.insert(addr);
-                    self.service.lock().await.release_in_flight(&addr);
+                    self.ack_mode.lock().await.insert(addr, conn.sid);
+                    self.service
+                        .lock()
+                        .await
+                        .release_in_flight_for(&addr, conn.sid);
                     self.deliver_pending().await;
                 }
             }
@@ -580,21 +659,22 @@ impl RelayServer {
     /// Drain the mailboxes of all connected wallets and push their envelopes. Locks the
     /// registry and the service one at a time (never nested) to avoid deadlock.
     async fn deliver_pending(&self) {
-        let targets: Vec<(WalletAddress, mpsc::UnboundedSender<ServerFrame>)> = {
+        let targets: Vec<(WalletAddress, Conn)> = {
             self.registry
                 .lock()
                 .await
                 .iter()
-                .map(|(w, s)| (*w, s.clone()))
+                .map(|(w, c)| (*w, c.clone()))
                 .collect()
         };
         let tracked = self.ack_mode.lock().await.clone();
         let mut svc = self.service.lock().await;
-        for (wallet, tx) in targets {
+        for (wallet, c) in targets {
+            let tx = c.tx;
             // GC-1 review P2: a session that asked for acks gets tracked deliveries; the rows
             // stay until it acknowledges them.
-            if tracked.contains(&wallet) {
-                for (arrival, envelope) in svc.take_for_ack(&wallet) {
+            if tracked.get(&wallet) == Some(&c.sid) {
+                for (arrival, envelope) in svc.take_for_ack_for(&wallet, c.sid) {
                     let _ = tx.send(ServerFrame::DeliverTracked { arrival, envelope });
                 }
                 continue;
@@ -630,8 +710,8 @@ impl RelayServer {
             if *r == sender {
                 continue;
             }
-            if let Some(tx) = registry.get(r) {
-                let _ = tx.send(ServerFrame::Notify {
+            if let Some(c) = registry.get(r) {
+                let _ = c.tx.send(ServerFrame::Notify {
                     group_id,
                     kind,
                     group_seq,
@@ -655,6 +735,180 @@ fn send_err(tx: &mpsc::UnboundedSender<ServerFrame>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── comms #52 review P2: a stale teardown must not touch a newer session ──
+
+    fn siwe_for(
+        w: &comms_core::identity::EthWallet,
+        domain: &str,
+        nonce: String,
+    ) -> comms_core::identity::SiweMessage {
+        let now = now_ms();
+        comms_core::identity::SiweMessage {
+            domain: domain.into(),
+            address: w.address(),
+            statement: "Sign in to citrate-comms".into(),
+            uri: format!("wss://{domain}"),
+            version: "1".into(),
+            chain_id: comms_proto::CITRATE_CHAIN_ID,
+            nonce,
+            issued_at_ms: now,
+            expiration_ms: now + 600_000,
+        }
+    }
+
+    async fn tracked_client(url: &str, w: &comms_core::identity::EthWallet) -> RelayClient {
+        let (c, nonce) = RelayClient::connect(url).await.unwrap();
+        assert!(c.enable_delivery_acks().await.unwrap());
+        let msg = siwe_for(w, "relay.citrate.ai", nonce);
+        let sig = w.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
+        c
+    }
+
+    #[tokio::test]
+    async fn a_superseded_session_is_closed_by_the_relay() {
+        // comms #52 review P3: when the same wallet signs in again, the older socket is closed
+        // instead of being left half-working (no pushes, but still accepting requests).
+        use comms_core::identity::EthWallet;
+        use tokio_tungstenite::tungstenite::Message as M;
+        let bob = EthWallet::generate();
+        let svc = DeliveryService::new("relay.citrate.ai", bob.address(), 0).unwrap();
+        let server = RelayServer::new(svc);
+        let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+        let (mut old, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let nonce = loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Challenge { nonce }) = canonical::from_slice(b.as_ref()) {
+                    break nonce;
+                }
+            }
+        };
+        let msg = siwe_for(&bob, "relay.citrate.ai", nonce);
+        let sig = bob.sign_siwe(&msg);
+        let f = ClientFrame::Authenticate {
+            message: msg,
+            signature: sig.to_vec(),
+        };
+        old.send(M::Binary(canonical::to_vec(&f).unwrap()))
+            .await
+            .unwrap();
+        let _new = tracked_client(&url, &bob).await;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match old.next().await {
+                    None | Some(Err(_)) | Some(Ok(M::Close(_))) => break true,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(closed, "the relay must close the superseded socket");
+    }
+
+    #[tokio::test]
+    async fn a_teardown_paused_after_its_ownership_check_cannot_touch_a_newer_session() {
+        use comms_core::identity::EthWallet;
+        use comms_proto::{Envelope, EpochId};
+        use tokio_tungstenite::tungstenite::Message as M;
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let gid = GroupId([0x7a; 32]);
+        let env = |from: WalletAddress, ct: &[u8], to: WalletAddress| Envelope {
+            group_id: gid,
+            epoch: EpochId(1),
+            kind: EnvelopeKind::Application,
+            sender: from,
+            recipients: vec![to],
+            ciphertext: ct.to_vec(),
+            group_seq: None,
+        };
+        let svc = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
+        let server = RelayServer::new(svc);
+        let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        let alice_c = tracked_client(&url, &alice).await;
+        alice_c.register_group(gid).await.unwrap();
+        alice_c
+            .onboard(
+                gid,
+                bob.address(),
+                None,
+                Envelope {
+                    kind: EnvelopeKind::Welcome,
+                    ..env(alice.address(), b"welcome", bob.address())
+                },
+                b"rt".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        // Old session: a raw socket, so it really closes.
+        let (mut old, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let nonce = loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Challenge { nonce }) = canonical::from_slice(b.as_ref()) {
+                    break nonce;
+                }
+            }
+        };
+        let msg = siwe_for(&bob, "relay.citrate.ai", nonce);
+        let sig = bob.sign_siwe(&msg);
+        for f in [
+            ClientFrame::EnableDeliveryAcks,
+            ClientFrame::Authenticate {
+                message: msg,
+                signature: sig.to_vec(),
+            },
+        ] {
+            old.send(M::Binary(canonical::to_vec(&f).unwrap()))
+                .await
+                .unwrap();
+        }
+        loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Authenticated { .. }) = canonical::from_slice(b.as_ref()) {
+                    break;
+                }
+            }
+        }
+
+        // Pause the old connection's teardown right after its ownership check.
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *server.teardown_pause.lock().await = Some((reached.clone(), resume.clone()));
+        old.close(None).await.unwrap();
+        reached.notified().await;
+
+        // While it is paused, bob signs in again.
+        let new = tracked_client(&url, &bob).await;
+        resume.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // The newer session is still tracked, still signed in, and still gets pushes.
+        assert!(
+            server.is_tracked(&bob.address()).await,
+            "the stale teardown cleared the newer session's ack mode"
+        );
+        assert!(
+            server.service.lock().await.has_session(&bob.address()),
+            "the stale teardown ended the newer session"
+        );
+        alice_c
+            .submit(env(alice.address(), b"after-race", bob.address()))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Ok(Some(e)) =
+            tokio::time::timeout(std::time::Duration::from_millis(800), new.next_delivered()).await
+        {
+            got.push(e.ciphertext);
+        }
+        assert!(got.contains(&b"after-race".to_vec()), "{got:?}");
+    }
 
     /// WP-4.6: `connect` fails closed on a remote `ws://` endpoint — and does so BEFORE
     /// dialing, so it resolves instantly even though nothing is listening. (The
