@@ -47,7 +47,9 @@ pub struct NotifyPush {
 pub struct RelayClient {
     out_tx: mpsc::UnboundedSender<ClientFrame>,
     resp_rx: Mutex<mpsc::UnboundedReceiver<ServerFrame>>,
-    deliver_rx: Mutex<mpsc::UnboundedReceiver<Envelope>>,
+    deliver_rx: Mutex<mpsc::UnboundedReceiver<(Option<u64>, Envelope)>>,
+    /// Arrival numbers of tracked deliveries handed out and not yet acknowledged.
+    unacked: Mutex<Vec<u64>>,
     notify_rx: Mutex<mpsc::UnboundedReceiver<NotifyPush>>,
 }
 
@@ -88,7 +90,7 @@ impl RelayClient {
         let (mut write, mut read) = ws.split();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientFrame>();
         let (resp_tx, resp_rx) = mpsc::unbounded_channel::<ServerFrame>();
-        let (deliver_tx, deliver_rx) = mpsc::unbounded_channel::<Envelope>();
+        let (deliver_tx, deliver_rx) = mpsc::unbounded_channel::<(Option<u64>, Envelope)>();
         let (notify_tx, notify_rx) = mpsc::unbounded_channel::<NotifyPush>();
 
         tokio::spawn(async move {
@@ -107,7 +109,10 @@ impl RelayClient {
                         if let Ok(frame) = canonical::from_slice::<ServerFrame>(b.as_ref()) {
                             match frame {
                                 ServerFrame::Deliver(env) => {
-                                    let _ = deliver_tx.send(env);
+                                    let _ = deliver_tx.send((None, env));
+                                }
+                                ServerFrame::DeliverTracked { arrival, envelope } => {
+                                    let _ = deliver_tx.send((Some(arrival), envelope));
                                 }
                                 // Server pushes ride their own channels — a Notify
                                 // arriving mid-request must never displace an Ack.
@@ -138,6 +143,7 @@ impl RelayClient {
             out_tx,
             resp_rx: Mutex::new(resp_rx),
             deliver_rx: Mutex::new(deliver_rx),
+            unacked: Mutex::new(Vec::new()),
             notify_rx: Mutex::new(notify_rx),
         };
         match client.next_response().await {
@@ -378,19 +384,52 @@ impl RelayClient {
 
     /// Await the next server-pushed envelope (a fanned-out message for this wallet).
     pub async fn next_delivered(&self) -> Option<Envelope> {
-        self.deliver_rx.lock().await.recv().await
+        let (arrival, env) = self.deliver_rx.lock().await.recv().await?;
+        if let Some(a) = arrival {
+            self.unacked.lock().await.push(a);
+        }
+        Some(env)
     }
 
-    /// GC-1 review P2: ask the relay to track deliveries for this session. `Ok(false)` from a
-    /// relay that predates it (the session stays on untracked delivery).
+    /// GC-1 review P2: ask the relay to track deliveries for this session. Call it right after
+    /// [`connect`](Self::connect) and BEFORE authenticating, so the delivery pass at sign-in
+    /// is tracked too. `Ok(false)` from a relay that predates it (the session stays on
+    /// untracked delivery).
     pub async fn enable_delivery_acks(&self) -> Result<bool, WsError> {
-        Ok(false)
+        self.out_tx
+            .send(ClientFrame::EnableDeliveryAcks)
+            .map_err(|_| WsError::Closed)?;
+        match self.next_response().await {
+            Some(ServerFrame::Ack { .. }) => Ok(true),
+            // A relay that predates tracked delivery cannot decode the frame.
+            Some(ServerFrame::Error { .. }) => Ok(false),
+            None => Err(WsError::Closed),
+            _ => Err(WsError::Protocol("expected Ack")),
+        }
     }
 
     /// Acknowledge every tracked delivery handed out by [`next_delivered`](Self::next_delivered)
     /// so far. Call it only once those envelopes are stored durably.
     pub async fn ack_delivered(&self) -> Result<(), WsError> {
-        Ok(())
+        let arrivals = std::mem::take(&mut *self.unacked.lock().await);
+        if arrivals.is_empty() {
+            return Ok(());
+        }
+        self.out_tx
+            .send(ClientFrame::AckDelivered {
+                arrivals: arrivals.clone(),
+            })
+            .map_err(|_| WsError::Closed)?;
+        match self.next_response().await {
+            Some(ServerFrame::Ack { .. }) => Ok(()),
+            Some(ServerFrame::Error { message }) => {
+                // Keep them: the next ack (or the next session's redelivery) covers them.
+                self.unacked.lock().await.extend(arrivals);
+                Err(WsError::Server(message))
+            }
+            None => Err(WsError::Closed),
+            _ => Err(WsError::Protocol("expected Ack")),
+        }
     }
 
     /// Await the next advisory notification ping ([`ServerFrame::Notify`]).

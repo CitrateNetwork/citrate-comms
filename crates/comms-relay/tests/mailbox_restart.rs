@@ -180,13 +180,14 @@ async fn an_unacknowledged_delivery_is_sent_again_on_the_next_session() {
 
     async fn session(url: &str, bob: &EthWallet) -> RelayClient {
         let (c, nonce) = RelayClient::connect(url).await.unwrap();
-        let msg = siwe(bob, nonce, now_ms());
-        let sig = bob.sign_siwe(&msg);
-        c.authenticate(msg, sig).await.unwrap();
+        // Before authenticating, so the sign-in delivery pass is tracked too.
         assert!(
             c.enable_delivery_acks().await.unwrap(),
             "this relay tracks deliveries"
         );
+        let msg = siwe(bob, nonce, now_ms());
+        let sig = bob.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
         c
     }
     async fn drain(c: &RelayClient) -> Vec<Vec<u8>> {

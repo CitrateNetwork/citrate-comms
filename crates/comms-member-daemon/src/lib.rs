@@ -502,11 +502,25 @@ impl MemberDaemon {
 
     /// Everything waiting for this member: envelopes an earlier op fetched but did not consume,
     /// then whatever the relay has delivered since (in delivery order).
+    ///
+    /// GC-1 review P2: newly fetched envelopes go into the persisted inbox first, and only then
+    /// is the relay told it may delete them, so a crash or a dropped socket anywhere in between
+    /// leaves the relay's copy in place and it is sent again.
     fn take_inbox(&mut self) -> Vec<Envelope> {
         let me = self.wallet.address();
-        let mut all = std::mem::take(&mut self.inbox);
-        all.extend(self.relay.fetch(&me));
-        all
+        let fresh = self.relay.fetch(&me);
+        if !fresh.is_empty() {
+            self.inbox.extend(fresh);
+            match self.persist_state() {
+                Ok(()) => {
+                    if let Err(e) = self.relay.ack_delivered() {
+                        eprintln!("member-daemon: relay ack failed, it will resend: {e}");
+                    }
+                }
+                Err(e) => eprintln!("member-daemon: inbox not persisted, not acknowledging: {e}"),
+            }
+        }
+        std::mem::take(&mut self.inbox)
     }
 
     /// Put fetched-but-unconsumed envelopes back, keeping only those a later op can still use: any

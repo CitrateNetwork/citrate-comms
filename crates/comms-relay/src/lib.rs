@@ -239,6 +239,9 @@ pub struct DeliveryService {
     mailboxes: HashMap<WalletAddress, Vec<MailboxItem>>,
     /// Next relay-wide mailbox arrival number (one past the largest on disk).
     next_arrival: u64,
+    /// Tracked deliveries handed to a session and not yet acknowledged, by wallet. In memory:
+    /// a relay restart or a new session sends them again.
+    in_flight: HashMap<WalletAddress, BTreeSet<u64>>,
     /// Authenticated sessions (wallet proved control via SIWE).
     sessions: BTreeSet<WalletAddress>,
     audit: AuditChain,
@@ -264,6 +267,7 @@ impl DeliveryService {
             groups: HashMap::new(),
             mailboxes: HashMap::new(),
             next_arrival: 0,
+            in_flight: HashMap::new(),
             sessions: BTreeSet::new(),
             audit: AuditChain::new(genesis_ts_ms)?,
             store: None,
@@ -398,7 +402,11 @@ impl DeliveryService {
                 .get(&r.group_id)
                 .and_then(|g| g.log.iter().find(|e| e.group_seq == Some(r.group_seq)))
                 .cloned()
-                .ok_or(RelayError::CorruptKey)?;
+                .ok_or(RelayError::DanglingMailboxRow {
+                    wallet: wallet.to_hex(),
+                    arrival,
+                    group_seq: r.group_seq,
+                })?;
             next_arrival = next_arrival.max(arrival.saturating_add(1));
             mailboxes.entry(wallet).or_default().push(MailboxItem {
                 arrival,
@@ -423,6 +431,7 @@ impl DeliveryService {
             groups,
             mailboxes,
             next_arrival,
+            in_flight: HashMap::new(),
             sessions: BTreeSet::new(),
             audit,
             store: Some(store),
@@ -1339,21 +1348,53 @@ impl DeliveryService {
     /// rows stay on disk until [`ack`](Self::ack); [`release_in_flight`](Self::release_in_flight)
     /// (a new session, a disconnect) makes them deliverable again.
     pub fn take_for_ack(&mut self, wallet: &WalletAddress) -> Vec<(u64, Envelope)> {
-        let _ = wallet;
-        Vec::new()
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Vec::new();
+        };
+        let sent = self.in_flight.entry(*wallet).or_default();
+        let mut out = Vec::new();
+        for i in items {
+            if sent.insert(i.arrival) {
+                out.push((i.arrival, i.envelope.clone()));
+            }
+        }
+        out
     }
 
     /// Forget which of `wallet`'s deliveries are in flight, so they are sent again.
     pub fn release_in_flight(&mut self, wallet: &WalletAddress) {
-        let _ = wallet;
+        self.in_flight.remove(wallet);
     }
 
     /// Delete `wallet`'s mailbox rows for `arrivals` (store first, one batch), after the
     /// client stored them. Arrival numbers that are not `wallet`'s are ignored. Returns how
     /// many rows were removed.
     pub fn ack(&mut self, wallet: &WalletAddress, arrivals: &[u64]) -> Result<usize, RelayError> {
-        let _ = (wallet, arrivals);
-        Ok(0)
+        let wanted: BTreeSet<u64> = arrivals.iter().copied().collect();
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Ok(0);
+        };
+        let keys: Vec<Vec<u8>> = items
+            .iter()
+            .filter(|i| wanted.contains(&i.arrival))
+            .map(|i| store::seq_key(&wallet.0, i.arrival))
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        if let Some(s) = &self.store {
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
+        if let Some(items) = self.mailboxes.get_mut(wallet) {
+            items.retain(|i| !wanted.contains(&i.arrival));
+            if items.is_empty() {
+                self.mailboxes.remove(wallet);
+            }
+        }
+        if let Some(sent) = self.in_flight.get_mut(wallet) {
+            sent.retain(|a| !wanted.contains(a));
+        }
+        Ok(keys.len())
     }
 
     // ─────────────────────── introspection / audit ───────────────────────
@@ -1448,6 +1489,14 @@ pub enum RelayError {
     Decode(comms_proto::ProtoError),
     #[error("corrupt store key")]
     CorruptKey,
+    /// A mailbox row points at an envelope the log does not hold: the store is damaged.
+    /// Named so an operator can find and remove that one row.
+    #[error("mailbox row for {wallet} arrival {arrival} points at missing group_seq {group_seq}")]
+    DanglingMailboxRow {
+        wallet: String,
+        arrival: u64,
+        group_seq: u64,
+    },
 }
 
 #[cfg(test)]

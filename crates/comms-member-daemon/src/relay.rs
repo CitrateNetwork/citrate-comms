@@ -87,6 +87,12 @@ pub trait Relay: Send {
     fn is_connected(&self) -> bool {
         true
     }
+    /// GC-1 review P2: tell the relay that everything [`fetch`](Self::fetch) returned so far is
+    /// stored durably, so it may delete those mailbox rows. Until then the relay keeps them and
+    /// sends them again on the next session. In-process relays have nothing to acknowledge.
+    fn ack_delivered(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// The public ratchet tree a joiner needs to process its Welcome.
     fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String>;
     /// The group's current member roster (addresses) — a joiner needs it to address messages.
@@ -287,11 +293,15 @@ impl WsRelay {
         let url = url.to_string();
         let client = rt
             .block_on(async move {
-                if insecure {
+                let (c, nonce) = if insecure {
                     RelayClient::connect_insecure(&url).await
                 } else {
                     RelayClient::connect(&url).await
-                }
+                }?;
+                // GC-1 review P2: tracked delivery, opted in before sign-in. A relay that
+                // predates it answers false and the session stays on untracked delivery.
+                c.enable_delivery_acks().await?;
+                Ok::<_, comms_wire::WsError>((c, nonce))
             })
             .map(|(c, _relay_key)| c)
             .map_err(|e| e.to_string())?;
@@ -300,6 +310,11 @@ impl WsRelay {
 }
 
 impl Relay for WsRelay {
+    fn ack_delivered(&mut self) -> Result<(), String> {
+        self.rt
+            .block_on(self.client.ack_delivered())
+            .map_err(|e| e.to_string())
+    }
     fn is_connected(&self) -> bool {
         // Flag-A — ACTIVE liveness: a bounded `challenge()` round-trip. Unlike a cached flag this
         // reflects the live socket (a WS that dropped mid-session fails the round-trip), and `challenge`
