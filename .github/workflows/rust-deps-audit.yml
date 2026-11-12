@@ -5,8 +5,8 @@ name: rust-deps-audit
 # still turns the gate red. Before this, the only Rust advisory check was the
 # tag-triggered `cargo audit` step in release.yml, so nothing ran pre-merge.
 #
-# Runs scripts/ci/audit.sh (cargo deny: advisories + bans + sources) against the
-# committed deny.toml — the same posture as citrate-chain's cargo-audit.yml and
+# Runs scripts/ci/audit.sh (cargo deny: advisories + bans + sources, and cargo audit
+# with .cargo/audit.toml) against the committed deny.toml — the same posture as citrate-chain's cargo-audit.yml and
 # nist-agent's ci.yml `deny` job. Accepted advisories are reviewed
 # `[advisories] ignore` entries in deny.toml; version floors for releases the
 # advisory DB does not cover yet are `[bans] deny` entries there. Never add a
@@ -44,10 +44,10 @@ jobs:
 
       # Unpinned on purpose (as in nist-agent): an old cargo-deny cannot parse newer
       # RustSec advisory formats, which would silently weaken the gate.
-      - name: Install cargo-deny
+      - name: Install cargo-deny and cargo-audit
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny,cargo-audit
 
       - name: Advisory gate
         run: bash scripts/ci/audit.sh
