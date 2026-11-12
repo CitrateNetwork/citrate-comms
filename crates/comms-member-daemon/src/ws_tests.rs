@@ -700,3 +700,31 @@ fn ownership_transfers_by_the_owner_only() {
     settle(&mut [&mut owner, &mut carol], gid);
     assert_eq!(role_of(&owner, gid, c), Some(Role::Admin));
 }
+
+#[test]
+fn only_the_owner_can_make_an_admin_even_through_a_crafted_grant() {
+    // #49 review P2: Admin gates money-adjacent surfaces (group FL offers), so an Admin grant
+    // must come from the owner. Bob is an admin; he signs an Admin grant for carol claiming the
+    // Owner role to his own signer, bypassing his daemon's check. Receivers refuse it.
+    let (mut owner, mut bob, mut carol, gid) = trio();
+    let (b, c) = (bob.owner(), carol.owner());
+    owner.grant_role(gid, b, Role::Admin, None).expect("owner makes bob admin");
+    settle(&mut [&mut bob, &mut carol], gid);
+    assert_eq!(role_of(&carol, gid, b), Some(Role::Admin));
+    let crafted =
+        rbac::sign_role_assertion(&bob.wallet, Role::Owner, c, Role::Admin, Some(gid), None)
+            .expect("bob can produce the signature");
+    bob.send(gid, &crate::grants::encode_grant_message(&crafted))
+        .expect("send it");
+    settle(&mut [&mut owner, &mut carol], gid);
+    assert_eq!(role_of(&owner, gid, c), Some(Role::Member));
+    assert_eq!(role_of(&carol, gid, c), Some(Role::Member));
+    assert!(
+        owner
+            .grant_rejections()
+            .iter()
+            .any(|r| r.contains("only the owner grants Admin")),
+        "{:?}",
+        owner.grant_rejections()
+    );
+}
