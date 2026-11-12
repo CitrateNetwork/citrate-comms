@@ -39,6 +39,14 @@ use tls_codec::{Deserialize as _, Serialize as _};
 /// transport as post-quantum.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// GC-2: the private-use (RFC 9420 §17.3, 0xF000..=0xFFFF) group-context extension that
+/// holds the group owner's 20-byte address.
+///
+/// That address is the owner's **comms identity** (the device-sealed comms key's address, the
+/// identity in its MLS credential), NOT the member's custody wallet. A wallet↔comms link is a
+/// separate attestation (GC-3).
+pub const OWNER_EXTENSION_TYPE: u16 = 0xF0C1;
+
 /// A member's MLS keys + credential + its own crypto provider (keystore).
 pub struct MlsMember {
     provider: OpenMlsRustCrypto,
@@ -189,6 +197,7 @@ impl MlsMember {
     /// TLS-serialized public KeyPackage to publish to the relay directory.
     pub fn fresh_key_package(&self) -> Result<Vec<u8>, MlsError> {
         let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities())
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -220,6 +229,27 @@ impl MlsMember {
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
             .use_ratchet_tree_extension(true)
+            .build();
+        let group = MlsGroup::new(
+            &self.provider,
+            &self.signer,
+            &config,
+            self.credential_with_key.clone(),
+        )
+        .map_err(|e| MlsError::Group(format!("create: {e:?}")))?;
+        Ok(GroupHandle { group })
+    }
+
+    /// GC-2: create a group whose authenticated group context names `owner` (the 20-byte
+    /// comms-identity address, not a custody wallet) in the [`OWNER_EXTENSION_TYPE`] extension. Every member reads the
+    /// owner from the group context, which the key schedule binds, so the role-grant
+    /// chain has an anchor no relay can change.
+    pub fn create_group_owned(&self, owner: [u8; 20]) -> Result<GroupHandle, MlsError> {
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(CIPHERSUITE)
+            .use_ratchet_tree_extension(true)
+            .capabilities(capabilities())
+            .with_group_context_extensions(owner_extensions(owner)?)
             .build();
         let group = MlsGroup::new(
             &self.provider,
@@ -277,6 +307,13 @@ impl MlsMember {
                 self.credential_with_key.clone(),
             )
             .map_err(|e| MlsError::Group(format!("external commit build_group: {e:?}")))?
+            // GC-2: the joiner's leaf must support the owner extension in the group context.
+            .leaf_node_parameters(
+                LeafNodeParameters::builder()
+                    .with_credential_with_key(self.credential_with_key.clone())
+                    .with_capabilities(capabilities())
+                    .build(),
+            )
             .load_psks(self.provider.storage())
             .map_err(|e| MlsError::Group(format!("external commit load_psks: {e:?}")))?
             .build(
@@ -548,8 +585,19 @@ impl GroupHandle {
         commit_bytes: &[u8],
     ) -> Result<(), MlsError> {
         let processed = self.process(member, commit_bytes)?;
+        let committer = basic_credential_identity(processed.credential())?;
         match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // GC-2: the owner in the group context changes only by a commit from the
+                // current owner. OpenMLS accepts a GroupContextExtensions commit from any
+                // member, so this is checked here, before the merge.
+                let before = self.owner();
+                let after = owner_in(staged.group_context().extensions());
+                if after != before && before.map(|o| o.to_vec()) != Some(committer) {
+                    return Err(MlsError::Group(
+                        "owner change not committed by the current owner".into(),
+                    ));
+                }
                 self.group
                     .merge_staged_commit(&member.provider, *staged)
                     .map_err(|e| MlsError::Group(format!("merge staged: {e:?}")))?;
@@ -560,6 +608,44 @@ impl GroupHandle {
                 content_kind(&other)
             ))),
         }
+    }
+
+    /// GC-2: the group owner's wallet from the group context, or `None` for a group
+    /// created without the owner extension (before 0.6.0).
+    pub fn owner(&self) -> Option<[u8; 20]> {
+        owner_in(self.group.extensions())
+    }
+
+    /// GC-2: hand the group to `new_owner`. Only the current owner may do this; the
+    /// change is a Commit with a GroupContextExtensions proposal, merged here. Returns
+    /// the TLS-serialized Commit for the other members.
+    pub fn transfer_owner(
+        &mut self,
+        member: &MlsMember,
+        new_owner: [u8; 20],
+    ) -> Result<Vec<u8>, MlsError> {
+        let current = self
+            .owner()
+            .ok_or_else(|| MlsError::Group("this group has no owner extension".into()))?;
+        if basic_credential_identity(&member.credential_with_key.credential)? != current {
+            return Err(MlsError::Group(
+                "only the current owner can transfer the group".into(),
+            ));
+        }
+        let (commit, _welcome, _gi) = self
+            .group
+            .update_group_context_extensions(
+                &member.provider,
+                owner_extensions(new_owner)?,
+                &member.signer,
+            )
+            .map_err(|e| MlsError::Group(format!("owner transfer: {e:?}")))?;
+        self.group
+            .merge_pending_commit(&member.provider)
+            .map_err(|e| MlsError::Group(format!("merge commit: {e:?}")))?;
+        commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("commit serialize: {e:?}")))
     }
 
     /// Encrypt an application message. Returns opaque ciphertext bytes.
@@ -606,6 +692,41 @@ impl GroupHandle {
             .process_message(&member.provider, protocol)
             .map_err(|e| MlsError::Group(format!("process_message: {e:?}")))
     }
+}
+
+/// GC-2: our leaf capabilities, advertising the owner extension type (RFC 9420 requires
+/// every member to support each group-context extension).
+fn capabilities() -> Capabilities {
+    Capabilities::new(
+        None,
+        None,
+        Some(&[ExtensionType::Unknown(OWNER_EXTENSION_TYPE)]),
+        None,
+        None,
+    )
+}
+
+/// The owner named by `ext`, if it carries a well-formed owner extension.
+fn owner_in(ext: &Extensions<GroupContext>) -> Option<[u8; 20]> {
+    ext.unknown(OWNER_EXTENSION_TYPE)
+        .and_then(|u| <[u8; 20]>::try_from(u.0.as_slice()).ok())
+}
+
+/// The group-context extensions that name `owner` (GC-2).
+///
+/// The group context also requires the owner extension type of every member
+/// (RequiredCapabilities), so a member whose client cannot read the owner cannot join, and
+/// OpenMLS accepts a later GroupContextExtensions commit that changes the owner.
+pub(crate) fn owner_extensions(owner: [u8; 20]) -> Result<Extensions<GroupContext>, MlsError> {
+    Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(OWNER_EXTENSION_TYPE)],
+            &[],
+            &[],
+        )),
+        Extension::Unknown(OWNER_EXTENSION_TYPE, UnknownExtension(owner.to_vec())),
+    ])
+    .map_err(|e| MlsError::Group(format!("owner extension: {e:?}")))
 }
 
 /// Client-side gate that a KeyPackage handed back by the (untrusted) relay
@@ -954,6 +1075,74 @@ mod tests {
         let back = alice_group.receive(&alice, &ct2).unwrap();
         assert_eq!(back.plaintext, b"hi alice");
         assert_eq!(back.sender_identity, b"bob-identity");
+    }
+
+    // ── GC-2: the group owner lives in the authenticated group context ──
+
+    const ALICE: [u8; 20] = [0xa1; 20];
+    const BOB: [u8; 20] = [0xb0; 20];
+
+    /// Alice (owner) + Bob, both joined, at epoch 1.
+    fn owned_pair() -> (MlsMember, GroupHandle, MlsMember, GroupHandle) {
+        let alice = MlsMember::new(&ALICE).unwrap();
+        let bob = MlsMember::new(&BOB).unwrap();
+        let mut ag = alice.create_group_owned(ALICE).unwrap();
+        let add = ag.add(&alice, &bob.fresh_key_package().unwrap()).unwrap();
+        let bg = bob.join(&add.welcome, &add.ratchet_tree).unwrap();
+        (alice, ag, bob, bg)
+    }
+
+    #[test]
+    fn the_owner_is_in_the_group_context_and_every_member_reads_it() {
+        let (_a, ag, _b, bg) = owned_pair();
+        assert_eq!(ag.owner(), Some(ALICE));
+        assert_eq!(
+            bg.owner(),
+            Some(ALICE),
+            "a joiner reads the owner from the Welcome"
+        );
+        // A group made the old way has no owner: role grants are not available there.
+        let legacy = MlsMember::new(b"legacy").unwrap().create_group().unwrap();
+        assert_eq!(legacy.owner(), None);
+    }
+
+    #[test]
+    fn the_owner_can_transfer_the_group_and_members_follow() {
+        let (alice, mut ag, bob, mut bg) = owned_pair();
+        let commit = ag.transfer_owner(&alice, BOB).expect("owner transfers");
+        assert_eq!(ag.owner(), Some(BOB));
+        bg.process_commit(&bob, &commit)
+            .expect("member accepts the owner's change");
+        assert_eq!(bg.owner(), Some(BOB));
+        assert_eq!(bg.epoch(), ag.epoch());
+    }
+
+    #[test]
+    fn an_owner_change_not_committed_by_the_current_owner_is_refused() {
+        // Bob is a member, not the owner. He builds a GroupContextExtensions commit naming
+        // himself, straight through OpenMLS (no daemon check in the way), as a hostile
+        // member would.
+        let (alice, mut ag, bob, mut bg) = owned_pair();
+        let forged = bg
+            .group
+            .update_group_context_extensions(
+                &bob.provider,
+                owner_extensions(BOB).unwrap(),
+                &bob.signer,
+            )
+            .expect("OpenMLS lets any member propose this")
+            .0
+            .tls_serialize_detached()
+            .unwrap();
+        let err = ag.process_commit(&alice, &forged).expect_err("refused");
+        assert!(err.to_string().contains("current owner"), "{err}");
+        assert_eq!(ag.owner(), Some(ALICE), "the owner is unchanged");
+        // And bob's own API refuses before building anything.
+        let mut bg2 = owned_pair().3;
+        assert!(
+            bg2.transfer_owner(&bob, BOB).is_err(),
+            "a non-owner cannot transfer"
+        );
     }
 
     // ── INVITE-S2: external-commit self-admit (no owner action at join) ──

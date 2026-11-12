@@ -435,3 +435,47 @@ fn send_persists_the_advanced_ratchet_even_when_the_relay_answer_is_lost() {
         "the advanced ratchet must be on disk even though the relay call failed"
     );
 }
+
+// ── GC-2: groups from before the owner extension ──
+
+#[test]
+fn a_group_without_an_owner_extension_reports_role_grants_not_available() {
+    let mut d = MemberDaemon::new(EthWallet::generate(), "relay.test", 1000).expect("daemon");
+    let gid = d.create_group_without_owner_for_test("legacy").expect("legacy group");
+    assert_eq!(d.group_owner(gid), None);
+    let err = d
+        .grant_role(gid, d.owner(), Role::Admin, None)
+        .expect_err("refused");
+    assert!(err.to_string().contains("role grants not available"), "{err}");
+}
+
+#[test]
+fn a_grant_message_round_trips_and_ordinary_text_is_not_a_grant() {
+    let w = EthWallet::generate();
+    let a = rbac::sign_role_assertion(&w, Role::Owner, w.address(), Role::Admin, Some(GroupId([1; 32])), None)
+        .expect("sign");
+    let msg = crate::grants::encode_grant_message(&a);
+    assert!(msg.is_ascii(), "older daemons decode it as UTF-8 text");
+    assert_eq!(crate::grants::decode_grant_message(&msg).expect("is a grant").expect("decodes"), a);
+    assert!(crate::grants::decode_grant_message("hello").is_none());
+    assert!(crate::grants::decode_grant_message("\u{0}citrate:role-grant:v1:@@@").expect("prefixed").is_err());
+}
+
+#[test]
+fn the_grant_role_ipc_reaches_the_daemon_and_reports_its_refusal() {
+    let mut d = MemberDaemon::new(EthWallet::generate(), "relay.test", 1000).expect("daemon");
+    let gid = d.create_group_without_owner_for_test("legacy").expect("legacy group");
+    let req: crate::ipc::Request = serde_json::from_value(serde_json::json!({
+        "op": "grantRole",
+        "group": hex::encode(gid.0),
+        "member": format!("0x{}", hex::encode(d.owner().0)),
+        "role": "Admin",
+    }))
+    .expect("the IPC shape decodes");
+    match crate::ipc::handle_request(&mut d, req) {
+        crate::ipc::Response::Error { message } => {
+            assert!(message.contains("role grants not available"), "{message}")
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+}
