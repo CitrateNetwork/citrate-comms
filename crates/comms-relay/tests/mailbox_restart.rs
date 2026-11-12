@@ -282,7 +282,7 @@ async fn an_older_session_closing_leaves_the_newer_session_of_the_same_wallet_wo
                 signature: sig.to_vec(),
             },
         ] {
-            ws.send(Message::Binary(canonical::to_vec(&frame).unwrap().into()))
+            ws.send(Message::Binary(canonical::to_vec(&frame).unwrap()))
                 .await
                 .unwrap();
         }

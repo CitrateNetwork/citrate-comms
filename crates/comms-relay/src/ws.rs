@@ -215,13 +215,26 @@ impl RelayServer {
         }
 
         if let Some(w) = authed {
-            self.registry.lock().await.remove(&w);
-            // Unacknowledged tracked deliveries go out again on the next session.
-            self.ack_mode.lock().await.remove(&w);
-            self.service.lock().await.release_in_flight(&w);
-            // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
-            // not persist for the process lifetime (no revocation + unbounded growth).
-            self.service.lock().await.end_session(&w);
+            // One live session per wallet: the newest sign-in owns the wallet's registration,
+            // ack tracking and authenticated session (comms #51). Tear them down only if this
+            // connection still owns them; an older session closing after a newer one signed in
+            // leaves the newer one working.
+            let owned = {
+                let mut reg = self.registry.lock().await;
+                let mine = reg.get(&w).is_some_and(|tx| tx.same_channel(&out_tx));
+                if mine {
+                    reg.remove(&w);
+                }
+                mine
+            };
+            if owned {
+                // Unacknowledged tracked deliveries go out again on the next session.
+                self.ack_mode.lock().await.remove(&w);
+                self.service.lock().await.release_in_flight(&w);
+                // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
+                // not persist for the process lifetime (no revocation + unbounded growth).
+                self.service.lock().await.end_session(&w);
+            }
         }
         writer.abort();
         Ok(())
