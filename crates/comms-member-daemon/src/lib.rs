@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 pub mod client;
+pub mod grants;
 pub mod ipc;
 pub mod persist;
 pub mod relay;
@@ -118,6 +119,9 @@ pub struct MemberDaemon {
     /// `Some` = snapshot every MLS + registry mutation to an encrypted file and rehydrate
     /// it on startup.
     persist: Option<PersistCtx>,
+    /// GC-2: why recent incoming role grants were refused (newest last, bounded by
+    /// [`GRANT_LOG_CAP`]). In memory only.
+    grant_log: Vec<String>,
     /// Envelopes already fetched from the relay but not yet consumed: a `poll_messages(g1)` that
     /// drains a Commit or Application for `g2`, or a Welcome for a group not joined yet. `fetch`
     /// DRAINS the relay session, so without this buffer those envelopes were silently dropped —
@@ -126,6 +130,77 @@ pub struct MemberDaemon {
     /// handed these over and deleted its copy, so a daemon restart must not lose them. Bounded by
     /// [`INBOX_CAP`].
     inbox: Vec<Envelope>,
+}
+
+/// Upper bound on [`MemberDaemon::grant_log`].
+const GRANT_LOG_CAP: usize = 64;
+
+/// GC-2: a member's role as every client derives it: the group-context owner is `Owner`,
+/// anyone else has their roster role (a stale `Owner` in the roster reads as `Admin`).
+fn effective_role(g: &GroupState, who: WalletAddress) -> Role {
+    if g.handle.owner() == Some(who.0) {
+        return Role::Owner;
+    }
+    match g.members.iter().find(|m| m.wallet == who).map(|m| m.role) {
+        Some(Role::Owner) => Role::Admin,
+        Some(r) => r,
+        None => Role::Guest,
+    }
+}
+
+/// GC-2: after an ownership change, the new owner is `Owner` and the previous one `Admin`.
+fn apply_owner_change(g: &mut GroupState, before: Option<[u8; 20]>, after: Option<[u8; 20]>) {
+    for m in g.members.iter_mut() {
+        if Some(m.wallet.0) == after {
+            m.role = Role::Owner;
+        } else if Some(m.wallet.0) == before {
+            m.role = Role::Admin;
+        }
+    }
+}
+
+/// GC-2: check an incoming grant (decrypted from `sender`'s authenticated MLS message)
+/// against the group owner and this member's roster. Returns why it is refused.
+fn check_grant(
+    g: &GroupState,
+    gid: GroupId,
+    sender: WalletAddress,
+    a: &RoleAssertion,
+    now: u64,
+) -> Result<(), String> {
+    let owner = g
+        .handle
+        .owner()
+        .ok_or("role grants not available for this group (created before 0.6.0)")?;
+    rbac::verify_role_assertion(a, now).map_err(|e| format!("role grant refused: {e}"))?;
+    if a.scope != Some(gid) {
+        return Err("role grant for another group".into());
+    }
+    if a.issuer != sender {
+        return Err("role grant not sent by its issuer".into());
+    }
+    let issuer_role = effective_role(g, a.issuer);
+    if !rbac::can(issuer_role, rbac::Capability::AssignRole) {
+        return Err(format!("role grant from non-admin {}", a.issuer.to_hex()));
+    }
+    // Admin gates money-adjacent surfaces (a group's FL offers are shown only from an owner or
+    // admin), so making an admin is the owner's alone (#49 review).
+    if a.role == Role::Admin && a.issuer.0 != owner {
+        return Err("only the owner grants Admin".into());
+    }
+    if !rbac::can_grant(issuer_role, a.role) {
+        return Err(format!(
+            "role grant exceeds the issuer's role ({issuer_role:?} cannot grant {:?})",
+            a.role
+        ));
+    }
+    if a.subject.0 == owner {
+        return Err("the owner's role changes only by an ownership transfer".into());
+    }
+    if !g.members.iter().any(|m| m.wallet == a.subject) {
+        return Err("role grant for someone who is not a member".into());
+    }
+    Ok(())
 }
 
 /// Upper bound on [`MemberDaemon::inbox`]: oldest envelopes beyond it are dropped, so a group that is
@@ -249,6 +324,7 @@ impl MemberDaemon {
             groups,
             now: d_now + 1,
             persist,
+            grant_log: Vec::new(),
             inbox,
         };
         daemon.persist_state()?;
@@ -329,6 +405,128 @@ impl MemberDaemon {
             .map_err(|e| DaemonError::Persist(e.to_string()))
     }
 
+    /// GC-2: sign a role grant for `member` in `gid` with this member's comms key and send it
+    /// to the group as an MLS application message. Every member verifies it against the
+    /// group owner (the authenticated group-context extension) and its own roster before
+    /// applying it.
+    pub fn grant_role(
+        &mut self,
+        gid: GroupId,
+        member: WalletAddress,
+        role: Role,
+        not_after: Option<u64>,
+    ) -> Result<(), DaemonError> {
+        let me = self.wallet.address();
+        let gi = self
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        let g = &self.groups[gi];
+        let owner = g.handle.owner().ok_or_else(|| {
+            DaemonError::Rbac(
+                "role grants not available for this group (created before 0.6.0)".into(),
+            )
+        })?;
+        if member.0 == owner {
+            return Err(DaemonError::Rbac(
+                "the owner's role changes only by an ownership transfer".into(),
+            ));
+        }
+        if !g.members.iter().any(|m| m.wallet == member) {
+            return Err(DaemonError::NoMember(hex::encode(member.0)));
+        }
+        let my_role = effective_role(g, me);
+        if role == Role::Admin && me.0 != owner {
+            return Err(DaemonError::Rbac("only the owner grants Admin".into()));
+        }
+        // Signed with this member's COMMS key (the device-sealed comms identity, planset
+        // 2026-11-07-v060 02 §5), not the custody wallet. The anti-escalation rule (`can_grant`)
+        // is checked here and again by every receiver.
+        //
+        // No grant `generation` (that is `sign_group_grant`, for the relay's membership ops):
+        // inside the group, MLS stops replay and receivers require issuer == authenticated
+        // sender, so a generation would add nothing here.
+        let a =
+            rbac::sign_role_assertion(&self.wallet, my_role, member, role, Some(gid), not_after)
+                .map_err(|e| DaemonError::Rbac(e.to_string()))?;
+        self.send(gid, &grants::encode_grant_message(&a))?;
+        // Applied locally only once the grant went out (#49 review P3).
+        if let Some(m) = self.groups[gi]
+            .members
+            .iter_mut()
+            .find(|m| m.wallet == member)
+        {
+            m.role = role;
+        }
+        Ok(())
+    }
+
+    /// GC-2: hand `gid` to `new_owner` (a current member). Only the current owner can.
+    pub fn transfer_ownership(
+        &mut self,
+        gid: GroupId,
+        new_owner: WalletAddress,
+    ) -> Result<(), DaemonError> {
+        let me = self.wallet.address();
+        let now = self.tick();
+        let gi = self
+            .groups
+            .iter()
+            .position(|g| g.id == gid)
+            .ok_or_else(|| DaemonError::NoGroup(hex::encode(gid.0)))?;
+        let (commit, epoch, recipients) = {
+            let mls = &self.mls;
+            let g = &mut self.groups[gi];
+            let owner = g.handle.owner().ok_or_else(|| {
+                DaemonError::Rbac(
+                    "role grants not available for this group (created before 0.6.0)".into(),
+                )
+            })?;
+            if owner != me.0 {
+                return Err(DaemonError::Rbac(
+                    "only the group owner can transfer it".into(),
+                ));
+            }
+            if !g.members.iter().any(|m| m.wallet == new_owner) {
+                return Err(DaemonError::NoMember(hex::encode(new_owner.0)));
+            }
+            let commit = g
+                .handle
+                .transfer_owner(mls, new_owner.0)
+                .map_err(|e| DaemonError::Mls(e.to_string()))?;
+            g.epoch = g.handle.epoch();
+            apply_owner_change(g, Some(owner), Some(new_owner.0));
+            (commit, g.epoch, g.recipients(me))
+        };
+        self.persist_state()?;
+        submit_commit(self.relay.as_mut(), gid, me, epoch, commit, recipients, now)
+    }
+
+    /// Tests only: a group made the pre-0.6.0 way (no owner extension).
+    #[cfg(test)]
+    pub(crate) fn create_group_without_owner_for_test(
+        &mut self,
+        name: &str,
+    ) -> Result<GroupId, DaemonError> {
+        self.create_group_inner(name.to_string(), false)
+    }
+
+    /// GC-2: the group's owner as the authenticated group context names it (`None` for a
+    /// group created before 0.6.0, where role grants are not available).
+    pub fn group_owner(&self, gid: GroupId) -> Option<WalletAddress> {
+        self.groups
+            .iter()
+            .find(|g| g.id == gid)
+            .and_then(|g| g.handle.owner())
+            .map(WalletAddress)
+    }
+
+    /// GC-2: why recent incoming role grants were refused (newest last, bounded).
+    pub fn grant_rejections(&self) -> Vec<String> {
+        self.grant_log.clone()
+    }
+
     /// The owner's wallet address.
     pub fn owner(&self) -> WalletAddress {
         self.wallet.address()
@@ -341,10 +539,18 @@ impl MemberDaemon {
 
     /// Create a group owned by this member. Returns its stable [`GroupId`].
     pub fn create_group(&mut self, name: impl Into<String>) -> Result<GroupId, DaemonError> {
-        let handle = self
-            .mls
-            .create_group()
-            .map_err(|e| DaemonError::Mls(e.to_string()))?;
+        self.create_group_inner(name.into(), true)
+    }
+
+    /// `owned`: name this member as owner in the group context (GC-2). Always true outside
+    /// tests; `false` reproduces a group made before 0.6.0.
+    fn create_group_inner(&mut self, name: String, owned: bool) -> Result<GroupId, DaemonError> {
+        let handle = if owned {
+            self.mls.create_group_owned(self.wallet.address().0)
+        } else {
+            self.mls.create_group()
+        }
+        .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let gid = GroupId(*blake3::hash(&handle.group_id()).as_bytes());
         let now = self.tick();
         self.relay
@@ -352,7 +558,7 @@ impl MemberDaemon {
             .map_err(|e| DaemonError::Relay(e.to_string()))?;
         self.groups.push(GroupState {
             id: gid,
-            name: name.into(),
+            name,
             handle,
             epoch: 0,
             members: vec![MemberInfo {
@@ -788,6 +994,8 @@ impl MemberDaemon {
             return Err(DaemonError::NoGroup(hex::encode(gid.0)));
         }
         let envs = self.take_inbox();
+        let now = self.tick();
+        let mut rejected: Vec<String> = Vec::new();
         let mut out = Vec::new();
         let mut changed = false;
         // Envelopes for OTHER groups (and anything left after a failure) go back to the inbox
@@ -810,12 +1018,17 @@ impl MemberDaemon {
                 match e.kind {
                     EnvelopeKind::Commit => {
                         // Merge an incoming membership commit (e.g. a self-admitted joiner).
+                        let owner_before = g.handle.owner();
                         if let Err(err) = g.handle.process_commit(mls, &e.ciphertext) {
                             failure = Some(DaemonError::Mls(err.to_string()));
                             break;
                         }
                         g.epoch = g.handle.epoch();
                         reconcile_roster(g);
+                        let owner_after = g.handle.owner();
+                        if owner_after != owner_before {
+                            apply_owner_change(g, owner_before, owner_after);
+                        }
                         changed = true;
                     }
                     EnvelopeKind::Application => {
@@ -845,6 +1058,22 @@ impl MemberDaemon {
                                 break;
                             }
                         };
+                        // GC-2: a role grant is applied (or refused), never shown as chat.
+                        if let Some(parsed) = grants::decode_grant_message(&body) {
+                            match parsed
+                                .and_then(|a| check_grant(g, gid, sender, &a, now).map(|()| a))
+                            {
+                                Ok(a) => {
+                                    if let Some(m) =
+                                        g.members.iter_mut().find(|m| m.wallet == a.subject)
+                                    {
+                                        m.role = a.role;
+                                    }
+                                }
+                                Err(why) => rejected.push(why),
+                            }
+                            continue;
+                        }
                         out.push(Msg {
                             group: gid,
                             sender,
@@ -860,6 +1089,14 @@ impl MemberDaemon {
             keep.extend(iter);
         }
         self.stash(keep);
+        for why in rejected {
+            eprintln!("member-daemon: {why}");
+            self.grant_log.push(why);
+        }
+        if self.grant_log.len() > GRANT_LOG_CAP {
+            let excess = self.grant_log.len() - GRANT_LOG_CAP;
+            self.grant_log.drain(..excess);
+        }
         // Processing advanced the inbound ratchet / epoch; persist so the restored state
         // reflects what was already consumed. Skip the write if nothing changed.
         if changed {
