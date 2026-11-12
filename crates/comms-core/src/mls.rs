@@ -40,7 +40,11 @@ use tls_codec::{Deserialize as _, Serialize as _};
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// GC-2: the private-use (RFC 9420 §17.3, 0xF000..=0xFFFF) group-context extension that
-/// holds the group owner's 20-byte wallet address.
+/// holds the group owner's 20-byte address.
+///
+/// That address is the owner's **comms identity** (the device-sealed comms key's address, the
+/// identity in its MLS credential), NOT the member's custody wallet. A wallet↔comms link is a
+/// separate attestation (GC-3).
 pub const OWNER_EXTENSION_TYPE: u16 = 0xF0C1;
 
 /// A member's MLS keys + credential + its own crypto provider (keystore).
@@ -236,8 +240,8 @@ impl MlsMember {
         Ok(GroupHandle { group })
     }
 
-    /// GC-2: create a group whose authenticated group context names `owner` (a 20-byte
-    /// wallet address) in the [`OWNER_EXTENSION_TYPE`] extension. Every member reads the
+    /// GC-2: create a group whose authenticated group context names `owner` (the 20-byte
+    /// comms-identity address, not a custody wallet) in the [`OWNER_EXTENSION_TYPE`] extension. Every member reads the
     /// owner from the group context, which the key schedule binds, so the role-grant
     /// chain has an anchor no relay can change.
     pub fn create_group_owned(&self, owner: [u8; 20]) -> Result<GroupHandle, MlsError> {

@@ -643,7 +643,7 @@ fn an_owner_grant_is_verified_and_applied_by_every_member() {
     assert_eq!(role_of(&owner, gid, c), Some(Role::Guest));
     assert_eq!(role_of(&carol, gid, c), Some(Role::Guest));
     let err = bob.grant_role(gid, c, Role::Admin, None).expect_err("anti-escalation");
-    assert!(err.to_string().contains("cannot grant"), "{err}");
+    assert!(err.to_string().contains("only the owner grants Admin"), "{err}");
 }
 
 #[test]

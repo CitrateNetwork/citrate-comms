@@ -183,6 +183,11 @@ fn check_grant(
     if !rbac::can(issuer_role, rbac::Capability::AssignRole) {
         return Err(format!("role grant from non-admin {}", a.issuer.to_hex()));
     }
+    // Admin gates money-adjacent surfaces (a group's FL offers are shown only from an owner or
+    // admin), so making an admin is the owner's alone (#49 review).
+    if a.role == Role::Admin && a.issuer.0 != owner {
+        return Err("only the owner grants Admin".into());
+    }
     if !rbac::can_grant(issuer_role, a.role) {
         return Err(format!(
             "role grant exceeds the issuer's role ({issuer_role:?} cannot grant {:?})",
@@ -432,11 +437,21 @@ impl MemberDaemon {
             return Err(DaemonError::NoMember(hex::encode(member.0)));
         }
         let my_role = effective_role(g, me);
-        // Signed with this member's comms key (planset 2026-11-07-v060 02 §5); the anti-
-        // escalation rule (`can_grant`) is checked here and again by every receiver.
+        if role == Role::Admin && me.0 != owner {
+            return Err(DaemonError::Rbac("only the owner grants Admin".into()));
+        }
+        // Signed with this member's COMMS key (the device-sealed comms identity, planset
+        // 2026-11-07-v060 02 §5), not the custody wallet. The anti-escalation rule (`can_grant`)
+        // is checked here and again by every receiver.
+        //
+        // No grant `generation` (that is `sign_group_grant`, for the relay's membership ops):
+        // inside the group, MLS stops replay and receivers require issuer == authenticated
+        // sender, so a generation would add nothing here.
         let a =
             rbac::sign_role_assertion(&self.wallet, my_role, member, role, Some(gid), not_after)
                 .map_err(|e| DaemonError::Rbac(e.to_string()))?;
+        self.send(gid, &grants::encode_grant_message(&a))?;
+        // Applied locally only once the grant went out (#49 review P3).
         if let Some(m) = self.groups[gi]
             .members
             .iter_mut()
@@ -444,7 +459,7 @@ impl MemberDaemon {
         {
             m.role = role;
         }
-        self.send(gid, &grants::encode_grant_message(&a))
+        Ok(())
     }
 
     /// GC-2: hand `gid` to `new_owner` (a current member). Only the current owner can.

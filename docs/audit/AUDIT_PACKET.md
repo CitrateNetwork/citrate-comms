@@ -64,6 +64,37 @@ The five Tier-1 focus areas from the risk register (`.agentile/AUDIT_REF.md`,
   (`crates/comms-agent-bridge/src/lib.rs`).
 - **Residual:** a compromised agent host reads that one workspace until removed (next-Commit PCS).
 
+### GC-2 — Signed role grants (0.6.0)
+- **Spec:** planset 2026-11-07-v060 `02_ARCHITECTURE.md` §5, `04_FEATURES_BDD.md` F-G1.
+- **Impl:**
+  - `crates/comms-core/src/mls.rs`: the owner's comms-identity address in group-context
+    extension `0xF0C1` (with RequiredCapabilities). `process_commit` refuses an owner change not
+    committed by the current owner.
+  - `crates/comms-member-daemon/src/lib.rs` (`grant_role`, `check_grant`, `transfer_ownership`):
+    grants are `RoleAssertion`s signed with the member's **comms key** and sent as MLS messages.
+    Receivers check signature, expiry, scope, issuer == authenticated sender, and that the
+    issuer's role may grant the role. Only the owner grants Admin.
+- **Tests:** `forged_role_grant_rejected`, `only_the_owner_can_make_an_admin_even_through_a_crafted_grant`,
+  `a_grant_relayed_by_someone_other_than_its_issuer_is_refused`, `ownership_transfers_by_the_owner_only`,
+  `an_owner_change_not_committed_by_the_current_owner_is_refused`.
+- **Residual: a stolen device comms key.** The comms key is device-sealed (OS keyring), not the
+  custody wallet, and signing a grant needs no ceremony. Whoever extracts it acts as that member
+  until the member is removed from the group:
+  - **an admin's key:** can grant member-level roles (Member, Partner, Guest, Agent). It cannot
+    make an Admin.
+  - **the owner's key:** can make admins and transfer the group.
+
+  Admin gates money-adjacent UI: citrate-core shows a group's FL offers only when the poster is
+  an owner or admin on the roster. So a stolen owner key can make offers from new "admins"
+  visible to members. Mitigations:
+  - the key never leaves the keyring;
+  - removing the member, or transferring ownership from another device, ends it;
+  - payment itself still goes through the wallet ceremony.
+
+  A wallet-anchored owner (GC-3 binding attestation) would raise this to the custody key.
+- **Residual: role state is per client.** Joiners do not see grants made before they joined;
+  a role snapshot is the follow-up.
+
 ### At-rest CF encryption + PQ key-wrap path
 - **Spec:** `PLANSET/02` §6 (AES-256-GCM CFs, mandatory AAD = CF name, per-CF BLAKE3-derived
   keys; HybridKEM master-key wrap is the documented next step).
