@@ -32,8 +32,11 @@ pub const CF_MEMBERSHIP: &str = "membership"; // group_id(32) -> GroupSnapshot
 pub const CF_META: &str = "meta"; // small key/value (owner, domain, …)
 pub const CF_INVITES: &str = "invites"; // token_hash(32) -> InviteRecord (INVITE-S2)
 pub const CF_REFERRALS: &str = "referrals"; // seq(8 BE) -> ReferralRecord (append-only, INVITE-S2)
+/// Per-recipient delivery mailbox (comms#4). A row is a REFERENCE into `CF_ENVELOPES`
+/// (`group_id`, `group_seq`, enqueue time), never a second copy of the ciphertext.
+pub const CF_MAILBOX: &str = "mailbox"; // wallet(20) ‖ arrival(8 BE) -> MailboxRef
 
-const CFS: [&str; 7] = [
+const CFS: [&str; 8] = [
     CF_ENVELOPES,
     CF_KEYPACKAGES,
     CF_AUDIT,
@@ -41,6 +44,7 @@ const CFS: [&str; 7] = [
     CF_META,
     CF_INVITES,
     CF_REFERRALS,
+    CF_MAILBOX,
 ];
 
 /// Decrypted `(key, value)` pairs returned by [`EncryptedStore::scan`].
@@ -119,6 +123,19 @@ impl EncryptedStore {
             None => Ok(None),
             Some(v) => Ok(Some(self.decrypt(cf, &v)?)),
         }
+    }
+
+    /// Delete every key in `keys` from `cf` in ONE atomic RocksDB write batch: either
+    /// all of them are gone afterwards or (on error) none are.
+    pub fn delete_many(&self, cf: &str, keys: &[Vec<u8>]) -> Result<(), StoreError> {
+        let handle = self.db.cf_handle(cf).ok_or(StoreError::NoCf)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        for k in keys {
+            batch.delete_cf(handle, k);
+        }
+        self.db
+            .write(batch)
+            .map_err(|e| StoreError::Db(e.to_string()))
     }
 
     /// Scan a whole column family in key order, decrypting each value.
@@ -208,6 +225,30 @@ mod tests {
             assert!(matches!(s.get(CF_META, b"owner"), Err(StoreError::Crypto)));
         }
         std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn delete_many_removes_every_key_and_stays_removed_after_reopen() {
+        let dir = tmp();
+        let key = [3u8; 32];
+        {
+            let s = EncryptedStore::open(&dir, key).unwrap();
+            for i in 0..4u64 {
+                s.put(CF_MAILBOX, &seq_key(&[1; 20], i), b"ref").unwrap();
+            }
+            s.delete_many(CF_MAILBOX, &[seq_key(&[1; 20], 0), seq_key(&[1; 20], 2)])
+                .unwrap();
+            let left: Vec<Vec<u8>> = s
+                .scan(CF_MAILBOX)
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            assert_eq!(left, vec![seq_key(&[1; 20], 1), seq_key(&[1; 20], 3)]);
+        }
+        let s = EncryptedStore::open(&dir, key).unwrap();
+        assert_eq!(s.scan(CF_MAILBOX).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -122,7 +122,8 @@ pub struct MemberDaemon {
     /// drains a Commit or Application for `g2`, or a Welcome for a group not joined yet. `fetch`
     /// DRAINS the relay session, so without this buffer those envelopes were silently dropped —
     /// a second group's traffic was lost to the first group's poll, and an unrelated poll ate a
-    /// pending Welcome. In-memory only (the relay already delivered them once); bounded by
+    /// pending Welcome. Persisted with the rest of the encrypted state (GC-1): the relay already
+    /// handed these over and deleted its copy, so a daemon restart must not lose them. Bounded by
     /// [`INBOX_CAP`].
     inbox: Vec<Envelope>,
 }
@@ -223,10 +224,11 @@ impl MemberDaemon {
             None => None,
         };
 
-        let (mls, groups) = match restored {
+        let (mls, groups, inbox) = match restored {
             Some(mg) => mg,
             None => (
                 MlsMember::new(&identity).map_err(|e| DaemonError::Mls(e.to_string()))?,
+                Vec::new(),
                 Vec::new(),
             ),
         };
@@ -247,7 +249,7 @@ impl MemberDaemon {
             groups,
             now: d_now + 1,
             persist,
-            inbox: Vec::new(),
+            inbox,
         };
         daemon.persist_state()?;
         Ok(daemon)
@@ -256,7 +258,10 @@ impl MemberDaemon {
     /// Rebuild the MLS member + group registry from a decrypted, identity-verified
     /// [`persist::StateFile`]. Each group is reloaded from the rehydrated keystore via
     /// `MlsGroup::load` — no re-create, no new epoch.
-    fn rehydrate(state: persist::StateFile) -> Result<(MlsMember, Vec<GroupState>), DaemonError> {
+    fn rehydrate(
+        state: persist::StateFile,
+    ) -> Result<(MlsMember, Vec<GroupState>, Vec<Envelope>), DaemonError> {
+        let inbox = state.inbox;
         let mls = MlsMember::restore(&state.identity, &state.sig_pubkey, &state.mls_snapshot)
             .map_err(|e| DaemonError::Mls(e.to_string()))?;
         let mut groups = Vec::with_capacity(state.groups.len());
@@ -280,7 +285,7 @@ impl MemberDaemon {
                     .collect(),
             });
         }
-        Ok((mls, groups))
+        Ok((mls, groups, inbox))
     }
 
     /// Snapshot MLS secrets + the group registry to the encrypted state file. No-op
@@ -313,12 +318,13 @@ impl MemberDaemon {
                     .collect(),
             })
             .collect();
-        let state = persist::StateFile::new(
+        let mut state = persist::StateFile::new(
             self.wallet.address().0.to_vec(),
             self.mls.sig_pubkey(),
             mls_snapshot,
             groups,
         );
+        state.inbox = self.inbox.clone();
         persist::write_state(&ctx.dir, &ctx.key, &state)
             .map_err(|e| DaemonError::Persist(e.to_string()))
     }
@@ -496,24 +502,48 @@ impl MemberDaemon {
 
     /// Everything waiting for this member: envelopes an earlier op fetched but did not consume,
     /// then whatever the relay has delivered since (in delivery order).
+    ///
+    /// GC-1 review P2: newly fetched envelopes go into the persisted inbox first, and only then
+    /// is the relay told it may delete them, so a crash or a dropped socket anywhere in between
+    /// leaves the relay's copy in place and it is sent again.
     fn take_inbox(&mut self) -> Vec<Envelope> {
         let me = self.wallet.address();
-        let mut all = std::mem::take(&mut self.inbox);
-        all.extend(self.relay.fetch(&me));
-        all
+        let fresh = self.relay.fetch(&me);
+        if !fresh.is_empty() {
+            self.inbox.extend(fresh);
+            match self.persist_state() {
+                Ok(()) => {
+                    if let Err(e) = self.relay.ack_delivered() {
+                        eprintln!("member-daemon: relay ack failed, it will resend: {e}");
+                    }
+                }
+                Err(e) => eprintln!("member-daemon: inbox not persisted, not acknowledging: {e}"),
+            }
+        }
+        std::mem::take(&mut self.inbox)
     }
 
     /// Put fetched-but-unconsumed envelopes back, keeping only those a later op can still use: any
     /// envelope for a group we are in (another group's poll consumes it), and Welcomes for groups
     /// we have not joined (join candidates). Anything else could never be consumed and is dropped.
+    ///
+    /// GC-1: whenever the inbox changes here it is persisted, so fetched-but-unconsumed mail
+    /// survives a daemon restart. A failed write is logged and left for the next persist (the
+    /// envelopes stay in memory meanwhile).
     fn stash(&mut self, envs: Vec<Envelope>) {
         let groups = &self.groups;
+        let before = self.inbox.len();
         self.inbox.extend(envs.into_iter().filter(|e| {
             groups.iter().any(|g| g.id == e.group_id) || e.kind == EnvelopeKind::Welcome
         }));
         if self.inbox.len() > INBOX_CAP {
             let excess = self.inbox.len() - INBOX_CAP;
             self.inbox.drain(..excess);
+        }
+        if self.inbox.len() != before {
+            if let Err(e) = self.persist_state() {
+                eprintln!("member-daemon: could not persist the inbox, will retry: {e}");
+            }
         }
     }
 
@@ -723,6 +753,11 @@ impl MemberDaemon {
             let recipients = g.recipients(owner);
             (ct, g.epoch, recipients)
         };
+        // `create_message` ratcheted the MLS message-generation state. Persist it BEFORE the
+        // relay sees the ciphertext: if the relay took it but the answer was lost, or the daemon
+        // died right after submitting, a restart must not encrypt again under the same
+        // generation. A failed submit then only skips a generation, which receivers tolerate.
+        self.persist_state()?;
         self.relay
             .submit_as(
                 owner,
@@ -738,9 +773,6 @@ impl MemberDaemon {
                 now,
             )
             .map_err(|e| DaemonError::Relay(e.to_string()))?;
-        // `create_message` ratcheted the MLS message-generation state; persist so a
-        // restart does not reuse a generation (which would reuse an AEAD nonce).
-        self.persist_state()?;
         Ok(())
     }
 

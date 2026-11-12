@@ -279,3 +279,159 @@ fn relay_status_op_reports_connected_for_the_in_process_relay() {
         other => panic!("expected RelayStatus, got {other:?}"),
     }
 }
+
+// ── GC-1 / comms#3: the sender ratchet is persisted before the relay sees the message ──
+
+/// An in-process relay whose `submit_as` can be made to fail, standing in for a relay that took
+/// the message but whose answer never arrived (or a daemon killed right after submitting).
+struct FlakySubmitRelay {
+    inner: crate::relay::InProcessRelay,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::relay::Relay for FlakySubmitRelay {
+    fn issue_challenge(&mut self, now: u64) -> String {
+        self.inner.issue_challenge(now)
+    }
+    fn authenticate(
+        &mut self,
+        msg: &comms_core::identity::SiweMessage,
+        sig: &[u8; 65],
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.authenticate(msg, sig, now)
+    }
+    fn publish_key_package(
+        &mut self,
+        pubn: comms_proto::KeyPackagePublication,
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.publish_key_package(pubn, now)
+    }
+    fn take_key_package(
+        &mut self,
+        wallet: &WalletAddress,
+    ) -> Result<Option<comms_proto::KeyPackagePublication>, String> {
+        self.inner.take_key_package(wallet)
+    }
+    fn submit_claim(
+        &mut self,
+        submitter: WalletAddress,
+        submission: comms_proto::ClaimSubmission,
+    ) -> Result<(), String> {
+        self.inner.submit_claim(submitter, submission)
+    }
+    fn poll_claims(
+        &mut self,
+        poller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<Vec<comms_proto::ClaimSubmission>, String> {
+        self.inner.poll_claims(poller, token_hash)
+    }
+    fn register_group(&mut self, gid: GroupId, owner: WalletAddress, now: u64) -> Result<(), String> {
+        self.inner.register_group(gid, owner, now)
+    }
+    fn submit_as(&mut self, sender: WalletAddress, env: Envelope, now: u64) -> Result<u64, String> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("relay answer lost".into());
+        }
+        self.inner.submit_as(sender, env, now)
+    }
+    fn onboard(
+        &mut self,
+        gid: GroupId,
+        admin: WalletAddress,
+        joiner: WalletAddress,
+        welcome: Envelope,
+        ratchet_tree: Vec<u8>,
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.onboard(gid, admin, joiner, welcome, ratchet_tree, now)
+    }
+    fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
+        self.inner.fetch(wallet)
+    }
+    fn publish_invite(
+        &mut self,
+        inviter: WalletAddress,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), String> {
+        self.inner.publish_invite(inviter, gid, token_hash, group_info, expires_at)
+    }
+    fn revoke_invite(
+        &mut self,
+        caller: WalletAddress,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), String> {
+        self.inner.revoke_invite(caller, token_hash, report_used)
+    }
+    fn redeem_invite(
+        &mut self,
+        joiner: WalletAddress,
+        gid: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+        now: u64,
+    ) -> Result<(Vec<u8>, u64), String> {
+        self.inner.redeem_invite(joiner, gid, token, key_package, now)
+    }
+    fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
+        self.inner.ratchet_tree(gid)
+    }
+    fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String> {
+        self.inner.group_members(gid)
+    }
+    fn offboard(
+        &mut self,
+        gid: GroupId,
+        admin: WalletAddress,
+        removed: WalletAddress,
+        remove_commit: Envelope,
+        ratchet_tree: Vec<u8>,
+        now: u64,
+    ) -> Result<u64, String> {
+        self.inner.offboard(gid, admin, removed, remove_commit, ratchet_tree, now)
+    }
+}
+
+#[test]
+fn send_persists_the_advanced_ratchet_even_when_the_relay_answer_is_lost() {
+    // `create_message` advances the sender's message generation. If the relay accepted the
+    // ciphertext but its answer was lost (or the daemon died right after submitting), a restart
+    // from a snapshot taken BEFORE that advance would encrypt the next message under the same
+    // generation again. So the snapshot is written before the relay is called.
+    let domain = "relay.test";
+    let tmp = tempfile::tempdir().expect("tmp dir");
+    let state_dir = tmp.path().join("state");
+    let wallet = EthWallet::generate();
+    let seed = wallet.secret_bytes();
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let relay = FlakySubmitRelay {
+        inner: crate::relay::InProcessRelay::new(domain, wallet.address()).expect("relay"),
+        fail: fail.clone(),
+    };
+    let mut d = MemberDaemon::new_with_relay_persistent(
+        wallet,
+        Box::new(relay),
+        domain,
+        1000,
+        state_dir.clone(),
+        &seed,
+    )
+    .expect("daemon");
+    let gid = d.create_group("deals").expect("create");
+    let file = state_dir.join(crate::persist::STATE_FILE_NAME);
+    let before = std::fs::read(&file).expect("state file");
+
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(d.send(gid, "lost answer").is_err(), "the send reports the relay failure");
+    let after = std::fs::read(&file).expect("state file");
+    assert_ne!(
+        before, after,
+        "the advanced ratchet must be on disk even though the relay call failed"
+    );
+}

@@ -104,6 +104,11 @@ pub struct StateFile {
     pub mls_snapshot: Vec<u8>,
     /// The group registry.
     pub groups: Vec<PersistedGroup>,
+    /// GC-1: envelopes fetched from the relay but not consumed yet (ciphertext; the relay has
+    /// deleted its copy). `#[serde(default)]` so state files written before this field load with
+    /// an empty inbox.
+    #[serde(default)]
+    pub inbox: Vec<comms_proto::Envelope>,
 }
 
 impl StateFile {
@@ -119,6 +124,7 @@ impl StateFile {
             sig_pubkey,
             mls_snapshot,
             groups,
+            inbox: Vec::new(),
         }
     }
 }
@@ -305,6 +311,59 @@ mod tests {
         assert_eq!(got.groups[0].epoch, 2);
         assert_eq!(got.groups[0].members[0].role, Role::Owner);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_state_file_from_before_the_inbox_field_loads_with_an_empty_inbox() {
+        // GC-1 added `inbox`; files written by earlier daemons must still load.
+        #[derive(Serialize)]
+        struct StateFileV1NoInbox {
+            version: u32,
+            identity: Vec<u8>,
+            sig_pubkey: Vec<u8>,
+            mls_snapshot: Vec<u8>,
+            groups: Vec<PersistedGroup>,
+        }
+        let dir = tmp_dir();
+        let key = derive_state_key(b"seed-material-old");
+        let id = [0x11u8; 20];
+        let old = sample(&id);
+        let legacy = StateFileV1NoInbox {
+            version: old.version,
+            identity: old.identity.clone(),
+            sig_pubkey: old.sig_pubkey.clone(),
+            mls_snapshot: old.mls_snapshot.clone(),
+            groups: old.groups.clone(),
+        };
+        let mut pt = Vec::new();
+        ciborium::into_writer(&legacy, &mut pt).unwrap();
+        ensure_state_dir(&dir).unwrap();
+        fs::write(state_file_path(&dir), seal(&key, &pt).unwrap()).unwrap();
+        let back = load_state(&dir, &key, &id).unwrap().expect("loads");
+        assert!(back.inbox.is_empty());
+        assert_eq!(back.groups.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_inbox_roundtrips_through_disk() {
+        let dir = tmp_dir();
+        let key = derive_state_key(b"seed-material-inbox");
+        let id = [0x22u8; 20];
+        let mut state = sample(&id);
+        state.inbox = vec![comms_proto::Envelope {
+            group_id: GroupId([3u8; 32]),
+            epoch: comms_proto::EpochId(4),
+            kind: comms_proto::EnvelopeKind::Application,
+            sender: WalletAddress([5u8; 20]),
+            recipients: vec![WalletAddress([6u8; 20])],
+            ciphertext: b"opaque".to_vec(),
+            group_seq: Some(9),
+        }];
+        write_state(&dir, &key, &state).unwrap();
+        let back = load_state(&dir, &key, &id).unwrap().expect("loads");
+        assert_eq!(back.inbox, state.inbox);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

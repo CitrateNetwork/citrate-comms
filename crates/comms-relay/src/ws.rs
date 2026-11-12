@@ -68,6 +68,8 @@ type Registry = Arc<Mutex<HashMap<WalletAddress, mpsc::UnboundedSender<ServerFra
 pub struct RelayServer {
     service: Arc<Mutex<DeliveryService>>,
     registry: Registry,
+    /// Wallets whose current session asked for tracked delivery (GC-1 review P2).
+    ack_mode: Arc<Mutex<std::collections::HashSet<WalletAddress>>>,
     /// When set (via the admin surface), the relay rejects new mutating operations
     /// (submit/onboard/offboard/register/publish) but keeps serving reads.
     paused: Arc<AtomicBool>,
@@ -80,6 +82,7 @@ impl RelayServer {
         Arc::new(Self {
             service: Arc::new(Mutex::new(service)),
             registry: Arc::new(Mutex::new(HashMap::new())),
+            ack_mode: Arc::new(Mutex::new(std::collections::HashSet::new())),
             paused: Arc::new(AtomicBool::new(false)),
             conns: Arc::new(AtomicUsize::new(0)),
         })
@@ -103,6 +106,12 @@ impl RelayServer {
     /// The relay's logical domain (bound in the SIWE handshake).
     pub async fn domain(&self) -> String {
         self.service.lock().await.domain().to_string()
+    }
+
+    /// Drop mailbox entries older than the TTL (see
+    /// [`DeliveryService::expire_mailboxes`]). Returns how many were dropped.
+    pub async fn expire_mailboxes(&self, now_ms: u64) -> Result<usize, crate::RelayError> {
+        self.service.lock().await.expire_mailboxes(now_ms)
     }
 
     /// `(group_count, audit_record_count)` — for the admin health snapshot.
@@ -170,6 +179,9 @@ impl RelayServer {
         let _ = out_tx.send(ServerFrame::Challenge { nonce });
 
         let mut authed: Option<WalletAddress> = None;
+        // GC-1 review P2: set by EnableDeliveryAcks, which a client sends before it
+        // authenticates, so even the sign-in delivery pass is tracked.
+        let mut wants_acks = false;
         // CM2-B-B009: the auto-issued challenge above counts as the first.
         let mut challenge_count: u32 = 1;
         while let Some(msg) = read.next().await {
@@ -191,7 +203,8 @@ impl RelayServer {
                             continue;
                         }
                     }
-                    self.dispatch(frame, &out_tx, &mut authed).await
+                    self.dispatch(frame, &out_tx, &mut authed, &mut wants_acks)
+                        .await
                 }
                 Err(_) => {
                     let _ = out_tx.send(ServerFrame::Error {
@@ -203,6 +216,9 @@ impl RelayServer {
 
         if let Some(w) = authed {
             self.registry.lock().await.remove(&w);
+            // Unacknowledged tracked deliveries go out again on the next session.
+            self.ack_mode.lock().await.remove(&w);
+            self.service.lock().await.release_in_flight(&w);
             // CM2-B-A011 / B019: end the authenticated session on disconnect so it does
             // not persist for the process lifetime (no revocation + unbounded growth).
             self.service.lock().await.end_session(&w);
@@ -216,6 +232,7 @@ impl RelayServer {
         frame: ClientFrame,
         out_tx: &mpsc::UnboundedSender<ServerFrame>,
         authed: &mut Option<WalletAddress>,
+        wants_acks: &mut bool,
     ) {
         let now = now_ms();
         // Pause gate: while paused, reject new mutating operations (reads still work).
@@ -252,9 +269,41 @@ impl RelayServer {
                 match result {
                     Ok(addr) => {
                         self.registry.lock().await.insert(addr, out_tx.clone());
+                        if *wants_acks {
+                            self.ack_mode.lock().await.insert(addr);
+                        } else {
+                            self.ack_mode.lock().await.remove(&addr);
+                        }
+                        // A new session: whatever an earlier one left unacknowledged goes out again.
+                        self.service.lock().await.release_in_flight(&addr);
                         *authed = Some(addr);
                         let _ = out_tx.send(ServerFrame::Authenticated { address: addr });
+                        // comms#4: hand over whatever waited while this wallet was away,
+                        // including across a relay restart, without waiting for the next
+                        // submit to trigger a delivery pass.
+                        self.deliver_pending().await;
                     }
+                    Err(e) => send_err(out_tx, &e.to_string()),
+                }
+            }
+            ClientFrame::EnableDeliveryAcks => {
+                // Connection-local opt-in; touches no group or directory state until the
+                // session authenticates.
+                *wants_acks = true;
+                ack(out_tx, None);
+                if let Some(addr) = *authed {
+                    self.ack_mode.lock().await.insert(addr);
+                    self.service.lock().await.release_in_flight(&addr);
+                    self.deliver_pending().await;
+                }
+            }
+            ClientFrame::AckDelivered { arrivals } => {
+                let Some(addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                let r = { self.service.lock().await.ack(&addr, &arrivals) };
+                match r {
+                    Ok(_) => ack(out_tx, None),
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
             }
@@ -539,10 +588,26 @@ impl RelayServer {
                 .map(|(w, s)| (*w, s.clone()))
                 .collect()
         };
+        let tracked = self.ack_mode.lock().await.clone();
         let mut svc = self.service.lock().await;
         for (wallet, tx) in targets {
-            for env in svc.fetch(&wallet) {
-                let _ = tx.send(ServerFrame::Deliver(env));
+            // GC-1 review P2: a session that asked for acks gets tracked deliveries; the rows
+            // stay until it acknowledges them.
+            if tracked.contains(&wallet) {
+                for (arrival, envelope) in svc.take_for_ack(&wallet) {
+                    let _ = tx.send(ServerFrame::DeliverTracked { arrival, envelope });
+                }
+                continue;
+            }
+            match svc.fetch(&wallet) {
+                Ok(envs) => {
+                    for env in envs {
+                        let _ = tx.send(ServerFrame::Deliver(env));
+                    }
+                }
+                // The mailbox is left intact on a store error, so nothing is lost: the
+                // next delivery pass retries it.
+                Err(e) => eprintln!("relay: mailbox fetch failed, will retry: {e}"),
             }
         }
     }

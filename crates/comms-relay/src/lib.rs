@@ -197,6 +197,24 @@ pub struct OffboardRequest<'a> {
     pub ratchet_tree: Vec<u8>,
 }
 
+/// One queued delivery in a recipient's mailbox (comms#4). The envelope itself is the
+/// copy already held in the group's durable log; the row persisted in `CF_MAILBOX` is
+/// only a [`MailboxRef`] to it.
+struct MailboxItem {
+    /// Relay-wide arrival counter: the mailbox key suffix, and the delivery order.
+    arrival: u64,
+    enqueued_ms: u64,
+    envelope: Envelope,
+}
+
+/// The on-disk mailbox row: which logged envelope is waiting, and since when.
+#[derive(Serialize, Deserialize)]
+struct MailboxRef {
+    group_id: GroupId,
+    group_seq: u64,
+    enqueued_ms: u64,
+}
+
 /// The server-blind relay.
 pub struct DeliveryService {
     domain: String,
@@ -216,8 +234,14 @@ pub struct DeliveryService {
     /// `CF_REFERRALS`; the row index is the vector position (never deleted).
     referrals: Vec<ReferralRecord>,
     groups: HashMap<GroupId, GroupState>,
-    /// Per-wallet delivery mailboxes (the fan-out target).
-    mailboxes: HashMap<WalletAddress, Vec<Envelope>>,
+    /// Per-wallet delivery mailboxes (the fan-out target). Durable in `CF_MAILBOX`
+    /// (comms#4), so a recipient offline across a relay restart still gets them.
+    mailboxes: HashMap<WalletAddress, Vec<MailboxItem>>,
+    /// Next relay-wide mailbox arrival number (one past the largest on disk).
+    next_arrival: u64,
+    /// Tracked deliveries handed to a session and not yet acknowledged, by wallet. In memory:
+    /// a relay restart or a new session sends them again.
+    in_flight: HashMap<WalletAddress, BTreeSet<u64>>,
     /// Authenticated sessions (wallet proved control via SIWE).
     sessions: BTreeSet<WalletAddress>,
     audit: AuditChain,
@@ -242,6 +266,8 @@ impl DeliveryService {
             referrals: Vec::new(),
             groups: HashMap::new(),
             mailboxes: HashMap::new(),
+            next_arrival: 0,
+            in_flight: HashMap::new(),
             sessions: BTreeSet::new(),
             audit: AuditChain::new(genesis_ts_ms)?,
             store: None,
@@ -359,6 +385,41 @@ impl DeliveryService {
         referral_rows.sort_by_key(|(seq, _)| *seq);
         let referrals: Vec<ReferralRecord> = referral_rows.into_iter().map(|(_, r)| r).collect();
 
+        // comms#4 — rebuild the delivery mailboxes. Each row points into a group's
+        // replayed log; a row whose envelope is missing means the store is damaged, so
+        // the relay refuses to start rather than silently dropping a delivery.
+        let mut mailboxes: HashMap<WalletAddress, Vec<MailboxItem>> = HashMap::new();
+        let mut next_arrival = 0u64;
+        for (k, v) in store.scan(store::CF_MAILBOX)? {
+            if k.len() != 28 {
+                return Err(RelayError::CorruptKey);
+            }
+            let wallet = WalletAddress(k[..20].try_into().map_err(|_| RelayError::CorruptKey)?);
+            let arrival =
+                u64::from_be_bytes(k[20..].try_into().map_err(|_| RelayError::CorruptKey)?);
+            let r: MailboxRef = canonical::from_slice(&v).map_err(RelayError::Decode)?;
+            let envelope = groups
+                .get(&r.group_id)
+                .and_then(|g| g.log.iter().find(|e| e.group_seq == Some(r.group_seq)))
+                .cloned()
+                .ok_or(RelayError::DanglingMailboxRow {
+                    wallet: wallet.to_hex(),
+                    arrival,
+                    group_seq: r.group_seq,
+                })?;
+            next_arrival = next_arrival.max(arrival.saturating_add(1));
+            mailboxes.entry(wallet).or_default().push(MailboxItem {
+                arrival,
+                enqueued_ms: r.enqueued_ms,
+                envelope,
+            });
+        }
+        // `scan` is in key order (wallet ‖ arrival BE), so each mailbox is already in
+        // arrival order; sort anyway so the order never depends on the scan.
+        for items in mailboxes.values_mut() {
+            items.sort_by_key(|i| i.arrival);
+        }
+
         Ok(Self {
             domain: domain.into(),
             owner,
@@ -368,7 +429,9 @@ impl DeliveryService {
             invites,
             referrals,
             groups,
-            mailboxes: HashMap::new(),
+            mailboxes,
+            next_arrival,
+            in_flight: HashMap::new(),
             sessions: BTreeSet::new(),
             audit,
             store: Some(store),
@@ -415,6 +478,31 @@ impl DeliveryService {
                 store::CF_ENVELOPES,
                 &store::seq_key(&gid.0, seq),
                 &canonical::to_vec(env).map_err(RelayError::Decode)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Persist one mailbox row (comms#4): a reference to the logged envelope
+    /// `gid`/`seq`, keyed `wallet ‖ arrival`.
+    fn persist_mailbox_ref(
+        &self,
+        wallet: &WalletAddress,
+        arrival: u64,
+        gid: &GroupId,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<(), RelayError> {
+        if let Some(s) = &self.store {
+            let r = MailboxRef {
+                group_id: *gid,
+                group_seq: seq,
+                enqueued_ms: now_ms,
+            };
+            s.put(
+                store::CF_MAILBOX,
+                &store::seq_key(&wallet.0, arrival),
+                &canonical::to_vec(&r).map_err(RelayError::Decode)?,
             )?;
         }
         Ok(())
@@ -1169,9 +1257,18 @@ impl DeliveryService {
         self.persist_envelope(&gid, seq, &envelope)?;
         self.persist_group(&gid)?;
 
-        // Fan out to the named recipients (the relay's unavoidable metadata — R4).
+        // Fan out to the named recipients (the relay's unavoidable metadata — R4). The
+        // mailbox row is written before the in-memory entry, so whatever a recipient can
+        // be handed is also on disk and survives a restart (comms#4).
         for r in &envelope.recipients {
-            self.mailboxes.entry(*r).or_default().push(envelope.clone());
+            let arrival = self.next_arrival;
+            self.next_arrival += 1;
+            self.persist_mailbox_ref(r, arrival, &gid, seq, now_ms)?;
+            self.mailboxes.entry(*r).or_default().push(MailboxItem {
+                arrival,
+                enqueued_ms: now_ms,
+                envelope: envelope.clone(),
+            });
         }
 
         self.audit_append(
@@ -1189,12 +1286,115 @@ impl DeliveryService {
         Ok(seq)
     }
 
-    /// Drain a wallet's mailbox (the client's poll). In-order by arrival.
-    pub fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
-        self.mailboxes
-            .get_mut(wallet)
-            .map(std::mem::take)
+    /// How long an undelivered envelope waits in a mailbox: 30 days (planset
+    /// 2026-11-07-v060 §5). The ciphertext log itself is not affected.
+    pub const MAILBOX_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+    /// Drop every mailbox entry older than [`MAILBOX_TTL_MS`](Self::MAILBOX_TTL_MS)
+    /// at `now_ms` (an entry exactly at the TTL is kept). Returns how many entries
+    /// were dropped. Durable: the rows are deleted from the store first, in one batch,
+    /// and memory changes only after that succeeds. The ciphertext log is untouched.
+    pub fn expire_mailboxes(&mut self, now_ms: u64) -> Result<usize, RelayError> {
+        let expired = |i: &MailboxItem| now_ms.saturating_sub(i.enqueued_ms) > Self::MAILBOX_TTL_MS;
+        let keys: Vec<Vec<u8>> = self
+            .mailboxes
+            .iter()
+            .flat_map(|(w, items)| {
+                items
+                    .iter()
+                    .filter(|i| expired(i))
+                    .map(|i| store::seq_key(&w.0, i.arrival))
+            })
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        if let Some(s) = &self.store {
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
+        for items in self.mailboxes.values_mut() {
+            items.retain(|i| !expired(i));
+        }
+        self.mailboxes.retain(|_, items| !items.is_empty());
+        Ok(keys.len())
+    }
+
+    /// Drain a wallet's mailbox (the client's poll), in arrival order. The rows are
+    /// deleted from the store (one atomic batch) BEFORE the mailbox is emptied, so on
+    /// a store error nothing is handed out and nothing is lost: the mailbox is intact
+    /// and the next fetch retries.
+    pub fn fetch(&mut self, wallet: &WalletAddress) -> Result<Vec<Envelope>, RelayError> {
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Ok(Vec::new());
+        };
+        if let Some(s) = &self.store {
+            let keys: Vec<Vec<u8>> = items
+                .iter()
+                .map(|i| store::seq_key(&wallet.0, i.arrival))
+                .collect();
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
+        Ok(self
+            .mailboxes
+            .remove(wallet)
             .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.envelope)
+            .collect())
+    }
+
+    /// GC-1 review P2 (ack-then-delete): the wallet's queued deliveries that are not
+    /// already in flight on a session, as `(arrival, envelope)`, now marked in flight. The
+    /// rows stay on disk until [`ack`](Self::ack); [`release_in_flight`](Self::release_in_flight)
+    /// (a new session, a disconnect) makes them deliverable again.
+    pub fn take_for_ack(&mut self, wallet: &WalletAddress) -> Vec<(u64, Envelope)> {
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Vec::new();
+        };
+        let sent = self.in_flight.entry(*wallet).or_default();
+        let mut out = Vec::new();
+        for i in items {
+            if sent.insert(i.arrival) {
+                out.push((i.arrival, i.envelope.clone()));
+            }
+        }
+        out
+    }
+
+    /// Forget which of `wallet`'s deliveries are in flight, so they are sent again.
+    pub fn release_in_flight(&mut self, wallet: &WalletAddress) {
+        self.in_flight.remove(wallet);
+    }
+
+    /// Delete `wallet`'s mailbox rows for `arrivals` (store first, one batch), after the
+    /// client stored them. Arrival numbers that are not `wallet`'s are ignored. Returns how
+    /// many rows were removed.
+    pub fn ack(&mut self, wallet: &WalletAddress, arrivals: &[u64]) -> Result<usize, RelayError> {
+        let wanted: BTreeSet<u64> = arrivals.iter().copied().collect();
+        let Some(items) = self.mailboxes.get(wallet) else {
+            return Ok(0);
+        };
+        let keys: Vec<Vec<u8>> = items
+            .iter()
+            .filter(|i| wanted.contains(&i.arrival))
+            .map(|i| store::seq_key(&wallet.0, i.arrival))
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        if let Some(s) = &self.store {
+            s.delete_many(store::CF_MAILBOX, &keys)?;
+        }
+        if let Some(items) = self.mailboxes.get_mut(wallet) {
+            items.retain(|i| !wanted.contains(&i.arrival));
+            if items.is_empty() {
+                self.mailboxes.remove(wallet);
+            }
+        }
+        if let Some(sent) = self.in_flight.get_mut(wallet) {
+            sent.retain(|a| !wanted.contains(a));
+        }
+        Ok(keys.len())
     }
 
     // ─────────────────────── introspection / audit ───────────────────────
@@ -1289,6 +1489,14 @@ pub enum RelayError {
     Decode(comms_proto::ProtoError),
     #[error("corrupt store key")]
     CorruptKey,
+    /// A mailbox row points at an envelope the log does not hold: the store is damaged.
+    /// Named so an operator can find and remove that one row.
+    #[error("mailbox row for {wallet} arrival {arrival} points at missing group_seq {group_seq}")]
+    DanglingMailboxRow {
+        wallet: String,
+        arrival: u64,
+        group_seq: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1296,6 +1504,7 @@ mod tests {
     use super::*;
     use comms_core::identity::EthWallet;
     use comms_proto::{EpochId, CITRATE_CHAIN_ID};
+    use std::path::Path;
 
     fn login(relay: &mut DeliveryService, wallet: &EthWallet, now: u64) {
         let nonce = relay.issue_challenge(now);
@@ -1525,7 +1734,7 @@ mod tests {
             .iter()
             .any(|e| e.kind == EnvelopeKind::Application && e.ciphertext == ct));
         // Bob receives the fanned-out envelope.
-        let inbox = relay.fetch(&bob.address());
+        let inbox = relay.fetch(&bob.address()).unwrap();
         assert_eq!(
             inbox
                 .iter()
@@ -1677,6 +1886,323 @@ mod tests {
             relay.audit().verify_integrity().unwrap();
             assert!(relay.audit().len() >= 4);
         }
+    }
+
+    // ───────── GC-1 (comms#4): the delivery mailbox survives a relay restart ─────────
+
+    /// A durable relay with Alice (owner) and Bob onboarded into `gid`. Bob's Welcome
+    /// is drained so each test starts from an empty mailbox.
+    fn durable_pair(dir: &Path, master: [u8; 32], gid: GroupId) -> (EthWallet, EthWallet) {
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let mut relay =
+            DeliveryService::open(dir, "relay.citrate.ai", alice.address(), master, 0).unwrap();
+        login(&mut relay, &alice, 10);
+        login(&mut relay, &bob, 11);
+        relay.register_group(gid, alice.address(), 12).unwrap();
+        relay
+            .onboard(
+                gid,
+                alice.address(),
+                None,
+                bob.address(),
+                envelope(
+                    gid,
+                    alice.address(),
+                    EnvelopeKind::Welcome,
+                    1,
+                    b"welcome-ct",
+                    &[bob.address()],
+                ),
+                b"ratchet-tree".to_vec(),
+                13,
+            )
+            .unwrap();
+        let welcome = relay.fetch(&bob.address()).unwrap();
+        assert_eq!(welcome.len(), 1);
+        (alice, bob)
+    }
+
+    fn send_app(
+        relay: &mut DeliveryService,
+        from: &EthWallet,
+        to: &EthWallet,
+        gid: GroupId,
+        ct: &[u8],
+        now: u64,
+    ) {
+        relay
+            .submit_as(
+                from.address(),
+                envelope(
+                    gid,
+                    from.address(),
+                    EnvelopeKind::Application,
+                    1,
+                    ct,
+                    &[to.address()],
+                ),
+                now,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn messages_survive_relay_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [7u8; 32];
+        let gid = GroupId([0x41; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+
+        // Bob is offline; Alice sends three messages.
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            for (i, ct) in [b"m-one".as_slice(), b"m-two", b"m-three"]
+                .iter()
+                .enumerate()
+            {
+                send_app(&mut relay, &alice, &bob, gid, ct, 22 + i as u64);
+            }
+        } // relay process ends here
+
+        // The relay restarts; Bob comes online and drains his mailbox.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .unwrap();
+        login(&mut relay, &bob, 31);
+        let got = relay.fetch(&bob.address()).unwrap();
+        let cts: Vec<&[u8]> = got.iter().map(|e| e.ciphertext.as_slice()).collect();
+        assert_eq!(
+            cts,
+            vec![b"m-one".as_slice(), b"m-two", b"m-three"],
+            "all three, in order"
+        );
+        let seqs: Vec<Option<u64>> = got.iter().map(|e| e.group_seq).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "relay order kept: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn fetched_envelopes_are_not_redelivered_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [8u8; 32];
+        let gid = GroupId([0x42; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            send_app(&mut relay, &alice, &bob, gid, b"once", 22);
+            send_app(&mut relay, &alice, &bob, gid, b"twice", 23);
+        }
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                    .unwrap();
+            let got = relay.fetch(&bob.address()).unwrap();
+            assert_eq!(got.len(), 2, "delivered once after the first restart");
+        }
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 40)
+                .unwrap();
+        assert!(
+            relay.fetch(&bob.address()).unwrap().is_empty(),
+            "a drained envelope must not come back after a second restart"
+        );
+        // The durable log itself is untouched by draining the mailbox.
+        assert_eq!(relay.group_log(&gid).unwrap().len(), 3); // welcome + 2
+    }
+
+    #[test]
+    fn mailbox_entries_expire_after_the_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [9u8; 32];
+        let gid = GroupId([0x43; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        let t0 = 1_000_000u64;
+        let ttl = DeliveryService::MAILBOX_TTL_MS;
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                    .unwrap();
+            login(&mut relay, &alice, t0);
+            send_app(&mut relay, &alice, &bob, gid, b"old", t0);
+            send_app(&mut relay, &alice, &bob, gid, b"fresh", t0 + ttl);
+        }
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                .unwrap();
+        // Exactly at the TTL an entry is still kept; one millisecond later it is dropped.
+        assert_eq!(relay.expire_mailboxes(t0 + ttl).unwrap(), 0);
+        assert_eq!(relay.expire_mailboxes(t0 + ttl + 1).unwrap(), 1);
+        let got = relay.fetch(&bob.address()).unwrap();
+        let cts: Vec<&[u8]> = got.iter().map(|e| e.ciphertext.as_slice()).collect();
+        assert_eq!(
+            cts,
+            vec![b"fresh".as_slice()],
+            "the 30-day-old entry is dropped"
+        );
+    }
+
+    #[test]
+    fn expire_mailboxes_sweeps_wallets_that_never_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [10u8; 32];
+        let gid = GroupId([0x44; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        let t0 = 5_000u64;
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                    .unwrap();
+            login(&mut relay, &alice, t0);
+            send_app(&mut relay, &alice, &bob, gid, b"stale", t0);
+            let later = t0 + DeliveryService::MAILBOX_TTL_MS + 1;
+            assert_eq!(relay.expire_mailboxes(later).unwrap(), 1);
+            assert_eq!(relay.expire_mailboxes(later).unwrap(), 0, "idempotent");
+        }
+        // The sweep is durable: the expired entry is gone after a restart too.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, t0)
+                .unwrap();
+        assert!(relay.fetch(&bob.address()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mailbox_on_disk_holds_ciphertext_only() {
+        // The mailbox CF stores references into the ciphertext log, never a payload
+        // the relay could read. A canary in the (already opaque) ciphertext must not
+        // appear in plaintext anywhere under the store directory.
+        let dir = tempfile::tempdir().unwrap();
+        let master = [11u8; 32];
+        let gid = GroupId([0x45; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            send_app(&mut relay, &alice, &bob, gid, b"CANARY-MAILBOX-7f3a", 22);
+        }
+        let canary = b"CANARY-MAILBOX-7f3a";
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes.windows(canary.len()).any(|w| w == canary),
+                    "canary found in {}",
+                    path.display()
+                );
+            }
+        }
+        // And it is still deliverable after the restart.
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .unwrap();
+        assert_eq!(relay.fetch(&bob.address()).unwrap().len(), 1);
+    }
+
+    // ───────── GC-1 review P2: rows are deleted on the client's ack, not on send ─────────
+
+    #[test]
+    fn a_tracked_delivery_stays_until_acked_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [12u8; 32];
+        let gid = GroupId([0x46; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            let mut relay =
+                DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                    .unwrap();
+            login(&mut relay, &alice, 21);
+            send_app(&mut relay, &alice, &bob, gid, b"a1", 22);
+            send_app(&mut relay, &alice, &bob, gid, b"a2", 23);
+            let first = relay.take_for_ack(&bob.address());
+            assert_eq!(first.len(), 2, "handed out");
+            assert!(
+                relay.take_for_ack(&bob.address()).is_empty(),
+                "in flight, not resent"
+            );
+            // The session drops before any ack.
+            relay.release_in_flight(&bob.address());
+            let again = relay.take_for_ack(&bob.address());
+            assert_eq!(again.len(), 2, "resent after the session ended");
+            // Ack one of them.
+            assert_eq!(relay.ack(&bob.address(), &[again[0].0]).unwrap(), 1);
+        }
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .unwrap();
+        let left = relay.take_for_ack(&bob.address());
+        let cts: Vec<&[u8]> = left.iter().map(|(_, e)| e.ciphertext.as_slice()).collect();
+        assert_eq!(
+            cts,
+            vec![b"a2".as_slice()],
+            "only the unacked one is left after a restart"
+        );
+    }
+
+    #[test]
+    fn an_ack_only_removes_the_acking_wallets_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [13u8; 32];
+        let gid = GroupId([0x47; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        let mut relay =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 20)
+                .unwrap();
+        login(&mut relay, &alice, 21);
+        send_app(&mut relay, &alice, &bob, gid, b"for-bob", 22);
+        let bobs = relay.take_for_ack(&bob.address());
+        assert_eq!(bobs.len(), 1);
+        // Alice names bob's arrival number: nothing happens.
+        assert_eq!(relay.ack(&alice.address(), &[bobs[0].0]).unwrap(), 0);
+        relay.release_in_flight(&bob.address());
+        assert_eq!(
+            relay.take_for_ack(&bob.address()).len(),
+            1,
+            "still queued for bob"
+        );
+    }
+
+    #[test]
+    fn a_damaged_mailbox_row_is_named_when_the_relay_refuses_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [14u8; 32];
+        let gid = GroupId([0x48; 32]);
+        let (alice, bob) = durable_pair(dir.path(), master, gid);
+        {
+            // A row that points at an envelope the log does not have.
+            let store = EncryptedStore::open(dir.path(), master).unwrap();
+            let bogus = MailboxRef {
+                group_id: gid,
+                group_seq: 9_999,
+                enqueued_ms: 1,
+            };
+            store
+                .put(
+                    store::CF_MAILBOX,
+                    &store::seq_key(&bob.address().0, 77),
+                    &canonical::to_vec(&bogus).unwrap(),
+                )
+                .unwrap();
+        }
+        let err =
+            DeliveryService::open(dir.path(), "relay.citrate.ai", alice.address(), master, 30)
+                .err()
+                .expect("refuses to start");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&bob.address().to_hex()) && msg.contains("77"),
+            "{msg}"
+        );
     }
 
     #[test]

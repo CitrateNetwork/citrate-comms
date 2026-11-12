@@ -246,7 +246,13 @@ impl AgentBridge {
             return out;
         };
         let group_hex = format!("0x{}", hex::encode(&gid.0[..4]));
-        for e in relay.fetch(&self.wallet.address()) {
+        // On a relay store error the mailbox is left intact, so the next poll retries
+        // and nothing is lost; this poll simply delivers nothing.
+        let inbox = relay.fetch(&self.wallet.address()).unwrap_or_else(|e| {
+            eprintln!("agent-bridge: relay fetch failed, will retry: {e}");
+            Vec::new()
+        });
+        for e in inbox {
             if e.kind != EnvelopeKind::Application {
                 continue;
             }
@@ -721,7 +727,7 @@ mod tests {
         // The agent posts a reply; the admin decrypts it.
         let seq = agent.handle(&mut relay, AgentOutbound::Send { group: "deals".into(), text: "Summary: Northwind wants a self-hosted, air-gapped pilot; moved to Proposal.".into() }, now).unwrap();
         assert!(seq > 0);
-        let admin_inbox = relay.fetch(&admin_w.address());
+        let admin_inbox = relay.fetch(&admin_w.address()).unwrap();
         let app = admin_inbox
             .iter()
             .find(|e| e.kind == EnvelopeKind::Application)
@@ -1067,7 +1073,7 @@ mod tests {
         serve_res.unwrap();
 
         // The admin decrypts the agent's reply off the relay.
-        let admin_inbox = relay.fetch(&admin_w.address());
+        let admin_inbox = relay.fetch(&admin_w.address()).unwrap();
         let app = admin_inbox
             .iter()
             .find(|e| e.kind == EnvelopeKind::Application)
