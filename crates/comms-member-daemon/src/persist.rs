@@ -91,6 +91,9 @@ pub struct PersistedGroup {
     pub members: Vec<PersistedMember>,
 }
 
+/// One group's consumed window as persisted: `(group, [(group_seq, BLAKE3(ciphertext))])`.
+pub type PersistedWindow = (GroupId, Vec<(u64, [u8; 32])>);
+
 /// The full daemon snapshot: MLS secrets + group registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
@@ -109,6 +112,10 @@ pub struct StateFile {
     /// an empty inbox.
     #[serde(default)]
     pub inbox: Vec<comms_proto::Envelope>,
+    /// comms #51 item 1 / #55: per group, the consumed window `(group_seq, BLAKE3(ciphertext))`,
+    /// so only an exact resent copy is dropped. `#[serde(default)]` for older state files.
+    #[serde(default)]
+    pub consumed: Vec<PersistedWindow>,
 }
 
 impl StateFile {
@@ -125,6 +132,7 @@ impl StateFile {
             mls_snapshot,
             groups,
             inbox: Vec::new(),
+            consumed: Vec::new(),
         }
     }
 }
@@ -341,6 +349,10 @@ mod tests {
         fs::write(state_file_path(&dir), seal(&key, &pt).unwrap()).unwrap();
         let back = load_state(&dir, &key, &id).unwrap().expect("loads");
         assert!(back.inbox.is_empty());
+        assert!(
+            back.consumed.is_empty(),
+            "no consumed marks in an older file"
+        );
         assert_eq!(back.groups.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -360,9 +372,11 @@ mod tests {
             ciphertext: b"opaque".to_vec(),
             group_seq: Some(9),
         }];
+        state.consumed = vec![(GroupId([3u8; 32]), vec![(9, [7u8; 32])])];
         write_state(&dir, &key, &state).unwrap();
         let back = load_state(&dir, &key, &id).unwrap().expect("loads");
         assert_eq!(back.inbox, state.inbox);
+        assert_eq!(back.consumed, state.consumed);
         let _ = fs::remove_dir_all(&dir);
     }
 
