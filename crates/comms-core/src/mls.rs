@@ -193,6 +193,7 @@ impl MlsMember {
     /// TLS-serialized public KeyPackage to publish to the relay directory.
     pub fn fresh_key_package(&self) -> Result<Vec<u8>, MlsError> {
         let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities())
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -240,8 +241,20 @@ impl MlsMember {
     /// owner from the group context, which the key schedule binds, so the role-grant
     /// chain has an anchor no relay can change.
     pub fn create_group_owned(&self, owner: [u8; 20]) -> Result<GroupHandle, MlsError> {
-        let _ = owner;
-        self.create_group()
+        let config = MlsGroupCreateConfig::builder()
+            .ciphersuite(CIPHERSUITE)
+            .use_ratchet_tree_extension(true)
+            .capabilities(capabilities())
+            .with_group_context_extensions(owner_extensions(owner)?)
+            .build();
+        let group = MlsGroup::new(
+            &self.provider,
+            &self.signer,
+            &config,
+            self.credential_with_key.clone(),
+        )
+        .map_err(|e| MlsError::Group(format!("create: {e:?}")))?;
+        Ok(GroupHandle { group })
     }
 
     /// **INVITE-S2 (joiner).** Self-admit into a group by MLS **external commit**, using
@@ -290,6 +303,13 @@ impl MlsMember {
                 self.credential_with_key.clone(),
             )
             .map_err(|e| MlsError::Group(format!("external commit build_group: {e:?}")))?
+            // GC-2: the joiner's leaf must support the owner extension in the group context.
+            .leaf_node_parameters(
+                LeafNodeParameters::builder()
+                    .with_credential_with_key(self.credential_with_key.clone())
+                    .with_capabilities(capabilities())
+                    .build(),
+            )
             .load_psks(self.provider.storage())
             .map_err(|e| MlsError::Group(format!("external commit load_psks: {e:?}")))?
             .build(
@@ -561,8 +581,19 @@ impl GroupHandle {
         commit_bytes: &[u8],
     ) -> Result<(), MlsError> {
         let processed = self.process(member, commit_bytes)?;
+        let committer = basic_credential_identity(processed.credential())?;
         match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // GC-2: the owner in the group context changes only by a commit from the
+                // current owner. OpenMLS accepts a GroupContextExtensions commit from any
+                // member, so this is checked here, before the merge.
+                let before = self.owner();
+                let after = owner_in(staged.group_context().extensions());
+                if after != before && before.map(|o| o.to_vec()) != Some(committer) {
+                    return Err(MlsError::Group(
+                        "owner change not committed by the current owner".into(),
+                    ));
+                }
                 self.group
                     .merge_staged_commit(&member.provider, *staged)
                     .map_err(|e| MlsError::Group(format!("merge staged: {e:?}")))?;
@@ -578,7 +609,7 @@ impl GroupHandle {
     /// GC-2: the group owner's wallet from the group context, or `None` for a group
     /// created without the owner extension (before 0.6.0).
     pub fn owner(&self) -> Option<[u8; 20]> {
-        None
+        owner_in(self.group.extensions())
     }
 
     /// GC-2: hand the group to `new_owner`. Only the current owner may do this; the
@@ -589,10 +620,28 @@ impl GroupHandle {
         member: &MlsMember,
         new_owner: [u8; 20],
     ) -> Result<Vec<u8>, MlsError> {
-        let _ = (member, new_owner);
-        Err(MlsError::Group(
-            "RED: owner transfer not implemented".into(),
-        ))
+        let current = self
+            .owner()
+            .ok_or_else(|| MlsError::Group("this group has no owner extension".into()))?;
+        if basic_credential_identity(&member.credential_with_key.credential)? != current {
+            return Err(MlsError::Group(
+                "only the current owner can transfer the group".into(),
+            ));
+        }
+        let (commit, _welcome, _gi) = self
+            .group
+            .update_group_context_extensions(
+                &member.provider,
+                owner_extensions(new_owner)?,
+                &member.signer,
+            )
+            .map_err(|e| MlsError::Group(format!("owner transfer: {e:?}")))?;
+        self.group
+            .merge_pending_commit(&member.provider)
+            .map_err(|e| MlsError::Group(format!("merge commit: {e:?}")))?;
+        commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Codec(format!("commit serialize: {e:?}")))
     }
 
     /// Encrypt an application message. Returns opaque ciphertext bytes.
@@ -641,12 +690,38 @@ impl GroupHandle {
     }
 }
 
+/// GC-2: our leaf capabilities, advertising the owner extension type (RFC 9420 requires
+/// every member to support each group-context extension).
+fn capabilities() -> Capabilities {
+    Capabilities::new(
+        None,
+        None,
+        Some(&[ExtensionType::Unknown(OWNER_EXTENSION_TYPE)]),
+        None,
+        None,
+    )
+}
+
+/// The owner named by `ext`, if it carries a well-formed owner extension.
+fn owner_in(ext: &Extensions<GroupContext>) -> Option<[u8; 20]> {
+    ext.unknown(OWNER_EXTENSION_TYPE)
+        .and_then(|u| <[u8; 20]>::try_from(u.0.as_slice()).ok())
+}
+
 /// The group-context extensions that name `owner` (GC-2).
+///
+/// The group context also requires the owner extension type of every member
+/// (RequiredCapabilities), so a member whose client cannot read the owner cannot join, and
+/// OpenMLS accepts a later GroupContextExtensions commit that changes the owner.
 pub(crate) fn owner_extensions(owner: [u8; 20]) -> Result<Extensions<GroupContext>, MlsError> {
-    Extensions::single(Extension::Unknown(
-        OWNER_EXTENSION_TYPE,
-        UnknownExtension(owner.to_vec()),
-    ))
+    Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(OWNER_EXTENSION_TYPE)],
+            &[],
+            &[],
+        )),
+        Extension::Unknown(OWNER_EXTENSION_TYPE, UnknownExtension(owner.to_vec())),
+    ])
     .map_err(|e| MlsError::Group(format!("owner extension: {e:?}")))
 }
 

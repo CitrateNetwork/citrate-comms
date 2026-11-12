@@ -12,12 +12,20 @@ pub const GRANT_PREFIX: &str = "\u{0}citrate:role-grant:v1:";
 
 /// Encode a signed grant as a message body.
 pub fn encode_grant_message(a: &RoleAssertion) -> String {
-    let _ = a;
-    String::new()
+    // A RoleAssertion is plain data; canonical encoding cannot fail for it.
+    let bytes = comms_proto::canonical::to_vec(a).unwrap_or_default();
+    format!("{GRANT_PREFIX}{}", hex::encode(bytes))
 }
 
 /// `None`: not a grant message. `Some(Err)`: has the prefix but does not decode.
 pub fn decode_grant_message(body: &str) -> Option<Result<RoleAssertion, String>> {
-    let _ = body;
-    None
+    let rest = body.strip_prefix(GRANT_PREFIX)?;
+    Some(
+        hex::decode(rest)
+            .map_err(|_| "role grant is not hex".to_string())
+            .and_then(|b| {
+                comms_proto::canonical::from_slice(&b)
+                    .map_err(|e| format!("role grant does not decode: {e}"))
+            }),
+    )
 }
