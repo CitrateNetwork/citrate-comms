@@ -928,6 +928,175 @@ fn a_resent_envelope_is_dropped_once_consumed() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(seen, vec!["once".to_string()], "delivered exactly once");
+    let drops = bob.delivery_drops();
+    assert!(drops.copies > 0, "the resent copy is counted as a copy: {drops:?}");
+    assert_eq!(drops.unreadable, 0, "nothing was unreadable: {drops:?}");
     owner.send(gid, "twice").expect("send 2");
     assert!(await_body(&mut bob, gid, "twice"), "later mail still flows");
+}
+
+
+/// Hands envelopes through, but after `shift` is set reports every `group_seq` lowered by that
+/// much, as a relay whose log was reset or moved would number new mail from a lower start.
+struct SeqResetRelay {
+    inner: Box<dyn Relay>,
+    shift: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Relay for SeqResetRelay {
+    fn issue_challenge(&mut self, now: u64) -> String {
+        self.inner.issue_challenge(now)
+    }
+    fn authenticate(
+        &mut self,
+        msg: &comms_core::identity::SiweMessage,
+        sig: &[u8; 65],
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.authenticate(msg, sig, now)
+    }
+    fn publish_key_package(
+        &mut self,
+        pubn: comms_proto::KeyPackagePublication,
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.publish_key_package(pubn, now)
+    }
+    fn take_key_package(
+        &mut self,
+        wallet: &WalletAddress,
+    ) -> Result<Option<comms_proto::KeyPackagePublication>, String> {
+        self.inner.take_key_package(wallet)
+    }
+    fn submit_claim(
+        &mut self,
+        submitter: WalletAddress,
+        submission: comms_proto::ClaimSubmission,
+    ) -> Result<(), String> {
+        self.inner.submit_claim(submitter, submission)
+    }
+    fn poll_claims(
+        &mut self,
+        poller: WalletAddress,
+        token_hash: [u8; 32],
+    ) -> Result<Vec<comms_proto::ClaimSubmission>, String> {
+        self.inner.poll_claims(poller, token_hash)
+    }
+    fn register_group(&mut self, gid: GroupId, owner: WalletAddress, now: u64) -> Result<(), String> {
+        self.inner.register_group(gid, owner, now)
+    }
+    fn submit_as(&mut self, sender: WalletAddress, env: Envelope, now: u64) -> Result<u64, String> {
+        self.inner.submit_as(sender, env, now)
+    }
+    fn onboard(
+        &mut self,
+        gid: GroupId,
+        admin: WalletAddress,
+        joiner: WalletAddress,
+        welcome: Envelope,
+        ratchet_tree: Vec<u8>,
+        now: u64,
+    ) -> Result<(), String> {
+        self.inner.onboard(gid, admin, joiner, welcome, ratchet_tree, now)
+    }
+    fn fetch(&mut self, wallet: &WalletAddress) -> Vec<Envelope> {
+        let d = self.shift.load(std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .fetch(wallet)
+            .into_iter()
+            .map(|mut e| {
+                e.group_seq = e.group_seq.map(|q| q.saturating_sub(d));
+                e
+            })
+            .collect()
+    }
+    fn ack_delivered(&mut self) -> Result<(), String> {
+        self.inner.ack_delivered()
+    }
+    fn publish_invite(
+        &mut self,
+        inviter: WalletAddress,
+        gid: GroupId,
+        token_hash: [u8; 32],
+        group_info: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<(), String> {
+        self.inner.publish_invite(inviter, gid, token_hash, group_info, expires_at)
+    }
+    fn revoke_invite(
+        &mut self,
+        caller: WalletAddress,
+        token_hash: [u8; 32],
+        report_used: bool,
+    ) -> Result<(), String> {
+        self.inner.revoke_invite(caller, token_hash, report_used)
+    }
+    fn redeem_invite(
+        &mut self,
+        joiner: WalletAddress,
+        gid: GroupId,
+        token: Vec<u8>,
+        key_package: Vec<u8>,
+        now: u64,
+    ) -> Result<(Vec<u8>, u64), String> {
+        self.inner.redeem_invite(joiner, gid, token, key_package, now)
+    }
+    fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
+        self.inner.ratchet_tree(gid)
+    }
+    fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String> {
+        self.inner.group_members(gid)
+    }
+    fn offboard(
+        &mut self,
+        gid: GroupId,
+        admin: WalletAddress,
+        removed: WalletAddress,
+        remove_commit: Envelope,
+        ratchet_tree: Vec<u8>,
+        now: u64,
+    ) -> Result<u64, String> {
+        self.inner.offboard(gid, admin, removed, remove_commit, ratchet_tree, now)
+    }
+}
+
+#[test]
+fn new_mail_numbered_below_the_mark_after_a_relay_reset_is_still_delivered() {
+    // #55 review P2: a pure high-water mark would drop (and ack) real mail if the relay's
+    // numbering goes backwards (a store reset or a relay move). Only an exact copy (same seq and
+    // same ciphertext) may be dropped.
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    let gid = owner.create_group("reset").expect("create");
+    let bob_w = EthWallet::generate();
+    let bob_addr = bob_w.address();
+    let shift = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let relay = SeqResetRelay {
+        inner: Box::new(WsRelay::connect_insecure(&url).expect("ws")),
+        shift: shift.clone(),
+    };
+    let mut bob = MemberDaemon::new_with_relay(bob_w, Box::new(relay), "relay.test", wall_ms())
+        .expect("bob");
+    owner.add_member(gid, bob_addr).expect("add bob");
+    let mut joined = Vec::new();
+    for _ in 0..60 {
+        joined = bob.join_pending().expect("join");
+        if !joined.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(joined, vec![gid]);
+    for body in ["a", "b", "c"] {
+        owner.send(gid, body).expect("send");
+        assert!(await_body(&mut bob, gid, body), "{body}");
+    }
+    // From now on the relay numbers mail 3 lower: the next message reuses an old number.
+    shift.store(3, std::sync::atomic::Ordering::SeqCst);
+    owner.send(gid, "after the reset").expect("send");
+    assert!(
+        await_body(&mut bob, gid, "after the reset"),
+        "new mail under an old number is delivered, not dropped as a copy"
+    );
 }

@@ -136,6 +136,15 @@ pub struct MemberDaemon {
     consumed: std::collections::BTreeMap<GroupId, u64>,
 }
 
+/// Envelopes dropped on receipt, by reason (comms #55 review).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryDrops {
+    /// An exact copy (same group, seq and ciphertext) of something already consumed or held.
+    pub copies: u64,
+    /// Could not be processed (decrypt or decode failed); surfaced as a poll error.
+    pub unreadable: u64,
+}
+
 /// What [`MemberDaemon::rehydrate`] rebuilds from a state file: the MLS member, the groups, the
 /// inbox and the per-group consumed marks.
 type Rehydrated = (
@@ -545,6 +554,11 @@ impl MemberDaemon {
     }
 
     /// GC-2: why recent incoming role grants were refused (newest last, bounded).
+    /// comms #55 review: envelopes dropped on receipt, by reason (counters since start).
+    pub fn delivery_drops(&self) -> DeliveryDrops {
+        DeliveryDrops::default()
+    }
+
     pub fn grant_rejections(&self) -> Vec<String> {
         self.grant_log.clone()
     }
