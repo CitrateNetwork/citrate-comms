@@ -1228,9 +1228,11 @@ dependencies = [
  "comms-proto",
  "comms-relay",
  "comms-wire",
+ "futures-util",
  "rustls",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
