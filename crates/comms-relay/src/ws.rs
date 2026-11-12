@@ -75,6 +75,10 @@ pub struct RelayServer {
     paused: Arc<AtomicBool>,
     /// CM2-B-B009: live connection count, capped at [`MAX_CONNECTIONS`].
     conns: Arc<AtomicUsize>,
+    /// Tests only: pause a connection's teardown right after its ownership check, to drive
+    /// the close-versus-sign-in race deterministically (`reached`, then wait for `resume`).
+    #[cfg(test)]
+    teardown_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl RelayServer {
@@ -85,6 +89,8 @@ impl RelayServer {
             ack_mode: Arc::new(Mutex::new(std::collections::HashSet::new())),
             paused: Arc::new(AtomicBool::new(false)),
             conns: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            teardown_pause: Mutex::new(None),
         })
     }
 
@@ -96,6 +102,11 @@ impl RelayServer {
     /// Pause/resume new mutating operations (driven by the admin surface).
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Whether `wallet`'s current session gets tracked delivery (introspection/tests).
+    pub async fn is_tracked(&self, wallet: &WalletAddress) -> bool {
+        self.ack_mode.lock().await.contains(wallet)
     }
 
     /// Number of currently-connected, authenticated wallets.
@@ -227,6 +238,14 @@ impl RelayServer {
                 }
                 mine
             };
+            #[cfg(test)]
+            {
+                let pause = self.teardown_pause.lock().await.take();
+                if let Some((reached, resume)) = pause {
+                    reached.notify_one();
+                    resume.notified().await;
+                }
+            }
             if owned {
                 // Unacknowledged tracked deliveries go out again on the next session.
                 self.ack_mode.lock().await.remove(&w);
@@ -668,6 +687,180 @@ fn send_err(tx: &mpsc::UnboundedSender<ServerFrame>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── comms #52 review P2: a stale teardown must not touch a newer session ──
+
+    fn siwe_for(
+        w: &comms_core::identity::EthWallet,
+        domain: &str,
+        nonce: String,
+    ) -> comms_core::identity::SiweMessage {
+        let now = now_ms();
+        comms_core::identity::SiweMessage {
+            domain: domain.into(),
+            address: w.address(),
+            statement: "Sign in to citrate-comms".into(),
+            uri: format!("wss://{domain}"),
+            version: "1".into(),
+            chain_id: comms_proto::CITRATE_CHAIN_ID,
+            nonce,
+            issued_at_ms: now,
+            expiration_ms: now + 600_000,
+        }
+    }
+
+    async fn tracked_client(url: &str, w: &comms_core::identity::EthWallet) -> RelayClient {
+        let (c, nonce) = RelayClient::connect(url).await.unwrap();
+        assert!(c.enable_delivery_acks().await.unwrap());
+        let msg = siwe_for(w, "relay.citrate.ai", nonce);
+        let sig = w.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
+        c
+    }
+
+    #[tokio::test]
+    async fn a_superseded_session_is_closed_by_the_relay() {
+        // comms #52 review P3: when the same wallet signs in again, the older socket is closed
+        // instead of being left half-working (no pushes, but still accepting requests).
+        use comms_core::identity::EthWallet;
+        use tokio_tungstenite::tungstenite::Message as M;
+        let bob = EthWallet::generate();
+        let svc = DeliveryService::new("relay.citrate.ai", bob.address(), 0).unwrap();
+        let server = RelayServer::new(svc);
+        let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+        let (mut old, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let nonce = loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Challenge { nonce }) = canonical::from_slice(b.as_ref()) {
+                    break nonce;
+                }
+            }
+        };
+        let msg = siwe_for(&bob, "relay.citrate.ai", nonce);
+        let sig = bob.sign_siwe(&msg);
+        let f = ClientFrame::Authenticate {
+            message: msg,
+            signature: sig.to_vec(),
+        };
+        old.send(M::Binary(canonical::to_vec(&f).unwrap()))
+            .await
+            .unwrap();
+        let _new = tracked_client(&url, &bob).await;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match old.next().await {
+                    None | Some(Err(_)) | Some(Ok(M::Close(_))) => break true,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(closed, "the relay must close the superseded socket");
+    }
+
+    #[tokio::test]
+    async fn a_teardown_paused_after_its_ownership_check_cannot_touch_a_newer_session() {
+        use comms_core::identity::EthWallet;
+        use comms_proto::{Envelope, EpochId};
+        use tokio_tungstenite::tungstenite::Message as M;
+        let alice = EthWallet::generate();
+        let bob = EthWallet::generate();
+        let gid = GroupId([0x7a; 32]);
+        let env = |from: WalletAddress, ct: &[u8], to: WalletAddress| Envelope {
+            group_id: gid,
+            epoch: EpochId(1),
+            kind: EnvelopeKind::Application,
+            sender: from,
+            recipients: vec![to],
+            ciphertext: ct.to_vec(),
+            group_seq: None,
+        };
+        let svc = DeliveryService::new("relay.citrate.ai", alice.address(), 0).unwrap();
+        let server = RelayServer::new(svc);
+        let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{addr}");
+
+        let alice_c = tracked_client(&url, &alice).await;
+        alice_c.register_group(gid).await.unwrap();
+        alice_c
+            .onboard(
+                gid,
+                bob.address(),
+                None,
+                Envelope {
+                    kind: EnvelopeKind::Welcome,
+                    ..env(alice.address(), b"welcome", bob.address())
+                },
+                b"rt".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        // Old session: a raw socket, so it really closes.
+        let (mut old, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let nonce = loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Challenge { nonce }) = canonical::from_slice(b.as_ref()) {
+                    break nonce;
+                }
+            }
+        };
+        let msg = siwe_for(&bob, "relay.citrate.ai", nonce);
+        let sig = bob.sign_siwe(&msg);
+        for f in [
+            ClientFrame::EnableDeliveryAcks,
+            ClientFrame::Authenticate {
+                message: msg,
+                signature: sig.to_vec(),
+            },
+        ] {
+            old.send(M::Binary(canonical::to_vec(&f).unwrap()))
+                .await
+                .unwrap();
+        }
+        loop {
+            if let Some(Ok(M::Binary(b))) = old.next().await {
+                if let Ok(ServerFrame::Authenticated { .. }) = canonical::from_slice(b.as_ref()) {
+                    break;
+                }
+            }
+        }
+
+        // Pause the old connection's teardown right after its ownership check.
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *server.teardown_pause.lock().await = Some((reached.clone(), resume.clone()));
+        old.close(None).await.unwrap();
+        reached.notified().await;
+
+        // While it is paused, bob signs in again.
+        let new = tracked_client(&url, &bob).await;
+        resume.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // The newer session is still tracked, still signed in, and still gets pushes.
+        assert!(
+            server.is_tracked(&bob.address()).await,
+            "the stale teardown cleared the newer session's ack mode"
+        );
+        assert!(
+            server.service.lock().await.has_session(&bob.address()),
+            "the stale teardown ended the newer session"
+        );
+        alice_c
+            .submit(env(alice.address(), b"after-race", bob.address()))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Ok(Some(e)) =
+            tokio::time::timeout(std::time::Duration::from_millis(800), new.next_delivered()).await
+        {
+            got.push(e.ciphertext);
+        }
+        assert!(got.contains(&b"after-race".to_vec()), "{got:?}");
+    }
 
     /// WP-4.6: `connect` fails closed on a remote `ws://` endpoint — and does so BEFORE
     /// dialing, so it resolves instantly even though nothing is listening. (The
