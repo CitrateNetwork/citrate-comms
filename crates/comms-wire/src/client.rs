@@ -381,6 +381,18 @@ impl RelayClient {
         self.deliver_rx.lock().await.recv().await
     }
 
+    /// GC-1 review P2: ask the relay to track deliveries for this session. `Ok(false)` from a
+    /// relay that predates it (the session stays on untracked delivery).
+    pub async fn enable_delivery_acks(&self) -> Result<bool, WsError> {
+        Ok(false)
+    }
+
+    /// Acknowledge every tracked delivery handed out by [`next_delivered`](Self::next_delivered)
+    /// so far. Call it only once those envelopes are stored durably.
+    pub async fn ack_delivered(&self) -> Result<(), WsError> {
+        Ok(())
+    }
+
     /// Await the next advisory notification ping ([`ServerFrame::Notify`]).
     /// Advisory only — never use it to order or gate envelope processing.
     pub async fn next_notify(&self) -> Option<NotifyPush> {

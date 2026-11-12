@@ -268,6 +268,12 @@ impl RelayServer {
                     Err(e) => send_err(out_tx, &e.to_string()),
                 }
             }
+            ClientFrame::EnableDeliveryAcks | ClientFrame::AckDelivered { .. } => {
+                let Some(_addr) = *authed else {
+                    return send_err(out_tx, "not authenticated");
+                };
+                send_err(out_tx, "RED: delivery acks not implemented")
+            }
             ClientFrame::PublishKeyPackage(pubn) => {
                 // FWA-C11-01 (sweep): bind the publication's `wallet` to THIS
                 // connection's authenticated principal. The wallet-binding attestation

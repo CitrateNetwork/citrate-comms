@@ -40,6 +40,17 @@ pub enum ClientFrame {
         ratchet_tree: Vec<u8>,
     },
     Submit(Envelope),
+    /// GC-1 review P2: from now on this session gets [`ServerFrame::DeliverTracked`] and the
+    /// relay keeps each mailbox row until the client acknowledges it with
+    /// [`ClientFrame::AckDelivered`]. Unacknowledged deliveries are sent again on the next
+    /// session. A relay that predates this answers with an `Error`; the client then stays on
+    /// plain `Deliver`.
+    EnableDeliveryAcks,
+    /// Acknowledge tracked deliveries by their arrival numbers, once the client has stored
+    /// them durably. Only this session's own wallet's rows are affected.
+    AckDelivered {
+        arrivals: Vec<u64>,
+    },
     RatchetTree {
         group_id: GroupId,
     },
@@ -175,6 +186,11 @@ pub enum ServerFrame {
         seq: Option<u64>,
     },
     Deliver(Envelope),
+    /// A delivery the client must acknowledge (after [`ClientFrame::EnableDeliveryAcks`]).
+    DeliverTracked {
+        arrival: u64,
+        envelope: Envelope,
+    },
     /// **E-5 WP-3 — advisory notification ping.** Pushed to each *connected* recipient
     /// (never the sender) when a Submit is accepted, so a native client can raise an OS
     /// notification without waiting to decrypt the envelope. Carries routing-level

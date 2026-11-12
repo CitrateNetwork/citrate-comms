@@ -133,3 +133,90 @@ async fn offline_member_gets_queued_envelopes_on_sign_in_after_relay_restart() {
         "every queued envelope, in relay order"
     );
 }
+
+// GC-1 review P2: with delivery acks on, a delivery the client never acknowledged (its socket
+// dropped first) is sent again on the next session; an acknowledged one is not.
+#[tokio::test]
+async fn an_unacknowledged_delivery_is_sent_again_on_the_next_session() {
+    let alice = EthWallet::generate();
+    let bob = EthWallet::generate();
+    let gid = GroupId([0x78; 32]);
+    let mut svc = DeliveryService::new(DOMAIN, alice.address(), 0).unwrap();
+    let now = now_ms();
+    direct_login(&mut svc, &alice, now);
+    direct_login(&mut svc, &bob, now);
+    svc.register_group(gid, alice.address(), now).unwrap();
+    svc.onboard(
+        gid,
+        alice.address(),
+        None,
+        bob.address(),
+        env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Welcome,
+            b"welcome",
+            &[bob.address()],
+        ),
+        b"rt".to_vec(),
+        now,
+    )
+    .unwrap();
+    svc.submit_as(
+        alice.address(),
+        env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Application,
+            b"m1",
+            &[bob.address()],
+        ),
+        now,
+    )
+    .unwrap();
+    let server = RelayServer::new(svc);
+    let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{addr}");
+
+    async fn session(url: &str, bob: &EthWallet) -> RelayClient {
+        let (c, nonce) = RelayClient::connect(url).await.unwrap();
+        let msg = siwe(bob, nonce, now_ms());
+        let sig = bob.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
+        assert!(
+            c.enable_delivery_acks().await.unwrap(),
+            "this relay tracks deliveries"
+        );
+        c
+    }
+    async fn drain(c: &RelayClient) -> Vec<Vec<u8>> {
+        let mut got = Vec::new();
+        while let Ok(Some(e)) =
+            tokio::time::timeout(Duration::from_millis(600), c.next_delivered()).await
+        {
+            got.push(e.ciphertext);
+        }
+        got
+    }
+
+    // Session 1 receives both and drops without acknowledging.
+    let s1 = session(&url, &bob).await;
+    assert_eq!(drain(&s1).await, vec![b"welcome".to_vec(), b"m1".to_vec()]);
+    drop(s1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Session 2 gets them again, and acknowledges.
+    let s2 = session(&url, &bob).await;
+    assert_eq!(
+        drain(&s2).await,
+        vec![b"welcome".to_vec(), b"m1".to_vec()],
+        "redelivered"
+    );
+    s2.ack_delivered().await.unwrap();
+    drop(s2);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Session 3 gets nothing.
+    let s3 = session(&url, &bob).await;
+    assert!(drain(&s3).await.is_empty(), "acknowledged rows are gone");
+}
