@@ -221,3 +221,126 @@ async fn an_unacknowledged_delivery_is_sent_again_on_the_next_session() {
     let s3 = session(&url, &bob).await;
     assert!(drain(&s3).await.is_empty(), "acknowledged rows are gone");
 }
+
+// comms #51 item 2: delivery, ack tracking and the session are per WALLET, and the relay
+// assumes one live session per wallet: the newest session owns them. When an older session of
+// the same wallet closes, it must not take the newer session's registration, tracking or
+// authentication down with it.
+#[tokio::test]
+async fn an_older_session_closing_leaves_the_newer_session_of_the_same_wallet_working() {
+    let alice = EthWallet::generate();
+    let bob = EthWallet::generate();
+    let gid = GroupId([0x79; 32]);
+    let mut svc = DeliveryService::new(DOMAIN, alice.address(), 0).unwrap();
+    let now = now_ms();
+    direct_login(&mut svc, &alice, now);
+    direct_login(&mut svc, &bob, now);
+    svc.register_group(gid, alice.address(), now).unwrap();
+    svc.onboard(
+        gid,
+        alice.address(),
+        None,
+        bob.address(),
+        env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Welcome,
+            b"welcome",
+            &[bob.address()],
+        ),
+        b"rt".to_vec(),
+        now,
+    )
+    .unwrap();
+    let server = RelayServer::new(svc);
+    let (addr, _h) = server.clone().bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{addr}");
+
+    async fn raw_session(
+        url: &str,
+        w: &EthWallet,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        use comms_proto::canonical;
+        use comms_relay::ws::{ClientFrame, ServerFrame};
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let nonce = loop {
+            if let Some(Ok(Message::Binary(b))) = ws.next().await {
+                if let Ok(ServerFrame::Challenge { nonce }) = canonical::from_slice(b.as_ref()) {
+                    break nonce;
+                }
+            }
+        };
+        let msg = siwe(w, nonce, now_ms());
+        let sig = w.sign_siwe(&msg);
+        for frame in [
+            ClientFrame::EnableDeliveryAcks,
+            ClientFrame::Authenticate {
+                message: msg,
+                signature: sig.to_vec(),
+            },
+        ] {
+            ws.send(Message::Binary(canonical::to_vec(&frame).unwrap()))
+                .await
+                .unwrap();
+        }
+        loop {
+            if let Some(Ok(Message::Binary(b))) = ws.next().await {
+                if let Ok(ServerFrame::Authenticated { .. }) = canonical::from_slice(b.as_ref()) {
+                    break;
+                }
+            }
+        }
+        ws
+    }
+    async fn session(url: &str, w: &EthWallet) -> RelayClient {
+        let (c, nonce) = RelayClient::connect(url).await.unwrap();
+        assert!(c.enable_delivery_acks().await.unwrap());
+        let msg = siwe(w, nonce, now_ms());
+        let sig = w.sign_siwe(&msg);
+        c.authenticate(msg, sig).await.unwrap();
+        c
+    }
+    // The old session is a raw socket so the test can close it for real (dropping a
+    // RelayClient leaves its socket open while its read task runs).
+    let mut old = raw_session(&url, &bob).await;
+    let new = session(&url, &bob).await;
+    let alice_c = session(&url, &alice).await;
+
+    // The old session closes.
+    old.close(None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The newer session still gets pushes, and is still signed in (it can submit).
+    alice_c
+        .submit(env(
+            gid,
+            alice.address(),
+            EnvelopeKind::Application,
+            b"after-close",
+            &[bob.address()],
+        ))
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    while let Ok(Some(e)) =
+        tokio::time::timeout(Duration::from_millis(800), new.next_delivered()).await
+    {
+        got.push(e.ciphertext);
+    }
+    assert!(
+        got.contains(&b"after-close".to_vec()),
+        "the newer session still receives: {got:?}"
+    );
+    new.submit(env(
+        gid,
+        bob.address(),
+        EnvelopeKind::Application,
+        b"reply",
+        &[alice.address()],
+    ))
+    .await
+    .expect("the newer session is still authenticated");
+}
