@@ -188,6 +188,10 @@ fn check_grant(
     if a.role == Role::Admin && a.issuer.0 != owner {
         return Err("only the owner grants Admin".into());
     }
+    // ... and only the owner takes it away (comms #51): the subject's current role here is Admin.
+    if effective_role(g, a.subject) == Role::Admin && a.role != Role::Admin && a.issuer.0 != owner {
+        return Err("only the owner demotes an Admin".into());
+    }
     if !rbac::can_grant(issuer_role, a.role) {
         return Err(format!(
             "role grant exceeds the issuer's role ({issuer_role:?} cannot grant {:?})",
@@ -439,6 +443,9 @@ impl MemberDaemon {
         let my_role = effective_role(g, me);
         if role == Role::Admin && me.0 != owner {
             return Err(DaemonError::Rbac("only the owner grants Admin".into()));
+        }
+        if effective_role(g, member) == Role::Admin && role != Role::Admin && me.0 != owner {
+            return Err(DaemonError::Rbac("only the owner demotes an Admin".into()));
         }
         // Signed with this member's COMMS key (the device-sealed comms identity, planset
         // 2026-11-07-v060 02 §5), not the custody wallet. The anti-escalation rule (`can_grant`)

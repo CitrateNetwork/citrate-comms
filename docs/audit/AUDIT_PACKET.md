@@ -73,7 +73,7 @@ The five Tier-1 focus areas from the risk register (`.agentile/AUDIT_REF.md`,
   - `crates/comms-member-daemon/src/lib.rs` (`grant_role`, `check_grant`, `transfer_ownership`):
     grants are `RoleAssertion`s signed with the member's **comms key** and sent as MLS messages.
     Receivers check signature, expiry, scope, issuer == authenticated sender, and that the
-    issuer's role may grant the role. Only the owner grants Admin.
+    issuer's role may grant the role. Only the owner grants Admin, and only the owner demotes an Admin.
 - **Tests:** `forged_role_grant_rejected`, `only_the_owner_can_make_an_admin_even_through_a_crafted_grant`,
   `a_grant_relayed_by_someone_other_than_its_issuer_is_refused`, `ownership_transfers_by_the_owner_only`,
   `an_owner_change_not_committed_by_the_current_owner_is_refused`.

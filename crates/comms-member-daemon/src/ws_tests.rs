@@ -728,3 +728,43 @@ fn only_the_owner_can_make_an_admin_even_through_a_crafted_grant() {
         owner.grant_rejections()
     );
 }
+
+#[test]
+fn only_the_owner_can_demote_an_admin() {
+    // comms #51 item 3 (lead decision): returning an Admin to a lower role is owner-only, the
+    // same as granting Admin, because Admin gates money-adjacent surfaces (group FL offers).
+    let (mut owner, mut bob, mut carol, gid) = trio();
+    let (b, c) = (bob.owner(), carol.owner());
+    owner.grant_role(gid, b, Role::Admin, None).expect("bob admin");
+    owner.grant_role(gid, c, Role::Admin, None).expect("carol admin");
+    settle(&mut [&mut bob, &mut carol], gid);
+    assert_eq!(role_of(&bob, gid, c), Some(Role::Admin));
+
+    // Locally: bob (an admin) cannot demote carol (an admin).
+    let err = bob.grant_role(gid, c, Role::Member, None).expect_err("refused locally");
+    assert!(err.to_string().contains("only the owner demotes an Admin"), "{err}");
+
+    // On receipt: bob crafts the demotion anyway; every member refuses it.
+    let crafted =
+        rbac::sign_role_assertion(&bob.wallet, Role::Admin, c, Role::Member, Some(gid), None)
+            .expect("an admin may sign a member-level grant");
+    bob.send(gid, &crate::grants::encode_grant_message(&crafted))
+        .expect("send it");
+    settle(&mut [&mut owner, &mut carol], gid);
+    assert_eq!(role_of(&owner, gid, c), Some(Role::Admin), "owner keeps carol as admin");
+    assert_eq!(role_of(&carol, gid, c), Some(Role::Admin), "carol keeps herself as admin");
+    assert!(
+        owner
+            .grant_rejections()
+            .iter()
+            .any(|r| r.contains("only the owner demotes an Admin")),
+        "{:?}",
+        owner.grant_rejections()
+    );
+
+    // The owner can.
+    owner.grant_role(gid, c, Role::Member, None).expect("owner demotes");
+    settle(&mut [&mut bob, &mut carol], gid);
+    assert_eq!(role_of(&bob, gid, c), Some(Role::Member));
+    assert_eq!(role_of(&carol, gid, c), Some(Role::Member));
+}
