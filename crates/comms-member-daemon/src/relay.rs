@@ -10,32 +10,50 @@ use comms_core::identity::SiweMessage;
 use comms_proto::{ClaimSubmission, Envelope, GroupId, KeyPackagePublication, WalletAddress};
 use comms_relay::{DeliveryService, OffboardRequest};
 
-/// The answer of [`Relay::reconnect`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reconnect {
-    /// The link is up; nothing was done.
-    Up,
-    /// A new link was dialed; the caller must sign in on it.
-    Reconnected,
-    /// The link is down and the next redial is not due yet.
-    Waiting,
-    /// A redial was tried now and failed (the reason).
-    Failed(String),
-}
-
 /// A down link's state, reported to the app (`relayStatus`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkStatus {
-    /// Seconds until the next redial, when one is scheduled.
+    /// Seconds until the next redial (0 = due now or in progress). Set whenever the link is down.
     pub retry_in_secs: Option<u64>,
-    /// Why the last redial or sign-in failed.
+    /// Why the last redial, sign-in or KeyPackage republish failed.
     pub last_error: Option<String>,
+    /// Failed redials in a row since the link was last fully up.
+    pub failures: u32,
+}
+
+/// Signs a SIWE message with the member's comms key.
+pub type SiweSigner = std::sync::Arc<dyn Fn(&SiweMessage) -> [u8; 65] + Send + Sync>;
+
+/// What a networked relay needs to sign in again on its own after a redial: the SIWE domain, the
+/// member address, and a signer for the SIWE message. The signer holds the member's comms key in
+/// this process only; nothing crosses to the relay but the signature.
+#[derive(Clone)]
+pub struct SessionSigner {
+    pub domain: String,
+    pub address: WalletAddress,
+    pub sign: SiweSigner,
+}
+
+/// The SIWE message a member signs to open a relay session (startup and every redial).
+pub fn siwe_message(domain: &str, address: WalletAddress, nonce: String, now: u64) -> SiweMessage {
+    SiweMessage {
+        domain: domain.into(),
+        address,
+        statement: "Sign in to citrate-comms".into(),
+        uri: format!("wss://{domain}"),
+        version: "1".into(),
+        chain_id: comms_proto::CITRATE_CHAIN_ID,
+        nonce,
+        issued_at_ms: now,
+        expiration_ms: now + 600_000,
+    }
 }
 
 /// A server-blind relay the daemon talks to. Every op the [`crate::MemberDaemon`] needs; the owner
 /// is the offboard trust anchor, so no admin assertion crosses this seam.
 pub trait Relay: Send {
-    fn issue_challenge(&mut self, now: u64) -> String;
+    /// A fresh single-use nonce from the relay. A failure is an error, never an empty nonce.
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String>;
     fn authenticate(&mut self, msg: &SiweMessage, sig: &[u8; 65], now: u64) -> Result<(), String>;
     fn publish_key_package(&mut self, pubn: KeyPackagePublication, now: u64) -> Result<(), String>;
     fn take_key_package(
@@ -109,16 +127,21 @@ pub trait Relay: Send {
     fn is_connected(&self) -> bool {
         true
     }
-    /// Bring a dropped link back. In-process relays are always up ([`Reconnect::Up`]). A
-    /// networked relay redials on a backoff schedule; after [`Reconnect::Reconnected`] the caller
-    /// must sign in again (the new socket has no session).
-    fn reconnect(&mut self) -> Reconnect {
-        Reconnect::Up
+    /// Give a networked relay what it needs to sign in again by itself after a redial. In-process
+    /// relays ignore it.
+    fn set_session_signer(&mut self, _signer: SessionSigner) {}
+    /// True once after a networked relay redialed and signed in on its own: the caller republishes
+    /// this member's KeyPackage, then calls [`Self::session_ready`] (or [`Self::mark_down`]).
+    fn take_fresh_session(&mut self) -> bool {
+        false
     }
-    /// Count the link as down (a sign-in on a fresh link failed), so the next [`Self::reconnect`]
-    /// redials on the backoff schedule instead of reusing it.
+    /// The fresh session is fully up (signed in and the KeyPackage republished): the backoff starts
+    /// again from its minimum.
+    fn session_ready(&mut self) {}
+    /// Count the current link as down (the KeyPackage republish on a fresh session failed): it is
+    /// retired and the next redial waits on the (still growing) backoff.
     fn mark_down(&mut self, _why: &str) {}
-    /// What the link is doing while it is down: when it next redials, and why the last try failed.
+    /// The link's state while it is down: when it next redials and why the last try failed.
     fn link_status(&self) -> LinkStatus {
         LinkStatus::default()
     }
@@ -157,8 +180,8 @@ impl InProcessRelay {
 }
 
 impl Relay for InProcessRelay {
-    fn issue_challenge(&mut self, now: u64) -> String {
-        self.0.issue_challenge(now)
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String> {
+        Ok(self.0.issue_challenge(now))
     }
     fn authenticate(&mut self, msg: &SiweMessage, sig: &[u8; 65], now: u64) -> Result<(), String> {
         self.0
@@ -302,180 +325,344 @@ impl Relay for InProcessRelay {
 // ---------------------------------------------------------------------------
 
 use comms_wire::RelayClient;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
-/// First wait before redialing a dropped relay link; doubles per failure up to [`RECONNECT_MAX`].
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-/// Longest wait between redials.
-const RECONNECT_MAX: Duration = Duration::from_secs(60);
-/// A dial that has not connected by now has failed. Kept under citrate-core's 5 s IPC timeout,
-/// since a redial runs inside the request that found the link down.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
-/// A relay op with no answer by now has failed, and its link is retired: the late answer would
-/// otherwise be read as the reply to the next request.
-const OP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timing for a [`WsRelay`]. [`Default`] is production; tests shorten it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WsTiming {
+    /// How often the client pings the relay (a link silent for 3 intervals is dead).
+    pub keepalive: Duration,
+    /// Backoff ceiling after the first failed redial; doubles per failure up to `reconnect_max`.
+    pub reconnect_min: Duration,
+    /// Largest backoff ceiling.
+    pub reconnect_max: Duration,
+    /// A dial (TCP + TLS + WebSocket + delivery opt-in) not done by now has failed.
+    pub connect_timeout: Duration,
+    /// A relay op with no answer by now has failed and its link is retired. Below citrate-core's
+    /// 5 s IPC timeout, so a half-open socket never stalls the daemon longer than Core waits.
+    pub op_timeout: Duration,
+    /// How often the background supervisor checks the link.
+    pub supervise_tick: Duration,
+}
+
+impl Default for WsTiming {
+    fn default() -> Self {
+        WsTiming {
+            keepalive: comms_wire::client::KEEPALIVE_INTERVAL,
+            reconnect_min: Duration::from_secs(1),
+            reconnect_max: Duration::from_secs(60),
+            connect_timeout: Duration::from_secs(4),
+            op_timeout: Duration::from_secs(3),
+            supervise_tick: Duration::from_millis(100),
+        }
+    }
+}
+
+/// A full-jitter wait: uniform in `[0, ceiling]` from the random `r`. Spreads a fleet-wide redial
+/// (a relay restart, a forced update) instead of every client knocking at the same instant.
+pub fn jittered(ceiling: Duration, r: u64) -> Duration {
+    let ms = ceiling.as_millis() as u64;
+    Duration::from_millis(r % ms.saturating_add(1))
+}
+
+fn random_u64() -> Option<u64> {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b).ok()?;
+    Some(u64::from_le_bytes(b))
+}
+
+/// The link state, shared by the sync op path and the background supervisor.
+struct Shared {
+    /// The signed-in link ops use. `None` (or a dead client) while down.
+    client: Option<Arc<RelayClient>>,
+    /// Installed by the supervisor; the daemon has not republished its KeyPackage on it yet.
+    fresh: bool,
+    /// Backoff ceiling for the next failure. Reset only once a session is fully up.
+    delay: Duration,
+    next_dial: Option<Instant>,
+    failures: u32,
+    last_error: Option<String>,
+}
+
+impl Shared {
+    fn alive(&self) -> bool {
+        self.client.as_ref().is_some_and(|c| c.is_alive())
+    }
+
+    /// A failure: wait a jittered time under the current ceiling, then double the ceiling.
+    fn back_off(&mut self, why: String, timing: &WsTiming) {
+        let wait = match random_u64() {
+            Some(r) => jittered(self.delay, r),
+            None => self.delay,
+        };
+        self.next_dial = Some(Instant::now() + wait);
+        self.delay = (self.delay * 2).min(timing.reconnect_max);
+        self.failures = self.failures.saturating_add(1);
+        self.last_error = Some(why);
+    }
+}
+
+fn lock(m: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A networked, server-blind relay: a `comms-wire::RelayClient` over `ws://`, wrapped so the SYNC
 /// daemon can drive it (a dedicated tokio runtime + `block_on`). This is the CX-S3.2 shared-relay,
 /// WS-clients transport — two members on two nodes point their daemons at the same relay. Security
 /// is UNCHANGED: E2E MLS + SIWE/wallet binding; the relay only ever sees ciphertext.
 ///
-/// A dropped link is redialed by [`Relay::reconnect`] with exponential backoff
-/// ([`RECONNECT_MIN`]..[`RECONNECT_MAX`]); the client pings the relay every `keepalive` so an idle
-/// link stays open and a dead one is noticed.
+/// A background supervisor (on this relay's runtime) redials a dropped link with full-jitter
+/// exponential backoff and signs in again with the [`SessionSigner`], so no request ever waits on a
+/// redial: ops on a down link fail at once, and `relayStatus` answers from the current state. The
+/// daemon republishes its KeyPackage on the next op ([`Relay::take_fresh_session`]); only then does
+/// the backoff start again from its minimum.
 pub struct WsRelay {
     rt: Runtime,
-    client: RelayClient,
-    url: String,
-    insecure: bool,
-    keepalive: Duration,
-    delay: Duration,
-    next_dial: Option<Instant>,
-    last_error: Option<String>,
+    shared: Arc<Mutex<Shared>>,
+    signer: Arc<Mutex<Option<SessionSigner>>>,
+    timing: WsTiming,
+    supervisor: JoinHandle<()>,
 }
 
 impl WsRelay {
     /// Connect to a relay at `url` (the client's connection hardening enforces `wss://` off
     /// loopback). Blocks until connected.
     pub fn connect(url: &str) -> Result<Self, String> {
-        Self::build(url, false, comms_wire::client::KEEPALIVE_INTERVAL)
+        Self::build(url, false, WsTiming::default())
     }
     /// Connect permitting plaintext `ws://` (loopback/dev/tests only).
     pub fn connect_insecure(url: &str) -> Result<Self, String> {
-        Self::build(url, true, comms_wire::client::KEEPALIVE_INTERVAL)
+        Self::build(url, true, WsTiming::default())
     }
-    /// [`Self::connect_insecure`] with an explicit keepalive interval (tests).
-    pub fn connect_insecure_with_keepalive(url: &str, keepalive: Duration) -> Result<Self, String> {
-        Self::build(url, true, keepalive)
+    /// [`Self::connect_insecure`] with explicit timing (tests).
+    pub fn connect_insecure_with(url: &str, timing: WsTiming) -> Result<Self, String> {
+        Self::build(url, true, timing)
     }
-    fn build(url: &str, insecure: bool, keepalive: Duration) -> Result<Self, String> {
+    fn build(url: &str, insecure: bool, timing: WsTiming) -> Result<Self, String> {
         let rt = Runtime::new().map_err(|e| e.to_string())?;
-        let client = dial(&rt, url, insecure, keepalive)?;
+        let client = rt.block_on(dial(url, insecure, timing))?;
+        let shared = Arc::new(Mutex::new(Shared {
+            client: Some(Arc::new(client)),
+            fresh: false,
+            delay: timing.reconnect_min,
+            next_dial: None,
+            failures: 0,
+            last_error: None,
+        }));
+        let signer: Arc<Mutex<Option<SessionSigner>>> = Arc::new(Mutex::new(None));
+        let supervisor = rt.spawn(supervise(
+            shared.clone(),
+            signer.clone(),
+            url.to_string(),
+            insecure,
+            timing,
+        ));
         Ok(WsRelay {
             rt,
-            client,
-            url: url.to_string(),
-            insecure,
-            keepalive,
-            delay: RECONNECT_MIN,
-            next_dial: None,
-            last_error: None,
+            shared,
+            signer,
+            timing,
+            supervisor,
         })
     }
 
-    /// Schedule the next redial after a failure, doubling the wait.
-    fn back_off(&mut self, why: String) {
-        self.next_dial = Some(Instant::now() + self.delay);
-        self.delay = (self.delay * 2).min(RECONNECT_MAX);
-        self.last_error = Some(why);
+    /// The live link, or why there is none (ops fail at once on a down link; they never redial).
+    fn client(&self) -> Result<Arc<RelayClient>, String> {
+        let s = lock(&self.shared);
+        match &s.client {
+            Some(c) if c.is_alive() => Ok(c.clone()),
+            _ => Err(match &s.last_error {
+                Some(e) => format!("the relay link is down and redialing ({e})"),
+                None => "the relay link is down and redialing".to_string(),
+            }),
+        }
     }
 
-    /// Run one relay op, bounded by [`OP_TIMEOUT`]. A timeout or a closed socket retires the link
-    /// (the next request redials instead of reading a stale answer).
-    fn call<T>(
-        &self,
-        fut: impl std::future::Future<Output = Result<T, comms_wire::WsError>>,
-    ) -> Result<T, String> {
-        // The timer is built inside the runtime (a `Sleep` made outside it panics).
+    /// Run one relay op on the live link, bounded by `op_timeout`. A timeout or a closed socket
+    /// retires the link, so a late answer is never read as the reply to the next request; the
+    /// supervisor then redials.
+    fn call<T, Fut>(&self, op: impl FnOnce(Arc<RelayClient>) -> Fut) -> Result<T, String>
+    where
+        Fut: std::future::Future<Output = Result<T, comms_wire::WsError>>,
+    {
+        let c = self.client()?;
+        let fut = op(c.clone());
+        let limit = self.timing.op_timeout;
         match self
             .rt
-            .block_on(async { tokio::time::timeout(OP_TIMEOUT, fut).await })
+            .block_on(async move { tokio::time::timeout(limit, fut).await })
         {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => {
                 if matches!(e, comms_wire::WsError::Closed) {
-                    self.client.mark_dead();
+                    c.mark_dead();
                 }
                 Err(e.to_string())
             }
             Err(_) => {
-                self.client.mark_dead();
+                c.mark_dead();
                 Err(format!(
-                    "the relay did not answer within {}s; reconnecting",
-                    OP_TIMEOUT.as_secs()
+                    "the relay did not answer within {} ms; reconnecting",
+                    limit.as_millis()
                 ))
             }
         }
     }
 }
 
-/// Dial `url`, opt in to tracked delivery, and return the client (bounded by [`CONNECT_TIMEOUT`]).
-fn dial(
-    rt: &Runtime,
+impl Drop for WsRelay {
+    fn drop(&mut self) {
+        self.supervisor.abort();
+    }
+}
+
+/// Dial `url` and opt in to tracked delivery, bounded by `connect_timeout`.
+async fn dial(url: &str, insecure: bool, timing: WsTiming) -> Result<RelayClient, String> {
+    let fut = async {
+        let (c, _nonce) =
+            RelayClient::connect_with_keepalive(url, insecure, timing.keepalive).await?;
+        // GC-1 review P2: tracked delivery, opted in before sign-in. A relay that
+        // predates it answers false and the session stays on untracked delivery.
+        c.enable_delivery_acks().await?;
+        Ok::<_, comms_wire::WsError>(c)
+    };
+    match tokio::time::timeout(timing.connect_timeout, fut).await {
+        Ok(r) => r.map_err(|e| e.to_string()),
+        Err(_) => Err(format!(
+            "could not reach the relay within {} ms",
+            timing.connect_timeout.as_millis()
+        )),
+    }
+}
+
+/// Dial, then sign in with `signer` (if one is set), bounded by the op timeout.
+async fn dial_and_sign_in(
     url: &str,
     insecure: bool,
-    keepalive: Duration,
+    timing: WsTiming,
+    signer: Option<SessionSigner>,
 ) -> Result<RelayClient, String> {
-    let url = url.to_string();
-    rt.block_on(async move {
-        let fut = async {
-            let (c, nonce) = RelayClient::connect_with_keepalive(&url, insecure, keepalive).await?;
-            // GC-1 review P2: tracked delivery, opted in before sign-in. A relay that
-            // predates it answers false and the session stays on untracked delivery.
-            c.enable_delivery_acks().await?;
-            Ok::<_, comms_wire::WsError>((c, nonce))
+    let c = dial(url, insecure, timing).await?;
+    if let Some(sg) = signer {
+        let sign_in = async {
+            let nonce = c.challenge().await.map_err(|e| e.to_string())?;
+            let msg = siwe_message(&sg.domain, sg.address, nonce, wall_ms());
+            let sig = (sg.sign)(&msg);
+            c.authenticate(msg, sig).await.map_err(|e| e.to_string())
         };
-        match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
-            Ok(r) => r.map(|(c, _relay_key)| c).map_err(|e| e.to_string()),
-            Err(_) => Err(format!(
-                "could not reach the relay within {}s",
-                CONNECT_TIMEOUT.as_secs()
-            )),
+        match tokio::time::timeout(timing.op_timeout, sign_in).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(format!("sign-in after reconnect failed: {e}")),
+            Err(_) => return Err("sign-in after reconnect timed out".to_string()),
         }
-    })
+    }
+    Ok(c)
+}
+
+/// The background supervisor: whenever the link is down and the backoff is due, redial and sign
+/// in. The backoff ceiling is NOT reset here; it is reset by [`Relay::session_ready`] once the
+/// daemon has republished its KeyPackage, so a relay that accepts the socket but refuses the
+/// sign-in keeps backing off instead of being redialed every second.
+async fn supervise(
+    shared: Arc<Mutex<Shared>>,
+    signer: Arc<Mutex<Option<SessionSigner>>>,
+    url: String,
+    insecure: bool,
+    timing: WsTiming,
+) {
+    loop {
+        tokio::time::sleep(timing.supervise_tick).await;
+        let due = {
+            let s = lock(&shared);
+            !s.alive() && s.next_dial.is_none_or(|t| Instant::now() >= t)
+        };
+        if !due {
+            continue;
+        }
+        let sg = signer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = dial_and_sign_in(&url, insecure, timing, sg).await;
+        let mut s = lock(&shared);
+        match result {
+            Ok(c) => {
+                if let Some(old) = s.client.replace(Arc::new(c)) {
+                    old.mark_dead();
+                }
+                s.fresh = true;
+                s.next_dial = None;
+                eprintln!("comms-member-daemon: relay redialed and signed in");
+            }
+            Err(e) => {
+                eprintln!("comms-member-daemon: relay redial failed: {e}");
+                s.back_off(e, &timing);
+            }
+        }
+    }
+}
+
+/// Wall-clock milliseconds since the Unix epoch (0 if the clock is before it).
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl Relay for WsRelay {
     fn ack_delivered(&mut self) -> Result<(), String> {
-        self.call(self.client.ack_delivered())
+        self.call(|c| async move { c.ack_delivered().await })
     }
     fn is_connected(&self) -> bool {
-        // Flag-A — the live link state, with no round trip: the socket is open and the relay
-        // answered within the keepalive window. It used to send a `Challenge` per probe, and the
-        // relay caps challenges per connection (CM2-B-B009), so after ~31 probes every probe and
-        // every sign-in nonce failed on a healthy socket.
-        self.client.is_alive()
+        // Flag-A — the live link state, with no round trip: the socket is open, signed in, and the
+        // relay answered within the keepalive window. It used to send a `Challenge` per probe, and
+        // the relay caps challenges per connection (CM2-B-B009), so after ~29 probes every probe
+        // and every sign-in nonce failed on a healthy socket.
+        lock(&self.shared).alive()
     }
-    fn reconnect(&mut self) -> Reconnect {
-        if self.client.is_alive() {
-            return Reconnect::Up;
-        }
-        if self.next_dial.is_some_and(|t| Instant::now() < t) {
-            return Reconnect::Waiting;
-        }
-        match dial(&self.rt, &self.url, self.insecure, self.keepalive) {
-            Ok(c) => {
-                self.client = c;
-                self.delay = RECONNECT_MIN;
-                self.next_dial = None;
-                self.last_error = None;
-                Reconnect::Reconnected
-            }
-            Err(e) => {
-                self.back_off(e.clone());
-                Reconnect::Failed(e)
-            }
-        }
+    fn set_session_signer(&mut self, signer: SessionSigner) {
+        *self.signer.lock().unwrap_or_else(|e| e.into_inner()) = Some(signer);
+    }
+    fn take_fresh_session(&mut self) -> bool {
+        let mut s = lock(&self.shared);
+        std::mem::take(&mut s.fresh) && s.alive()
+    }
+    fn session_ready(&mut self) {
+        let mut s = lock(&self.shared);
+        s.delay = self.timing.reconnect_min;
+        s.failures = 0;
+        s.last_error = None;
     }
     fn mark_down(&mut self, why: &str) {
-        self.client.mark_dead();
-        self.back_off(why.to_string());
+        let mut s = lock(&self.shared);
+        if let Some(c) = s.client.take() {
+            c.mark_dead();
+        }
+        s.fresh = false;
+        s.back_off(why.to_string(), &self.timing);
     }
     fn link_status(&self) -> LinkStatus {
+        let s = lock(&self.shared);
+        if s.alive() {
+            return LinkStatus::default();
+        }
         LinkStatus {
-            retry_in_secs: self
-                .next_dial
-                .map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
-            last_error: self.last_error.clone(),
+            retry_in_secs: Some(
+                s.next_dial
+                    .map(|t| t.saturating_duration_since(Instant::now()).as_secs())
+                    .unwrap_or(0),
+            ),
+            last_error: s.last_error.clone(),
+            failures: s.failures,
         }
     }
-    fn issue_challenge(&mut self, _now: u64) -> String {
-        // A failure here surfaces at authenticate/publish (which then fail loudly).
-        self.call(self.client.challenge()).unwrap_or_default()
+    fn issue_challenge(&mut self, _now: u64) -> Result<String, String> {
+        self.call(|c| async move { c.challenge().await })
     }
     fn authenticate(&mut self, msg: &SiweMessage, sig: &[u8; 65], _now: u64) -> Result<(), String> {
-        self.call(self.client.authenticate(msg.clone(), *sig))
+        let (msg, sig) = (msg.clone(), *sig);
+        self.call(move |c| async move { c.authenticate(msg, sig).await })
             .map(|_| ())
     }
     fn publish_key_package(
@@ -483,27 +670,28 @@ impl Relay for WsRelay {
         pubn: KeyPackagePublication,
         _now: u64,
     ) -> Result<(), String> {
-        self.call(self.client.publish_key_package(pubn))
+        self.call(move |c| async move { c.publish_key_package(pubn).await })
     }
     fn take_key_package(
         &mut self,
         wallet: &WalletAddress,
     ) -> Result<Option<KeyPackagePublication>, String> {
-        self.call(self.client.take_key_package(*wallet))
+        let wallet = *wallet;
+        self.call(move |c| async move { c.take_key_package(wallet).await })
     }
     fn submit_claim(
         &mut self,
         _submitter: WalletAddress,
         submission: ClaimSubmission,
     ) -> Result<(), String> {
-        self.call(self.client.submit_claim(submission))
+        self.call(move |c| async move { c.submit_claim(submission).await })
     }
     fn poll_claims(
         &mut self,
         _poller: WalletAddress,
         token_hash: [u8; 32],
     ) -> Result<Vec<ClaimSubmission>, String> {
-        self.call(self.client.poll_claims(token_hash))
+        self.call(move |c| async move { c.poll_claims(token_hash).await })
     }
     fn register_group(
         &mut self,
@@ -511,7 +699,7 @@ impl Relay for WsRelay {
         _owner: WalletAddress,
         _now: u64,
     ) -> Result<(), String> {
-        self.call(self.client.register_group(gid))
+        self.call(move |c| async move { c.register_group(gid).await })
     }
     fn submit_as(
         &mut self,
@@ -519,7 +707,7 @@ impl Relay for WsRelay {
         env: Envelope,
         _now: u64,
     ) -> Result<u64, String> {
-        self.call(self.client.submit(env))
+        self.call(move |c| async move { c.submit(env).await })
     }
     fn onboard(
         &mut self,
@@ -530,10 +718,7 @@ impl Relay for WsRelay {
         ratchet_tree: Vec<u8>,
         _now: u64,
     ) -> Result<(), String> {
-        self.call(
-            self.client
-                .onboard(gid, joiner, None, welcome, ratchet_tree),
-        )
+        self.call(move |c| async move { c.onboard(gid, joiner, None, welcome, ratchet_tree).await })
     }
     fn publish_invite(
         &mut self,
@@ -545,10 +730,10 @@ impl Relay for WsRelay {
     ) -> Result<(), String> {
         // The relay binds the inviter to the authenticated WS session, so `_inviter` is
         // not sent — the session principal is authoritative (FWA-C11-01 pattern).
-        self.call(
-            self.client
-                .publish_invite(gid, token_hash, group_info, expires_at),
-        )
+        self.call(move |c| async move {
+            c.publish_invite(gid, token_hash, group_info, expires_at)
+                .await
+        })
     }
     fn revoke_invite(
         &mut self,
@@ -556,7 +741,7 @@ impl Relay for WsRelay {
         token_hash: [u8; 32],
         report_used: bool,
     ) -> Result<(), String> {
-        self.call(self.client.revoke_invite(token_hash, report_used))
+        self.call(move |c| async move { c.revoke_invite(token_hash, report_used).await })
     }
     fn redeem_invite(
         &mut self,
@@ -567,21 +752,22 @@ impl Relay for WsRelay {
         _now: u64,
     ) -> Result<(Vec<u8>, u64), String> {
         use comms_wire::frames::RedeemInviteResult;
-        match self.call(self.client.redeem_invite(gid, token, key_package))? {
+        match self.call(move |c| async move { c.redeem_invite(gid, token, key_package).await })? {
             RedeemInviteResult::Ok { group_info, epoch } => Ok((group_info, epoch)),
             RedeemInviteResult::Err(reason) => Err(reason.as_str().to_string()),
         }
     }
     fn fetch(&mut self, _wallet: &WalletAddress) -> Vec<Envelope> {
         // Drain what the relay has PUSHED to this session (the WS client only receives its own
-        // envelopes). Bounded per-item timeout so an empty mailbox returns promptly.
-        self.rt.block_on(async {
+        // envelopes). Bounded per-item timeout so an empty mailbox returns promptly. A down link
+        // has nothing to drain; the relay sends unacknowledged mail again at the next sign-in.
+        let Ok(c) = self.client() else {
+            return Vec::new();
+        };
+        self.rt.block_on(async move {
             let mut out = Vec::new();
-            while let Ok(Some(env)) = tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                self.client.next_delivered(),
-            )
-            .await
+            while let Ok(Some(env)) =
+                tokio::time::timeout(Duration::from_millis(20), c.next_delivered()).await
             {
                 out.push(env);
             }
@@ -589,10 +775,10 @@ impl Relay for WsRelay {
         })
     }
     fn ratchet_tree(&mut self, gid: GroupId) -> Result<Option<Vec<u8>>, String> {
-        self.call(self.client.ratchet_tree(gid))
+        self.call(move |c| async move { c.ratchet_tree(gid).await })
     }
     fn group_members(&mut self, gid: GroupId) -> Result<Option<Vec<WalletAddress>>, String> {
-        self.call(self.client.group_members(gid))
+        self.call(move |c| async move { c.group_members(gid).await })
     }
     fn offboard(
         &mut self,
@@ -603,10 +789,10 @@ impl Relay for WsRelay {
         ratchet_tree: Vec<u8>,
         _now: u64,
     ) -> Result<u64, String> {
-        self.call(
-            self.client
-                .offboard(gid, removed, None, remove_commit, ratchet_tree),
-        )
+        self.call(move |c| async move {
+            c.offboard(gid, removed, None, remove_commit, ratchet_tree)
+                .await
+        })
     }
 }
 

@@ -50,4 +50,7 @@ getrandom = { workspace = true }
 ciborium = { workspace = true }
 
 [dev-dependencies]
+# A scripted fake relay for the link-retire test (a reply that arrives after its timeout).
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
 tempfile = "3"

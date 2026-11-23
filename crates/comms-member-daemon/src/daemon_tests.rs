@@ -290,7 +290,7 @@ struct FlakySubmitRelay {
 }
 
 impl crate::relay::Relay for FlakySubmitRelay {
-    fn issue_challenge(&mut self, now: u64) -> String {
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String> {
         self.inner.issue_challenge(now)
     }
     fn authenticate(

@@ -1158,6 +1158,7 @@ dependencies = [
  "comms-proto",
  "comms-relay",
  "comms-wire",
+ "futures-util",
  "getrandom 0.2.17",
  "hex",
  "interprocess",
@@ -1168,6 +1169,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "zeroize",
 ]
 

@@ -14,12 +14,12 @@
 //! Single-owner note: the relay excludes the sender from delivery, so a lone owner's messages are
 //! not echoed back — meaningful traffic requires ≥2 members, which the round-trip test exercises.
 
-use comms_core::identity::{EthWallet, SiweMessage};
+use comms_core::identity::EthWallet;
 use comms_core::mls::{GroupHandle, MlsMember};
 use comms_core::rbac;
 use comms_proto::{
     ClaimSubmission, Envelope, EnvelopeKind, EpochId, GroupId, KeyPackagePublication, Role,
-    RoleAssertion, WalletAddress, CITRATE_CHAIN_ID,
+    RoleAssertion, WalletAddress,
 };
 
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ pub mod persist;
 pub mod relay;
 pub mod server;
 
-use relay::{InProcessRelay, LinkStatus, Reconnect, Relay};
+use relay::{InProcessRelay, LinkStatus, Relay, SessionSigner};
 
 /// A member-daemon error. `Display` is safe to surface over the IPC.
 #[derive(Debug, thiserror::Error)]
@@ -382,6 +382,15 @@ impl MemberDaemon {
         login(relay.as_mut(), &wallet, &domain, d_now)?;
         d_now += 1;
         publish_kp(relay.as_mut(), &wallet, &mls, &domain, d_now)?;
+        // A networked relay signs in again by itself after a redial (in the background, so no
+        // request waits on it). It gets its own copy of the comms key, in this process only.
+        let signer_wallet = EthWallet::from_secret_key(&wallet.secret_bytes())
+            .map_err(|e| DaemonError::Relay(e.to_string()))?;
+        relay.set_session_signer(SessionSigner {
+            domain: domain.clone(),
+            address: wallet.address(),
+            sign: std::sync::Arc::new(move |m| signer_wallet.sign_siwe(m)),
+        });
 
         let daemon = MemberDaemon {
             domain,
@@ -1437,44 +1446,36 @@ impl MemberDaemon {
         self.relay.link_status()
     }
 
-    /// Bring a dropped relay link back before an op: redial (on the relay's backoff schedule), then
-    /// sign in again and republish this member's KeyPackage, exactly as at startup. The relay sends
-    /// any mail still unacknowledged again at sign-in, so nothing delivered while the link was down
-    /// is lost. A no-op while the link is up, and for the in-process relay. Never fails: a link that
-    /// stays down is reported by `relayStatus`, and relayed ops fail with the relay's own error.
+    /// Finish a session the relay's background supervisor redialed and signed in on its own:
+    /// republish this member's KeyPackage, exactly as at startup, then tell the relay the session is
+    /// fully up (only then does its backoff start again from the minimum). The relay sends any mail
+    /// still unacknowledged again at sign-in, so nothing delivered while the link was down is lost.
+    /// A no-op while nothing was redialed, and for the in-process relay. Never blocks on a redial:
+    /// that runs in the background, and a down link fails relayed ops at once.
     pub fn ensure_relay(&mut self) {
-        match self.relay.reconnect() {
-            Reconnect::Up | Reconnect::Waiting => {}
-            Reconnect::Failed(e) => eprintln!("comms-member-daemon: relay reconnect failed: {e}"),
-            Reconnect::Reconnected => {
-                // The relay checks the SIWE times against its own clock, so sign in at the wall
-                // clock (the daemon's counter only advances per op).
-                self.now = self.now.max(wall_ms()) + 1;
-                let signed_in = login(self.relay.as_mut(), &self.wallet, &self.domain, self.now)
-                    .and_then(|()| {
-                        self.now += 1;
-                        publish_kp(
-                            self.relay.as_mut(),
-                            &self.wallet,
-                            &self.mls,
-                            &self.domain,
-                            self.now,
-                        )
-                    });
+        if !self.relay.take_fresh_session() {
+            return;
+        }
+        self.now = self.now.max(wall_ms()) + 1;
+        match publish_kp(
+            self.relay.as_mut(),
+            &self.wallet,
+            &self.mls,
+            &self.domain,
+            self.now,
+        ) {
+            Ok(()) => {
                 self.now += 1;
-                match signed_in {
-                    Ok(()) => {
-                        if let Err(e) = self.persist_state() {
-                            eprintln!("comms-member-daemon: saving state after reconnect: {e}");
-                        }
-                        eprintln!("comms-member-daemon: relay reconnected");
-                    }
-                    Err(e) => {
-                        let why = format!("sign-in after reconnect failed: {e}");
-                        eprintln!("comms-member-daemon: relay {why}");
-                        self.relay.mark_down(&why);
-                    }
+                self.relay.session_ready();
+                if let Err(e) = self.persist_state() {
+                    eprintln!("comms-member-daemon: saving state after reconnect: {e}");
                 }
+                eprintln!("comms-member-daemon: relay reconnected");
+            }
+            Err(e) => {
+                let why = format!("republishing the key package after reconnect failed: {e}");
+                eprintln!("comms-member-daemon: relay {why}");
+                self.relay.mark_down(&why);
             }
         }
     }
@@ -1499,18 +1500,8 @@ pub fn login(
     domain: &str,
     now: u64,
 ) -> Result<(), DaemonError> {
-    let nonce = relay.issue_challenge(now);
-    let msg = SiweMessage {
-        domain: domain.into(),
-        address: w.address(),
-        statement: "Sign in to citrate-comms".into(),
-        uri: format!("wss://{domain}"),
-        version: "1".into(),
-        chain_id: CITRATE_CHAIN_ID,
-        nonce,
-        issued_at_ms: now,
-        expiration_ms: now + 600_000,
-    };
+    let nonce = relay.issue_challenge(now).map_err(DaemonError::Relay)?;
+    let msg = relay::siwe_message(domain, w.address(), nonce, now);
     let sig = w.sign_siwe(&msg);
     relay
         .authenticate(&msg, &sig, now)
@@ -1527,7 +1518,7 @@ pub fn publish_kp(
     now: u64,
 ) -> Result<(), DaemonError> {
     let sig_pub = m.sig_pubkey();
-    let nonce = relay.issue_challenge(now);
+    let nonce = relay.issue_challenge(now).map_err(DaemonError::Relay)?;
     let pubn = KeyPackagePublication {
         wallet: w.address(),
         key_package: m

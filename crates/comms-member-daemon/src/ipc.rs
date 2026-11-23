@@ -173,6 +173,9 @@ pub enum Response {
         /// While the link is down: why the last redial or sign-in failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,
+        /// While the link is down: failed redials in a row.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        failures: u32,
     },
     /// The groups `JoinPending` just joined (hex ids; empty = nothing was pending).
     Joined {
@@ -224,11 +227,17 @@ fn parse_addr(hex_str: &str) -> Result<WalletAddress, String> {
     Ok(WalletAddress(arr))
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// Map one request onto the daemon. Never panics — every failure becomes an `Error` response.
 pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
-    // A dropped relay link is brought back before any request (the status probe included, so an
-    // idle app's relay chip drives the redial too). Backoff-gated and bounded inside the relay.
-    daemon.ensure_relay();
+    // A session the relay's background supervisor redialed gets its KeyPackage republished before
+    // the next group op. The status probe is answered from the current state and never waits.
+    if !matches!(req, Request::RelayStatus) {
+        daemon.ensure_relay();
+    }
     match req {
         Request::CreateGroup { name } => match daemon.create_group(name) {
             Ok(gid) => Response::GroupCreated {
@@ -528,6 +537,7 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
                 connected,
                 retry_in_secs: link.retry_in_secs,
                 last_error: link.last_error,
+                failures: link.failures,
             }
         }
         Request::JoinPending => match daemon.join_pending() {
