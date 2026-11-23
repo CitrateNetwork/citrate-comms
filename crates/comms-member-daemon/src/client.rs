@@ -29,7 +29,7 @@ pub const EXIT_ERROR: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 /// The daemon is unreachable, or rejected the bearer.
 pub const EXIT_DAEMON: i32 = 3;
-/// The daemon is up but its link to the relay is down (restart it to reconnect).
+/// The daemon is up but its link to the relay is down (it redials on its own, with backoff).
 pub const EXIT_RELAY_DOWN: i32 = 4;
 /// This member is not in the requested group (or in no group at all): it has not been invited yet.
 pub const EXIT_NOT_MEMBER: i32 = 5;
@@ -292,7 +292,7 @@ fn list_groups(c: &mut IpcClient) -> Result<Vec<GroupView>, Outcome> {
 
 fn relay_up(c: &mut IpcClient) -> Result<bool, Outcome> {
     match c.call(&json!({"op": "relayStatus"})) {
-        Ok(Response::RelayStatus { connected }) => Ok(connected),
+        Ok(Response::RelayStatus { connected, .. }) => Ok(connected),
         Ok(other) => Err(fail(EXIT_ERROR, format!("unexpected: {other:?}"))),
         Err(e) => Err(client_fail(e)),
     }

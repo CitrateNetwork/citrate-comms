@@ -275,7 +275,7 @@ fn relay_status_op_reports_connected_for_the_in_process_relay() {
     let mut d = MemberDaemon::new(EthWallet::generate(), "relay.test", 1000).expect("daemon up");
     assert!(d.relay_connected(), "in-process relay is always connected");
     match crate::ipc::handle_request(&mut d, crate::ipc::Request::RelayStatus) {
-        crate::ipc::Response::RelayStatus { connected } => assert!(connected),
+        crate::ipc::Response::RelayStatus { connected, .. } => assert!(connected),
         other => panic!("expected RelayStatus, got {other:?}"),
     }
 }
@@ -290,7 +290,7 @@ struct FlakySubmitRelay {
 }
 
 impl crate::relay::Relay for FlakySubmitRelay {
-    fn issue_challenge(&mut self, now: u64) -> String {
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String> {
         self.inner.issue_challenge(now)
     }
     fn authenticate(

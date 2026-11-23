@@ -780,7 +780,7 @@ struct ResendRelay {
 }
 
 impl Relay for ResendRelay {
-    fn issue_challenge(&mut self, now: u64) -> String {
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String> {
         self.inner.issue_challenge(now)
     }
     fn authenticate(
@@ -944,7 +944,7 @@ struct SeqResetRelay {
 }
 
 impl Relay for SeqResetRelay {
-    fn issue_challenge(&mut self, now: u64) -> String {
+    fn issue_challenge(&mut self, now: u64) -> Result<String, String> {
         self.inner.issue_challenge(now)
     }
     fn authenticate(
@@ -1099,4 +1099,326 @@ fn new_mail_numbered_below_the_mark_after_a_relay_reset_is_still_delivered() {
         await_body(&mut bob, gid, "after the reset"),
         "new mail under an old number is delivered, not dropped as a copy"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relay link resilience: liveness without challenges, keepalive, background redial + sign-in,
+// growing full-jitter backoff, status that never waits, a timed-out link never reused.
+// ---------------------------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+/// Short timings so the resilience tests run in about a second.
+fn fast() -> WsTiming {
+    WsTiming {
+        keepalive: Duration::from_secs(20),
+        reconnect_min: Duration::from_millis(20),
+        reconnect_max: Duration::from_millis(640),
+        connect_timeout: Duration::from_secs(1),
+        op_timeout: Duration::from_secs(1),
+        supervise_tick: Duration::from_millis(5),
+    }
+}
+
+fn ws_member_with(url: &str, w: EthWallet, timing: WsTiming) -> MemberDaemon {
+    let ws = WsRelay::connect_insecure_with(url, timing).expect("ws connect");
+    MemberDaemon::new_with_relay(w, Box::new(ws), "relay.test", wall_ms()).expect("daemon")
+}
+
+/// A relay on `bind` (e.g. `127.0.0.1:0`) for SIWE `domain` that can be killed: sending on the
+/// returned channel shuts its runtime down, which closes every socket it holds (what a relay
+/// restart looks like to a client).
+fn spawn_killable_relay(
+    trust_anchor: WalletAddress,
+    bind: &str,
+    domain: &str,
+) -> (std::net::SocketAddr, std::sync::mpsc::Sender<()>) {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (kill_tx, kill_rx) = std::sync::mpsc::channel::<()>();
+    let (bind, domain) = (bind.to_string(), domain.to_string());
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("server rt");
+        let addr = rt.block_on(async move {
+            let service = DeliveryService::new(&domain, trust_anchor, 0).expect("service");
+            let server = RelayServer::new(service);
+            let (addr, _handle) = server.bind(&bind).await.expect("bind");
+            addr
+        });
+        addr_tx.send(addr).expect("send addr");
+        let _ = kill_rx.recv();
+        rt.shutdown_background();
+    });
+    (addr_rx.recv().expect("relay bound"), kill_tx)
+}
+
+struct Status {
+    connected: bool,
+    retry: Option<u64>,
+    why: Option<String>,
+    failures: u32,
+}
+
+fn relay_status(d: &mut MemberDaemon) -> Status {
+    match crate::ipc::handle_request(d, crate::ipc::Request::RelayStatus) {
+        crate::ipc::Response::RelayStatus {
+            connected,
+            retry_in_secs,
+            last_error,
+            failures,
+        } => Status {
+            connected,
+            retry: retry_in_secs,
+            why: last_error,
+            failures,
+        },
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// Wait until `cond` holds (or give up after ~5 s).
+fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+// The owner's report: "the relays constantly degrade". The relay caps `Challenge` frames per
+// connection (CM2-B-B009, 32) and the status probe used to send one per call, so after ~29 polls of
+// the app's relay chip (every 5 s) the link read "degraded" on a healthy socket, and every later
+// sign-in nonce came back empty. Probing must cost the relay nothing.
+#[test]
+fn relay_status_probes_never_use_up_the_relays_challenges() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    for i in 0..64 {
+        assert!(relay_status(&mut owner).connected, "probe {i} reads the healthy link as down");
+    }
+    let nonce = owner.relay_mut().issue_challenge(0).expect("a nonce");
+    assert!(!nonce.is_empty(), "the probes used up the relay's challenges");
+    owner.create_group("after many probes").expect("relayed op still works");
+}
+
+// An idle link stays up: the client pings and the relay's pongs keep it counted alive, well past
+// the window in which a silent link is declared dead.
+#[test]
+fn an_idle_link_stays_alive_on_keepalive() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let timing = WsTiming {
+        keepalive: Duration::from_millis(100),
+        ..fast()
+    };
+    let owner = ws_member_with(&url, owner_w, timing);
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(owner.relay_connected(), "pongs keep an idle link alive");
+}
+
+// A relay restart: the link drops, the status says it is redialing, relayed ops fail at once, and
+// once the relay is back the daemon's background supervisor redials and signs in again by itself;
+// the next op republishes the KeyPackage and works, with no app restart.
+#[test]
+fn the_daemon_redials_and_signs_in_again_after_the_relay_restarts() {
+    let owner_w = EthWallet::generate();
+    let anchor = owner_w.address();
+    let (addr, kill) = spawn_killable_relay(anchor, "127.0.0.1:0", "relay.test");
+    let url = format!("ws://{addr}");
+    let mut owner = ws_member_with(&url, owner_w, fast());
+    owner.create_group("before").expect("create before the restart");
+    assert!(relay_status(&mut owner).connected);
+
+    kill.send(()).expect("kill relay");
+    assert!(eventually(|| !owner.relay_connected()), "a closed socket reads as down");
+    let st = relay_status(&mut owner);
+    assert!(!st.connected);
+    assert!(st.retry.is_some(), "a down link always says it is redialing");
+    let t = Instant::now();
+    assert!(owner.create_group("while down").is_err(), "relayed ops fail honestly while down");
+    assert!(t.elapsed() < Duration::from_millis(300), "and at once, never waiting on a redial");
+
+    let (_addr2, _kill2) = spawn_killable_relay(anchor, &addr.to_string(), "relay.test");
+    assert!(
+        eventually(|| relay_status(&mut owner).connected),
+        "the supervisor redials and signs in by itself"
+    );
+    owner
+        .create_group("after")
+        .expect("signed in again: a relayed op works after the restart");
+    let st = relay_status(&mut owner);
+    assert!(st.connected && st.failures == 0 && st.why.is_none(), "fully up again");
+}
+
+// Review P2-1: a relay that takes the socket but refuses the sign-in (a domain change, clock skew)
+// must make every client back off further and further, not redial and re-sign-in every second
+// forever. The backoff only starts again from its minimum once a session is fully up.
+#[test]
+fn a_relay_that_refuses_sign_in_is_backed_off_more_and_more() {
+    let owner_w = EthWallet::generate();
+    let anchor = owner_w.address();
+    let (addr, kill) = spawn_killable_relay(anchor, "127.0.0.1:0", "relay.test");
+    let url = format!("ws://{addr}");
+    let mut owner = ws_member_with(&url, owner_w, fast());
+    kill.send(()).expect("kill relay");
+    assert!(eventually(|| !owner.relay_connected()));
+    // Back on the same address, but under another SIWE domain: every sign-in is refused.
+    let (_a, _k) = spawn_killable_relay(anchor, &addr.to_string(), "elsewhere.test");
+
+    let window = Instant::now() + Duration::from_millis(2500);
+    let mut seen = Vec::new();
+    while Instant::now() < window {
+        let st = relay_status(&mut owner);
+        assert!(!st.connected, "a refused sign-in never reads as up");
+        seen.push(st.failures);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let st = relay_status(&mut owner);
+    assert!(
+        st.why.as_deref().is_some_and(|w| w.contains("sign-in")),
+        "the real cause is reported: {:?}",
+        st.why
+    );
+    assert!(seen.windows(2).all(|w| w[1] >= w[0]), "failures never reset while refused");
+    // Doubling from 20 ms (cap 640 ms) allows about a dozen tries in 2.5 s; a backoff that restarts
+    // at its minimum after every dial would try every ~15 ms, well over a hundred times.
+    assert!(st.failures >= 3, "it keeps trying: {}", st.failures);
+    assert!(st.failures <= 40, "the backoff grows: {} tries in 2.5 s", st.failures);
+}
+
+// Review P3-1: a redial that hangs (the relay's port takes the TCP connection and never answers)
+// runs in the background; `relayStatus` and relayed ops answer at once from the current state.
+#[test]
+fn relay_status_answers_at_once_while_a_redial_hangs() {
+    let owner_w = EthWallet::generate();
+    let anchor = owner_w.address();
+    let (addr, kill) = spawn_killable_relay(anchor, "127.0.0.1:0", "relay.test");
+    let timing = WsTiming {
+        connect_timeout: Duration::from_secs(3),
+        ..fast()
+    };
+    let mut owner = ws_member_with(&format!("ws://{addr}"), owner_w, timing);
+    kill.send(()).expect("kill relay");
+    assert!(eventually(|| !owner.relay_connected()));
+    // A black hole on the relay's address: accepts, holds, never speaks WebSocket.
+    let (up_tx, up_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async move {
+            let sock = tokio::net::TcpSocket::new_v4().expect("socket");
+            sock.set_reuseaddr(true).expect("reuseaddr");
+            sock.bind(addr).expect("bind black hole");
+            let l = sock.listen(16).expect("listen");
+            up_tx.send(()).expect("up");
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+    });
+    up_rx.recv().expect("black hole up");
+    for _ in 0..30 {
+        let t = Instant::now();
+        let st = relay_status(&mut owner);
+        assert!(t.elapsed() < Duration::from_millis(100), "status waited {:?}", t.elapsed());
+        assert!(!st.connected && st.retry.is_some());
+        let t = Instant::now();
+        assert!(owner.create_group("x").is_err());
+        assert!(t.elapsed() < Duration::from_millis(100), "an op waited {:?}", t.elapsed());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// A scripted relay: connection `n` opens with `Challenge{"c<n>-0"}`, answers every `Challenge`
+/// with `"c<n>-<k>"`, and refuses tracked delivery. On connection 1 the first requested challenge
+/// is answered late (after `late`), as a relay behind a stalled link would.
+fn spawn_late_reply_relay(late: Duration) -> String {
+    use comms_proto::canonical;
+    use comms_wire::frames::{ClientFrame, ServerFrame};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async move {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            addr_tx.send(l.local_addr().expect("addr")).expect("send");
+            let mut n = 0u32;
+            loop {
+                let Ok((tcp, _)) = l.accept().await else { return };
+                n += 1;
+                let conn = n;
+                tokio::spawn(async move {
+                    let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                    let (mut tx, mut rx) = ws.split();
+                    let send = |f: ServerFrame| Message::Binary(canonical::to_vec(&f).expect("enc"));
+                    let first = ServerFrame::Challenge { nonce: format!("c{conn}-0") };
+                    if tx.send(send(first)).await.is_err() {
+                        return;
+                    }
+                    let mut k = 0u32;
+                    while let Some(Ok(Message::Binary(b))) = rx.next().await {
+                        let reply = match canonical::from_slice::<ClientFrame>(&b) {
+                            Ok(ClientFrame::Challenge) => {
+                                k += 1;
+                                if conn == 1 && k == 1 {
+                                    tokio::time::sleep(late).await;
+                                }
+                                ServerFrame::Challenge { nonce: format!("c{conn}-{k}") }
+                            }
+                            _ => ServerFrame::Error { message: "unsupported".into() },
+                        };
+                        if tx.send(send(reply)).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+    });
+    format!("ws://{}", addr_rx.recv().expect("bound"))
+}
+
+// Review P3-3: an op that times out retires its link, so the answer that arrives late is never
+// handed to the next request as its reply (no request ids on the wire).
+#[test]
+fn a_late_reply_after_a_timeout_is_never_read_as_the_next_reply() {
+    let url = spawn_late_reply_relay(Duration::from_millis(600));
+    let timing = WsTiming {
+        op_timeout: Duration::from_millis(200),
+        ..fast()
+    };
+    let mut relay = WsRelay::connect_insecure_with(&url, timing).expect("connect");
+    let e = relay.issue_challenge(0).expect_err("the first answer is late");
+    assert!(e.contains("did not answer"), "{e}");
+    assert!(!relay.is_connected(), "the timed-out link is retired");
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut fresh = None;
+    while Instant::now() < end {
+        match relay.issue_challenge(0) {
+            Ok(n) => {
+                assert_ne!(n, "c1-1", "the late reply leaked into the next request");
+                assert!(n.starts_with("c2-"), "answered on a new link: {n}");
+                fresh = Some(n);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert!(fresh.is_some(), "the supervisor redialed");
+}
+
+// Review P2-2: full jitter. Every wait is in [0, ceiling], and the whole range is reachable.
+#[test]
+fn backoff_waits_are_full_jitter_under_the_ceiling() {
+    let c = Duration::from_millis(640);
+    for r in [0u64, 1, 639, 640, 641, u64::MAX, 123_456_789] {
+        assert!(jittered(c, r) <= c, "{r}");
+    }
+    assert_eq!(jittered(c, 0), Duration::ZERO);
+    assert_eq!(jittered(c, 640), c);
+    assert_eq!(jittered(Duration::ZERO, 99), Duration::ZERO);
 }
