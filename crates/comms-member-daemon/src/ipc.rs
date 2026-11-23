@@ -166,6 +166,13 @@ pub enum Response {
     /// relay is configured but the link is down, so relayed ops will fail until it reconnects.
     RelayStatus {
         connected: bool,
+        /// While the link is down: seconds until the daemon redials it (absent when up, or for
+        /// the in-process relay).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_in_secs: Option<u64>,
+        /// While the link is down: why the last redial or sign-in failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
     },
     /// The groups `JoinPending` just joined (hex ids; empty = nothing was pending).
     Joined {
@@ -219,6 +226,9 @@ fn parse_addr(hex_str: &str) -> Result<WalletAddress, String> {
 
 /// Map one request onto the daemon. Never panics — every failure becomes an `Error` response.
 pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
+    // A dropped relay link is brought back before any request (the status probe included, so an
+    // idle app's relay chip drives the redial too). Backoff-gated and bounded inside the relay.
+    daemon.ensure_relay();
     match req {
         Request::CreateGroup { name } => match daemon.create_group(name) {
             Ok(gid) => Response::GroupCreated {
@@ -507,9 +517,19 @@ pub fn handle_request(daemon: &mut MemberDaemon, req: Request) -> Response {
         }
         // Flag-A — a pure health query: never touches group/MLS state, never fails (a down link is a
         // valid answer, `connected: false`, not an error).
-        Request::RelayStatus => Response::RelayStatus {
-            connected: daemon.relay_connected(),
-        },
+        Request::RelayStatus => {
+            let connected = daemon.relay_connected();
+            let link = if connected {
+                Default::default()
+            } else {
+                daemon.relay_link_status()
+            };
+            Response::RelayStatus {
+                connected,
+                retry_in_secs: link.retry_in_secs,
+                last_error: link.last_error,
+            }
+        }
         Request::JoinPending => match daemon.join_pending() {
             Ok(gids) => Response::Joined {
                 groups: gids.into_iter().map(|g| hex::encode(g.0)).collect(),

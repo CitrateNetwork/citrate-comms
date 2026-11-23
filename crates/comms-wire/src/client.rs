@@ -16,7 +16,11 @@ use comms_proto::{
     RoleAssertion, WalletAddress,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::frames::{ClientFrame, ServerFrame};
@@ -33,6 +37,40 @@ fn install_tls_provider() {
     });
 }
 
+/// How often a connected client pings the relay. The ping keeps idle proxies and NATs from dropping
+/// a quiet socket, and its answer is how the client knows the link is still there.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+/// A link that has heard nothing (not even a pong) for this many keepalive intervals is dead.
+const KEEPALIVE_MISSES: u32 = 3;
+
+/// What the writer task sends: a protocol frame, or a keepalive ping.
+enum Outbound {
+    Frame(Box<ClientFrame>),
+    Ping,
+}
+
+/// The live state of one WebSocket link, shared by the client and its tasks.
+struct Link {
+    alive: AtomicBool,
+    started: Instant,
+    /// Milliseconds after `started` when anything last arrived from the relay.
+    last_rx_ms: AtomicU64,
+}
+
+impl Link {
+    fn touch(&self) {
+        let ms = self.started.elapsed().as_millis() as u64;
+        self.last_rx_ms.store(ms, Ordering::Relaxed);
+    }
+    fn silent_for(&self) -> Duration {
+        let now = self.started.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(self.last_rx_ms.load(Ordering::Relaxed)))
+    }
+    fn kill(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+}
+
 /// **E-5 WP-3.** The advisory notification push, decoded off its own channel.
 pub struct NotifyPush {
     pub group_id: GroupId,
@@ -45,7 +83,9 @@ pub struct NotifyPush {
 /// pings via [`RelayClient::next_notify`] (both are routed off the request/response
 /// channel, so a push can never be mistaken for an Ack).
 pub struct RelayClient {
-    out_tx: mpsc::UnboundedSender<ClientFrame>,
+    out_tx: mpsc::UnboundedSender<Outbound>,
+    link: Arc<Link>,
+    tasks: Vec<JoinHandle<()>>,
     resp_rx: Mutex<mpsc::UnboundedReceiver<ServerFrame>>,
     deliver_rx: Mutex<mpsc::UnboundedReceiver<(Option<u64>, Envelope)>>,
     /// Arrival numbers of tracked deliveries handed out and not yet acknowledged.
@@ -61,19 +101,23 @@ impl RelayClient {
     /// only `wss://` (TLS) or loopback `ws://` are allowed. For a trusted private network
     /// where you knowingly want plaintext, use [`RelayClient::connect_insecure`].
     pub async fn connect(url: &str) -> Result<(Self, String), WsError> {
-        Self::connect_with_policy(url, false).await
+        Self::connect_with_keepalive(url, false, KEEPALIVE_INTERVAL).await
     }
 
     /// Like [`connect`](Self::connect) but permits plaintext `ws://` to a non-loopback
     /// host (trusted private network / LAN airgap). Use deliberately — metadata and the
     /// SIWE handshake travel in the clear.
     pub async fn connect_insecure(url: &str) -> Result<(Self, String), WsError> {
-        Self::connect_with_policy(url, true).await
+        Self::connect_with_keepalive(url, true, KEEPALIVE_INTERVAL).await
     }
 
-    async fn connect_with_policy(
+    /// Connect with an explicit keepalive interval (`allow_insecure` as in
+    /// [`connect_insecure`](Self::connect_insecure)). The client pings every `keepalive` and
+    /// counts the link dead after [`KEEPALIVE_MISSES`] silent intervals.
+    pub async fn connect_with_keepalive(
         url: &str,
         allow_insecure: bool,
+        keepalive: Duration,
     ) -> Result<(Self, String), WsError> {
         // Install the rustls crypto provider ONCE before any TLS dial. rustls 0.23 removed the
         // automatic default provider, and with both `ring` and `aws-lc-rs` in the dependency tree it
@@ -88,22 +132,36 @@ impl RelayClient {
             .await
             .map_err(|e| WsError::Ws(e.to_string()))?;
         let (mut write, mut read) = ws.split();
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientFrame>();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
+        let link = Arc::new(Link {
+            alive: AtomicBool::new(true),
+            started: Instant::now(),
+            last_rx_ms: AtomicU64::new(0),
+        });
         let (resp_tx, resp_rx) = mpsc::unbounded_channel::<ServerFrame>();
         let (deliver_tx, deliver_rx) = mpsc::unbounded_channel::<(Option<u64>, Envelope)>();
         let (notify_tx, notify_rx) = mpsc::unbounded_channel::<NotifyPush>();
 
-        tokio::spawn(async move {
-            while let Some(frame) = out_rx.recv().await {
-                if let Ok(bytes) = canonical::to_vec(&frame) {
-                    if write.send(Message::Binary(bytes)).await.is_err() {
-                        break;
-                    }
+        let wlink = link.clone();
+        let writer = tokio::spawn(async move {
+            while let Some(out) = out_rx.recv().await {
+                let msg = match out {
+                    Outbound::Frame(frame) => match canonical::to_vec(&*frame) {
+                        Ok(bytes) => Message::Binary(bytes),
+                        Err(_) => continue,
+                    },
+                    Outbound::Ping => Message::Ping(Vec::new()),
+                };
+                if write.send(msg).await.is_err() {
+                    break;
                 }
             }
+            wlink.kill();
         });
-        tokio::spawn(async move {
+        let rlink = link.clone();
+        let reader = tokio::spawn(async move {
             while let Some(msg) = read.next().await {
+                rlink.touch();
                 match msg {
                     Ok(Message::Binary(b)) => {
                         if let Ok(frame) = canonical::from_slice::<ServerFrame>(b.as_ref()) {
@@ -137,10 +195,32 @@ impl RelayClient {
                     Ok(_) => {}
                 }
             }
+            rlink.kill();
+        });
+        // Keepalive: ping on a timer; a link silent for KEEPALIVE_MISSES intervals is dead (a
+        // half-open TCP socket otherwise looks alive forever).
+        let klink = link.clone();
+        let ktx = out_tx.clone();
+        let keeper = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(keepalive).await;
+                if !klink.alive.load(Ordering::Relaxed) {
+                    break;
+                }
+                if klink.silent_for() > keepalive * KEEPALIVE_MISSES {
+                    klink.kill();
+                    break;
+                }
+                if ktx.send(Outbound::Ping).is_err() {
+                    break;
+                }
+            }
         });
 
         let client = Self {
             out_tx,
+            link,
+            tasks: vec![writer, reader, keeper],
             resp_rx: Mutex::new(resp_rx),
             deliver_rx: Mutex::new(deliver_rx),
             unacked: Mutex::new(Vec::new()),
@@ -165,8 +245,31 @@ impl RelayClient {
         }
     }
 
+    /// Whether the link is up: the socket has not closed or errored, and the relay has answered
+    /// within the keepalive window. Cheap (no round trip, nothing sent), so a health probe may ask
+    /// it as often as it likes.
+    pub fn is_alive(&self) -> bool {
+        self.link.alive.load(Ordering::Relaxed)
+    }
+
+    /// Mark the link dead, so every later request fails at once with [`WsError::Closed`]. For a
+    /// caller that gave up waiting for an answer: the answer may still arrive, and a reused link
+    /// would hand it to the next request as that request's reply.
+    pub fn mark_dead(&self) {
+        self.link.kill();
+    }
+
+    fn send_frame(&self, frame: ClientFrame) -> Result<(), WsError> {
+        if !self.is_alive() {
+            return Err(WsError::Closed);
+        }
+        self.out_tx
+            .send(Outbound::Frame(Box::new(frame)))
+            .map_err(|_| WsError::Closed)
+    }
+
     async fn request(&self, frame: ClientFrame) -> Result<ServerFrame, WsError> {
-        self.out_tx.send(frame).map_err(|_| WsError::Closed)?;
+        self.send_frame(frame)?;
         self.next_response().await.ok_or(WsError::Closed)
     }
 
@@ -396,9 +499,7 @@ impl RelayClient {
     /// is tracked too. `Ok(false)` from a relay that predates it (the session stays on
     /// untracked delivery).
     pub async fn enable_delivery_acks(&self) -> Result<bool, WsError> {
-        self.out_tx
-            .send(ClientFrame::EnableDeliveryAcks)
-            .map_err(|_| WsError::Closed)?;
+        self.send_frame(ClientFrame::EnableDeliveryAcks)?;
         match self.next_response().await {
             Some(ServerFrame::Ack { .. }) => Ok(true),
             // A relay that predates tracked delivery cannot decode the frame.
@@ -415,11 +516,9 @@ impl RelayClient {
         if arrivals.is_empty() {
             return Ok(());
         }
-        self.out_tx
-            .send(ClientFrame::AckDelivered {
-                arrivals: arrivals.clone(),
-            })
-            .map_err(|_| WsError::Closed)?;
+        self.send_frame(ClientFrame::AckDelivered {
+            arrivals: arrivals.clone(),
+        })?;
         match self.next_response().await {
             Some(ServerFrame::Ack { .. }) => Ok(()),
             Some(ServerFrame::Error { message }) => {
@@ -436,6 +535,15 @@ impl RelayClient {
     /// Advisory only — never use it to order or gate envelope processing.
     pub async fn next_notify(&self) -> Option<NotifyPush> {
         self.notify_rx.lock().await.recv().await
+    }
+}
+
+impl Drop for RelayClient {
+    fn drop(&mut self) {
+        self.link.kill();
+        for t in &self.tasks {
+            t.abort();
+        }
     }
 }
 

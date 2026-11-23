@@ -1100,3 +1100,119 @@ fn new_mail_numbered_below_the_mark_after_a_relay_reset_is_still_delivered() {
         "new mail under an old number is delivered, not dropped as a copy"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Relay link resilience: liveness without challenges, keepalive, redial + sign-in again.
+// ---------------------------------------------------------------------------------------------
+
+/// A relay on `bind` (e.g. `127.0.0.1:0`) that can be killed: sending on the returned channel shuts
+/// its runtime down, which closes every socket it holds (what a relay restart looks like to a client).
+fn spawn_killable_relay(
+    trust_anchor: WalletAddress,
+    bind: &str,
+) -> (std::net::SocketAddr, std::sync::mpsc::Sender<()>) {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (kill_tx, kill_rx) = std::sync::mpsc::channel::<()>();
+    let bind = bind.to_string();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("server rt");
+        let addr = rt.block_on(async move {
+            let service = DeliveryService::new("relay.test", trust_anchor, 0).expect("service");
+            let server = RelayServer::new(service);
+            let (addr, _handle) = server.bind(&bind).await.expect("bind");
+            addr
+        });
+        addr_tx.send(addr).expect("send addr");
+        let _ = kill_rx.recv();
+        rt.shutdown_background();
+    });
+    (addr_rx.recv().expect("relay bound"), kill_tx)
+}
+
+fn relay_status(d: &mut MemberDaemon) -> (bool, Option<u64>, Option<String>) {
+    match crate::ipc::handle_request(d, crate::ipc::Request::RelayStatus) {
+        crate::ipc::Response::RelayStatus {
+            connected,
+            retry_in_secs,
+            last_error,
+        } => (connected, retry_in_secs, last_error),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// Wait until `cond` holds (or give up after ~5 s).
+fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..100 {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+// The owner's report: "the relays constantly degrade". The relay caps `Challenge` frames per
+// connection (CM2-B-B009, 32) and the status probe used to send one per call, so after ~31 polls of
+// the app's relay chip (every 5 s) the link read "degraded" on a healthy socket, and every later
+// sign-in nonce came back empty. Probing must cost the relay nothing.
+#[test]
+fn relay_status_probes_never_use_up_the_relays_challenges() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let mut owner = ws_member(&url, owner_w);
+    for i in 0..64 {
+        assert!(relay_status(&mut owner).0, "probe {i} reads the healthy link as down");
+    }
+    let nonce = owner.relay_mut().issue_challenge(0);
+    assert!(!nonce.is_empty(), "the probes used up the relay's challenges");
+    owner.create_group("after many probes").expect("relayed op still works");
+}
+
+// An idle link stays up: the client pings and the relay's pongs keep it counted alive, well past
+// the window in which a silent link is declared dead.
+#[test]
+fn an_idle_link_stays_alive_on_keepalive() {
+    let owner_w = EthWallet::generate();
+    let url = spawn_ws_relay(owner_w.address());
+    let ws = WsRelay::connect_insecure_with_keepalive(&url, std::time::Duration::from_millis(100))
+        .expect("ws");
+    let owner =
+        MemberDaemon::new_with_relay(owner_w, Box::new(ws), "relay.test", wall_ms()).expect("d");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert!(owner.relay_connected(), "pongs keep an idle link alive");
+}
+
+// A relay restart: the link drops, the status says so with the reason and the next redial, and once
+// the relay is back the daemon redials, signs in again and relayed ops work, with no app restart.
+#[test]
+fn the_daemon_redials_and_signs_in_again_after_the_relay_restarts() {
+    let owner_w = EthWallet::generate();
+    let anchor = owner_w.address();
+    let (addr, kill) = spawn_killable_relay(anchor, "127.0.0.1:0");
+    let url = format!("ws://{addr}");
+    let mut owner = ws_member(&url, owner_w);
+    owner.create_group("before").expect("create before the restart");
+    assert!(relay_status(&mut owner).0);
+
+    kill.send(()).expect("kill relay");
+    assert!(
+        eventually(|| !owner.relay_connected()),
+        "a closed socket reads as down"
+    );
+    // Down, and nothing to dial: the status names the failure and when it tries again.
+    let (connected, retry, why) = relay_status(&mut owner);
+    assert!(!connected);
+    assert!(why.is_some(), "the reason the redial failed is reported");
+    assert!(retry.is_some(), "the next redial is scheduled");
+    assert!(owner.create_group("while down").is_err(), "relayed ops fail honestly while down");
+
+    // The relay comes back on the same address; the daemon redials once its backoff is due.
+    let (_addr2, _kill2) = spawn_killable_relay(anchor, &addr.to_string());
+    assert!(
+        eventually(|| relay_status(&mut owner).0),
+        "the daemon redials and the link is back"
+    );
+    owner
+        .create_group("after")
+        .expect("signed in again: a relayed op works after the restart");
+}

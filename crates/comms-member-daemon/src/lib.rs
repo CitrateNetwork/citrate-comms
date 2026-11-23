@@ -32,7 +32,7 @@ pub mod persist;
 pub mod relay;
 pub mod server;
 
-use relay::{InProcessRelay, Relay};
+use relay::{InProcessRelay, LinkStatus, Reconnect, Relay};
 
 /// A member-daemon error. `Display` is safe to surface over the IPC.
 #[derive(Debug, thiserror::Error)]
@@ -1431,11 +1431,66 @@ impl MemberDaemon {
     pub fn relay_connected(&self) -> bool {
         self.relay.is_connected()
     }
+
+    /// The relay link's state while it is down: when it next redials and why the last try failed.
+    pub fn relay_link_status(&self) -> LinkStatus {
+        self.relay.link_status()
+    }
+
+    /// Bring a dropped relay link back before an op: redial (on the relay's backoff schedule), then
+    /// sign in again and republish this member's KeyPackage, exactly as at startup. The relay sends
+    /// any mail still unacknowledged again at sign-in, so nothing delivered while the link was down
+    /// is lost. A no-op while the link is up, and for the in-process relay. Never fails: a link that
+    /// stays down is reported by `relayStatus`, and relayed ops fail with the relay's own error.
+    pub fn ensure_relay(&mut self) {
+        match self.relay.reconnect() {
+            Reconnect::Up | Reconnect::Waiting => {}
+            Reconnect::Failed(e) => eprintln!("comms-member-daemon: relay reconnect failed: {e}"),
+            Reconnect::Reconnected => {
+                // The relay checks the SIWE times against its own clock, so sign in at the wall
+                // clock (the daemon's counter only advances per op).
+                self.now = self.now.max(wall_ms()) + 1;
+                let signed_in = login(self.relay.as_mut(), &self.wallet, &self.domain, self.now)
+                    .and_then(|()| {
+                        self.now += 1;
+                        publish_kp(
+                            self.relay.as_mut(),
+                            &self.wallet,
+                            &self.mls,
+                            &self.domain,
+                            self.now,
+                        )
+                    });
+                self.now += 1;
+                match signed_in {
+                    Ok(()) => {
+                        if let Err(e) = self.persist_state() {
+                            eprintln!("comms-member-daemon: saving state after reconnect: {e}");
+                        }
+                        eprintln!("comms-member-daemon: relay reconnected");
+                    }
+                    Err(e) => {
+                        let why = format!("sign-in after reconnect failed: {e}");
+                        eprintln!("comms-member-daemon: relay {why}");
+                        self.relay.mark_down(&why);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Relay handshake helpers (mirrors comms-client::backend's login/publish_kp/submit/onboard).
 // ---------------------------------------------------------------------------
+
+/// Wall-clock milliseconds since the Unix epoch (0 if the clock is before it).
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// SIWE login: the wallet signs the relay's challenge nonce.
 pub fn login(
