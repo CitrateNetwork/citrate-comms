@@ -182,8 +182,7 @@ fn truncated_persisted_keystore_fails_closed() {
 #[ignore = "fixture generator; run manually on the old OpenMLS release"]
 fn write_fixture() {
     let out = std::env::var("COMMS_MLS_FIXTURE_OUT").expect("set COMMS_MLS_FIXTURE_OUT");
-    let writer =
-        std::env::var("COMMS_MLS_FIXTURE_WRITER").expect("set COMMS_MLS_FIXTURE_WRITER");
+    let writer = std::env::var("COMMS_MLS_FIXTURE_WRITER").expect("set COMMS_MLS_FIXTURE_WRITER");
 
     let alice = MlsMember::new(ALICE).unwrap();
     let bob = MlsMember::new(BOB).unwrap();

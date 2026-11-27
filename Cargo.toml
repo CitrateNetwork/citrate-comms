@@ -52,12 +52,18 @@ sha2 = "0.10"
 sha3 = "0.10"
 blake3 = "1.5"
 getrandom = "0.2"
-# E2E group messaging. 0.8 / 0.5 because the 0.6 / 0.3 line pins hpke-rs 0.2.0,
-# which carries four advisories including RUSTSEC-2026-0071 (9.3, nonce reuse in
-# HPKE context) — the primitive MLS uses to seal a group secret to a joiner.
-openmls = "0.8"
-openmls_rust_crypto = "0.5"
-openmls_traits = "0.5"
+# E2E group messaging. 0.9 / 0.6 (L9-WP23, owner decision 2026-11-27): the 0.8 / 0.5
+# line pinned hpke-rs 0.6.1 and libcrux 0.0.x releases under RUSTSEC-2026-0207,
+# -0208 and -0212 (linked) and -0124, -0209, -0211 (lockfile only); hpke-rs 0.7 moves
+# past all six. libcrux-kem 0.0.9 (RUSTSEC-2026-0330/-0331, fixed in 0.0.10) stays in
+# the lockfile via hpke-rs-libcrux 0.7, which this build does not compile; it clears
+# with openmls_rust_crypto 0.7 / hpke-rs 0.8 (openmls 0.10). (Earlier, 0.6 / 0.3
+# pinned hpke-rs 0.2.0 and RUSTSEC-2026-0071, nonce reuse in HPKE context.) The
+# ciphersuite is unchanged; persisted 0.8.x keystores still load (see
+# crates/comms-core/tests/mls_keystore_compat.rs).
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_traits = "0.6"
 # storage
 rocksdb = "0.22"
 # async / transport
