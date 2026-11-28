@@ -806,9 +806,10 @@ fn content_kind(c: &ProcessedMessageContent) -> &'static str {
         ProcessedMessageContent::StagedCommitMessage(_) => "StagedCommit",
         // openmls 0.9 returns these where 0.8 returned an error (our own Commit
         // echoed back while it is still pending; our own PrivateMessage echoed
-        // back, which cannot be decrypted and carries an unauthenticated sender).
-        // Every caller rejects any kind it did not ask for, so both stay errors,
-        // as they were on 0.8 (L9-WP23).
+        // back, which cannot be decrypted and carries an unauthenticated sender:
+        // openmls decides "own" from the sender leaf index alone, which any member
+        // can set). Every caller rejects any kind it did not ask for, so both stay
+        // errors, as they were on 0.8; never turn them into a silent skip (L9-WP23).
         ProcessedMessageContent::OwnPendingCommit => "OwnPendingCommit",
         ProcessedMessageContent::OwnPrivateMessage => "OwnPrivateMessage",
     }
