@@ -3,24 +3,29 @@
 //! The member daemon persists `MlsMember::snapshot_storage()` (OpenMLS's own
 //! serialized storage entities) and rehydrates it with `MlsMember::restore` +
 //! `load_group` after a restart. An OpenMLS upgrade that changes that storage format
-//! would strand every existing group. The committed fixture below was written by an
-//! OLDER OpenMLS release (see `FIXTURE_WRITER`); these tests load it with the
-//! release currently in `Cargo.lock` and prove the groups are still fully usable:
-//! a message in flight across the upgrade decrypts, both sides keep talking, a
-//! membership change commits and is merged, and replays / corrupt blobs fail closed.
+//! would strand every existing group. The committed fixtures below were written by
+//! OLDER OpenMLS releases (see `FIXTURES`); these tests load each with the release
+//! currently in `Cargo.lock` and prove the groups are still fully usable: a message
+//! in flight across the upgrade decrypts, both sides keep talking, a membership
+//! change commits and is merged, and replays / corrupt blobs fail closed.
 //!
-//! Regenerating the fixture is a deliberate act (it must be done on the OLD release,
-//! before a bump): `COMMS_MLS_FIXTURE_OUT=<path> cargo test -p comms-core --test
-//! mls_keystore_compat -- --ignored write_fixture`.
+//! Adding a fixture is a deliberate act (it must be done on the OLD release, before
+//! a bump): `COMMS_MLS_FIXTURE_WRITER="openmls X.Y.Z" COMMS_MLS_FIXTURE_OUT=<path>
+//! cargo test -p comms-core --test mls_keystore_compat -- --ignored write_fixture`,
+//! then add the file to `FIXTURES`. Fixtures are never regenerated or removed: each
+//! one is a group some installed release may still hold.
 #![cfg(feature = "mls")]
 
 use comms_core::mls::{MlsError, MlsMember};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The OpenMLS release that wrote the committed fixture.
-const FIXTURE_WRITER: &str = "openmls 0.8.1";
-const FIXTURE_FILE: &str = "mls_keystore_openmls_0_8_1.cbor";
+/// Every committed fixture: (the OpenMLS release that wrote it, its file).
+/// 0.8.2 is the release in use when the openmls 0.9 upgrade (L9-WP23) landed.
+const FIXTURES: &[(&str, &str)] = &[
+    ("openmls 0.8.1", "mls_keystore_openmls_0_8_1.cbor"),
+    ("openmls 0.8.2", "mls_keystore_openmls_0_8_2.cbor"),
+];
 
 const ALICE: &[u8] = b"alice-identity";
 const BOB: &[u8] = b"bob-identity";
@@ -40,15 +45,15 @@ struct Fixture {
     in_flight: Vec<u8>,
 }
 
-fn fixture_path() -> PathBuf {
+fn fixture_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join(FIXTURE_FILE)
+        .join(file)
 }
 
-fn load_fixture() -> Fixture {
-    let path = fixture_path();
+fn load_fixture(writer: &str, file: &str) -> Fixture {
+    let path = fixture_path(file);
     let bytes = std::fs::read(&path).unwrap_or_default();
     assert!(
         !bytes.is_empty(),
@@ -56,23 +61,29 @@ fn load_fixture() -> Fixture {
         path.display()
     );
     let fx: Fixture = ciborium::from_reader(bytes.as_slice()).expect("fixture decodes");
-    assert_eq!(fx.writer, FIXTURE_WRITER, "fixture writer label");
+    assert_eq!(fx.writer, writer, "fixture writer label");
     fx
 }
 
-fn restore(identity: &[u8], sig: &[u8], snapshot: &[u8]) -> MlsMember {
+fn restore(writer: &str, identity: &[u8], sig: &[u8], snapshot: &[u8]) -> MlsMember {
     match MlsMember::restore(identity, sig, snapshot) {
         Ok(m) => m,
-        Err(e) => panic!("restore of a keystore persisted by {FIXTURE_WRITER} failed: {e:?}"),
+        Err(e) => panic!("restore of a keystore persisted by {writer} failed: {e:?}"),
     }
 }
 
 #[test]
 fn keystore_persisted_by_older_openmls_reloads_and_stays_usable() {
-    let fx = load_fixture();
+    for (writer, file) in FIXTURES {
+        reloads_and_stays_usable(writer, file);
+    }
+}
 
-    let alice = restore(ALICE, &fx.alice_sig, &fx.alice_snapshot);
-    let bob = restore(BOB, &fx.bob_sig, &fx.bob_snapshot);
+fn reloads_and_stays_usable(writer: &str, file: &str) {
+    let fx = load_fixture(writer, file);
+
+    let alice = restore(writer, ALICE, &fx.alice_sig, &fx.alice_snapshot);
+    let bob = restore(writer, BOB, &fx.bob_sig, &fx.bob_snapshot);
     let mut alice_g = alice.load_group(&fx.group_id).expect("alice reloads group");
     let mut bob_g = bob.load_group(&fx.group_id).expect("bob reloads group");
     assert_eq!(alice_g.group_id(), fx.group_id);
@@ -140,32 +151,38 @@ fn keystore_persisted_by_older_openmls_reloads_and_stays_usable() {
 
 #[test]
 fn persisted_keystore_cannot_be_restored_under_another_members_signer() {
-    let fx = load_fixture();
-    // Bob's keystore does not hold Alice's signer: fail closed, never a half-member.
-    match MlsMember::restore(ALICE, &fx.alice_sig, &fx.bob_snapshot) {
-        Err(MlsError::Crypto(_)) => {}
-        Ok(_) => panic!("a foreign keystore must not restore"),
-        Err(other) => panic!("expected Crypto error, got {other:?}"),
+    for (writer, file) in FIXTURES {
+        let fx = load_fixture(writer, file);
+        // Bob's keystore does not hold Alice's signer: fail closed, never a half-member.
+        match MlsMember::restore(ALICE, &fx.alice_sig, &fx.bob_snapshot) {
+            Err(MlsError::Crypto(_)) => {}
+            Ok(_) => panic!("{writer}: a foreign keystore must not restore"),
+            Err(other) => panic!("{writer}: expected Crypto error, got {other:?}"),
+        }
     }
 }
 
 #[test]
 fn truncated_persisted_keystore_fails_closed() {
-    let fx = load_fixture();
-    let cut = &fx.alice_snapshot[..fx.alice_snapshot.len() / 2];
-    match MlsMember::restore(ALICE, &fx.alice_sig, cut) {
-        Err(MlsError::Codec(_)) => {}
-        Ok(_) => panic!("a truncated keystore must not restore"),
-        Err(other) => panic!("expected Codec error, got {other:?}"),
+    for (writer, file) in FIXTURES {
+        let fx = load_fixture(writer, file);
+        let cut = &fx.alice_snapshot[..fx.alice_snapshot.len() / 2];
+        match MlsMember::restore(ALICE, &fx.alice_sig, cut) {
+            Err(MlsError::Codec(_)) => {}
+            Ok(_) => panic!("{writer}: a truncated keystore must not restore"),
+            Err(other) => panic!("{writer}: expected Codec error, got {other:?}"),
+        }
     }
 }
 
-/// Writes the fixture. Run ONLY on the release named in `FIXTURE_WRITER`, before a
-/// bump; writes solely to the explicit `COMMS_MLS_FIXTURE_OUT` path.
+/// Writes a fixture. Run ONLY on the release named in `COMMS_MLS_FIXTURE_WRITER`
+/// (the one in Cargo.lock), before a bump; writes solely to the explicit
+/// `COMMS_MLS_FIXTURE_OUT` path.
 #[test]
 #[ignore = "fixture generator; run manually on the old OpenMLS release"]
 fn write_fixture() {
     let out = std::env::var("COMMS_MLS_FIXTURE_OUT").expect("set COMMS_MLS_FIXTURE_OUT");
+    let writer = std::env::var("COMMS_MLS_FIXTURE_WRITER").expect("set COMMS_MLS_FIXTURE_WRITER");
 
     let alice = MlsMember::new(ALICE).unwrap();
     let bob = MlsMember::new(BOB).unwrap();
@@ -185,7 +202,7 @@ fn write_fixture() {
     let alice_snapshot = alice.snapshot_storage().unwrap();
 
     let fx = Fixture {
-        writer: FIXTURE_WRITER.into(),
+        writer,
         group_id: alice_g.group_id(),
         epoch: alice_g.epoch(),
         alice_sig: alice.sig_pubkey(),

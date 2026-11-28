@@ -32,8 +32,10 @@ use tls_codec::{Deserialize as _, Serialize as _};
 
 /// The live transport ciphersuite: X25519 KEM · AES-128-GCM · SHA-256 · Ed25519.
 /// Strongest standard MLS suite over the chain's X25519/Ed25519 curves — fully
-/// **classical**. There is NO post-quantum protection of message content today:
-/// no ML-KEM/Kyber is present in the build. A future ratified X25519+ML-KEM-768
+/// **classical**. There is NO post-quantum protection of message content today.
+/// Since openmls 0.9 (L9-WP23) PQ primitives (ml-kem, x-wing, ml-dsa) are linked
+/// through openmls_rust_crypto, but no PQ ciphersuite is selected or negotiated:
+/// the transport stays classical. A future ratified X25519+ML-KEM-768
 /// hybrid MLS suite is roadmap-only (the envelope reserves a `ciphersuite_id` so
 /// groups can migrate epoch-by-epoch when one exists). Do NOT describe the live
 /// transport as post-quantum.
@@ -295,7 +297,8 @@ impl MlsMember {
         let join_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
-        // The exact openmls 0.8.1 external-commit builder sequence (see the crate KAT
+        // The openmls external-commit builder sequence (0.8.1, unchanged in 0.9.2: the
+        // same credential goes to build_group and leaf_node_parameters, as #2149 requires) (see the crate KAT
         // `group/tests_and_kats/tests/external_commit_builder.rs`): build_group →
         // load_psks → build → finalize. The ratchet tree comes from the GroupInfo
         // extensions, so `with_ratchet_tree` is not needed.
@@ -801,6 +804,14 @@ fn content_kind(c: &ProcessedMessageContent) -> &'static str {
         ProcessedMessageContent::ProposalMessage(_) => "Proposal",
         ProcessedMessageContent::ExternalJoinProposalMessage(_) => "ExternalJoinProposal",
         ProcessedMessageContent::StagedCommitMessage(_) => "StagedCommit",
+        // openmls 0.9 returns these where 0.8 returned an error (our own Commit
+        // echoed back while it is still pending; our own PrivateMessage echoed
+        // back, which cannot be decrypted and carries an unauthenticated sender:
+        // openmls decides "own" from the sender leaf index alone, which any member
+        // can set). Every caller rejects any kind it did not ask for, so both stay
+        // errors, as they were on 0.8; never turn them into a silent skip (L9-WP23).
+        ProcessedMessageContent::OwnPendingCommit => "OwnPendingCommit",
+        ProcessedMessageContent::OwnPrivateMessage => "OwnPrivateMessage",
     }
 }
 
@@ -1214,5 +1225,63 @@ mod tests {
             Ok(_) => panic!("a non-GroupInfo blob must not yield an external-commit join"),
             Err(other) => panic!("expected Group/Codec error, got {other:?}"),
         }
+    }
+
+    // ── L9-WP23: openmls 0.9 own-message variants stay errors ──
+    //
+    // openmls 0.9 returns OwnPrivateMessage / OwnPendingCommit where 0.8 errored.
+    // OwnPrivateMessage carries an unauthenticated sender claim, so receive() must
+    // never turn it into a ReceivedMessage, and process_commit() must not accept
+    // our own commit echoed back.
+
+    #[test]
+    fn own_application_message_echo_is_rejected_not_received() {
+        let alice = MlsMember::new(b"alice").unwrap();
+        let bob = MlsMember::new(b"bob").unwrap();
+        let mut alice_g = alice.create_group().unwrap();
+        let add = alice_g
+            .add(&alice, &bob.fresh_key_package().unwrap())
+            .unwrap();
+        let _bob_g = bob.join(&add.welcome, &add.ratchet_tree).unwrap();
+        let ct = alice_g.send(&alice, b"to the relay and back").unwrap();
+        assert!(
+            alice_g.receive(&alice, &ct).is_err(),
+            "our own echoed message must not be accepted as received"
+        );
+        // The group is still usable afterwards.
+        let ct = alice_g.send(&alice, b"still sending").unwrap();
+        assert!(!ct.is_empty());
+    }
+
+    #[test]
+    fn own_commit_echo_is_rejected_by_process_commit() {
+        let alice = MlsMember::new(b"alice").unwrap();
+        let bob = MlsMember::new(b"bob").unwrap();
+        let carol = MlsMember::new(b"carol").unwrap();
+        let mut alice_g = alice.create_group().unwrap();
+        let add = alice_g
+            .add(&alice, &bob.fresh_key_package().unwrap())
+            .unwrap();
+        let mut bob_g = bob.join(&add.welcome, &add.ratchet_tree).unwrap();
+        let add2 = alice_g
+            .add(&alice, &carol.fresh_key_package().unwrap())
+            .unwrap();
+        let epoch = alice_g.epoch();
+        assert!(
+            alice_g.process_commit(&alice, &add2.commit).is_err(),
+            "our own commit echoed back must not be processed again"
+        );
+        assert_eq!(
+            alice_g.epoch(),
+            epoch,
+            "a rejected echo must not move the epoch"
+        );
+        // Bob merges it normally and the two still agree.
+        bob_g.process_commit(&bob, &add2.commit).unwrap();
+        let ct = alice_g.send(&alice, b"after the echo").unwrap();
+        assert_eq!(
+            bob_g.receive(&bob, &ct).unwrap().plaintext,
+            b"after the echo"
+        );
     }
 }
